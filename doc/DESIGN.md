@@ -22,6 +22,26 @@ A Rust implementation of a minimal init system that:
 - Generators
 - Separate "jobs" queue (state shown inline on units)
 
+## Directory Structure
+
+sysd uses `/etc/sysd/` with symlinks to systemd files for compatibility:
+
+```
+/etc/sysd/
+├── targets/
+│   ├── default.target → /usr/lib/systemd/system/graphical.target
+│   ├── graphical.target → /usr/lib/systemd/system/graphical.target
+│   ├── graphical.target.wants → /etc/systemd/system/graphical.target.wants/
+│   ├── multi-user.target → /usr/lib/systemd/system/multi-user.target
+│   └── multi-user.target.wants → /etc/systemd/system/multi-user.target.wants/
+└── system/                    # future: sysd-native service overrides
+```
+
+This allows:
+- Reading existing systemd unit files without migration
+- Admin can replace symlinks with custom files to override
+- Gradual migration from systemd to sysd-native configs
+
 ## CLI Interface
 
 ```
