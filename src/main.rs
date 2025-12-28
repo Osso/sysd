@@ -59,6 +59,9 @@ enum Command {
         #[arg(long, short = 'n')]
         dry_run: bool,
     },
+
+    /// Reload unit files from disk (like systemctl daemon-reload)
+    ReloadUnitFiles,
 }
 
 #[tokio::main]
@@ -94,6 +97,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Boot { dry_run } => {
             commands::boot(dry_run).await?;
+        }
+        Command::ReloadUnitFiles => {
+            commands::reload_unit_files().await?;
         }
     }
 
