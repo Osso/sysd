@@ -1,6 +1,6 @@
 //! Service manager
 //!
-//! Loads, starts, stops, and monitors services.
+//! Loads, starts, stops, and monitors services and targets.
 
 mod deps;
 mod process;
@@ -14,15 +14,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::process::Child;
 
-use crate::units::{self, Service};
+use crate::units::{self, Service, Unit};
 
-/// Service manager that tracks and controls services
+/// Service manager that tracks and controls units (services and targets)
 pub struct Manager {
-    /// Loaded service definitions
-    services: HashMap<String, Service>,
-    /// Runtime state for each service
+    /// Loaded unit definitions (services and targets)
+    units: HashMap<String, Unit>,
+    /// Runtime state for each unit
     states: HashMap<String, ServiceState>,
-    /// Running child processes
+    /// Running child processes (only for services)
     processes: HashMap<String, Child>,
     /// Unit search paths
     unit_paths: Vec<PathBuf>,
@@ -32,7 +32,7 @@ impl Manager {
     /// Create a new service manager
     pub fn new() -> Self {
         Self {
-            services: HashMap::new(),
+            units: HashMap::new(),
             states: HashMap::new(),
             processes: HashMap::new(),
             unit_paths: vec![
@@ -42,37 +42,38 @@ impl Manager {
         }
     }
 
-    /// Load a service by name
+    /// Load a unit (service or target) by name
     pub async fn load(&mut self, name: &str) -> Result<(), ManagerError> {
-        // Add .service suffix if not present
-        let name = if name.ends_with(".service") {
-            name.to_string()
-        } else {
-            format!("{}.service", name)
-        };
+        // Normalize the name
+        let name = self.normalize_name(name);
+
+        // Already loaded?
+        if self.units.contains_key(&name) {
+            return Ok(());
+        }
 
         // Find the unit file
         let path = self.find_unit(&name)?;
 
         // Parse it
-        let service = units::load_service(&path).await
+        let unit = units::load_unit(&path).await
             .map_err(|e| ManagerError::Parse(e.to_string()))?;
 
         // Initialize state
         self.states.insert(name.clone(), ServiceState::new());
-        self.services.insert(name, service);
+        self.units.insert(name, unit);
 
         Ok(())
     }
 
-    /// Load a service from a specific path
+    /// Load a unit from a specific path
     pub async fn load_from_path(&mut self, path: &std::path::Path) -> Result<(), ManagerError> {
-        let service = units::load_service(path).await
+        let unit = units::load_unit(path).await
             .map_err(|e| ManagerError::Parse(e.to_string()))?;
 
-        let name = service.name.clone();
+        let name = unit.name().to_string();
         self.states.insert(name.clone(), ServiceState::new());
-        self.services.insert(name, service);
+        self.units.insert(name, unit);
 
         Ok(())
     }
@@ -84,6 +85,14 @@ impl Manager {
             if path.exists() {
                 return Ok(path);
             }
+            // Also follow symlinks
+            if path.is_symlink() {
+                if let Ok(target) = std::fs::read_link(&path) {
+                    if target.exists() {
+                        return Ok(path);
+                    }
+                }
+            }
         }
         Err(ManagerError::NotFound(name.to_string()))
     }
@@ -94,42 +103,49 @@ impl Manager {
         self.start_single(&name).await
     }
 
-    /// Start a service with all its dependencies
+    /// Start a unit with all its dependencies
     pub async fn start_with_deps(&mut self, name: &str) -> Result<Vec<String>, ManagerError> {
         let name = self.normalize_name(name);
 
-        // Load the target service and discover all dependencies
+        // Load the target unit and discover all dependencies
         let order = self.resolve_start_order(&name).await?;
 
         log::info!("Start order for {}: {:?}", name, order);
 
-        // Start services in order
+        // Start units in order
         let mut started = Vec::new();
-        for svc_name in &order {
+        for unit_name in &order {
             // Skip if already running
-            if let Some(state) = self.states.get(svc_name) {
+            if let Some(state) = self.states.get(unit_name) {
                 if state.is_active() {
-                    log::debug!("{} already running, skipping", svc_name);
+                    log::debug!("{} already running, skipping", unit_name);
                     continue;
                 }
             }
 
-            match self.start_single(svc_name).await {
+            match self.start_single(unit_name).await {
                 Ok(()) => {
-                    started.push(svc_name.clone());
+                    started.push(unit_name.clone());
+                }
+                Err(ManagerError::IsTarget(_)) => {
+                    // Targets don't need to be started, just mark as active
+                    if let Some(state) = self.states.get_mut(unit_name) {
+                        state.set_running(0);
+                    }
+                    log::debug!("Target {} reached", unit_name);
                 }
                 Err(e) => {
                     // Check if this is a hard dependency (Requires)
-                    let is_required = self.services.get(&name)
-                        .map(|s| s.unit.requires.contains(svc_name))
+                    let is_required = self.units.get(&name)
+                        .map(|u| u.unit_section().requires.contains(unit_name))
                         .unwrap_or(false);
 
                     if is_required {
-                        log::error!("Required dependency {} failed: {}", svc_name, e);
+                        log::error!("Required dependency {} failed: {}", unit_name, e);
                         return Err(e);
                     } else {
                         // Soft dependency (Wants) - log and continue
-                        log::warn!("Optional dependency {} failed: {}", svc_name, e);
+                        log::warn!("Optional dependency {} failed: {}", unit_name, e);
                     }
                 }
             }
@@ -138,10 +154,10 @@ impl Manager {
         Ok(started)
     }
 
-    /// Resolve start order for a service and its dependencies
+    /// Resolve start order for a unit and its dependencies
     async fn resolve_start_order(&mut self, name: &str) -> Result<Vec<String>, ManagerError> {
-        // Load the target service first
-        if !self.services.contains_key(name) {
+        // Load the target unit first
+        if !self.units.contains_key(name) {
             self.load(name).await?;
         }
 
@@ -149,35 +165,42 @@ impl Manager {
         let mut to_load: Vec<String> = vec![name.to_string()];
         let mut loaded: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        while let Some(svc_name) = to_load.pop() {
-            if loaded.contains(&svc_name) {
+        while let Some(unit_name) = to_load.pop() {
+            if loaded.contains(&unit_name) {
                 continue;
             }
 
-            // Try to load the service
-            if !self.services.contains_key(&svc_name) {
-                if let Err(e) = self.load(&svc_name).await {
-                    log::warn!("Could not load dependency {}: {}", svc_name, e);
-                    // Skip missing dependencies - they might be targets or optional
+            // Try to load the unit
+            if !self.units.contains_key(&unit_name) {
+                if let Err(e) = self.load(&unit_name).await {
+                    log::warn!("Could not load dependency {}: {}", unit_name, e);
+                    // Skip missing dependencies
                     continue;
                 }
             }
 
-            loaded.insert(svc_name.clone());
+            loaded.insert(unit_name.clone());
 
             // Queue its dependencies
-            if let Some(svc) = self.services.get(&svc_name) {
-                for dep in &svc.unit.after {
+            if let Some(unit) = self.units.get(&unit_name) {
+                let section = unit.unit_section();
+                for dep in &section.after {
                     if !loaded.contains(dep) {
                         to_load.push(dep.clone());
                     }
                 }
-                for dep in &svc.unit.requires {
+                for dep in &section.requires {
                     if !loaded.contains(dep) {
                         to_load.push(dep.clone());
                     }
                 }
-                for dep in &svc.unit.wants {
+                for dep in &section.wants {
+                    if !loaded.contains(dep) {
+                        to_load.push(dep.clone());
+                    }
+                }
+                // Also include .wants directory entries for targets
+                for dep in unit.wants_dir() {
                     if !loaded.contains(dep) {
                         to_load.push(dep.clone());
                     }
@@ -185,11 +208,11 @@ impl Manager {
             }
         }
 
-        // Build dependency graph from loaded services
+        // Build dependency graph from loaded units
         let mut graph = deps::DepGraph::new();
-        for svc in self.services.values() {
-            if loaded.contains(&svc.name) {
-                graph.add_service(svc);
+        for unit in self.units.values() {
+            if loaded.contains(unit.name()) {
+                graph.add_unit(unit);
             }
         }
 
@@ -198,14 +221,22 @@ impl Manager {
             .map_err(|e| ManagerError::Cycle(e.nodes))
     }
 
-    /// Start a single service (internal, assumes already loaded)
+    /// Start a single unit (internal, assumes already loaded)
     async fn start_single(&mut self, name: &str) -> Result<(), ManagerError> {
         // Load if not already loaded
-        if !self.services.contains_key(name) {
+        if !self.units.contains_key(name) {
             self.load(name).await?;
         }
 
-        let service = self.services.get(name)
+        let unit = self.units.get(name)
+            .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
+
+        // Targets are synchronization points, no process to start
+        if unit.is_target() {
+            return Err(ManagerError::IsTarget(name.to_string()));
+        }
+
+        let service = unit.as_service()
             .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
 
         let state = self.states.get_mut(name)
@@ -297,17 +328,23 @@ impl Manager {
     /// Get service definition
     pub fn get_service(&self, name: &str) -> Option<&Service> {
         let name = self.normalize_name(name);
-        self.services.get(&name)
+        self.units.get(&name).and_then(|u| u.as_service())
     }
 
-    /// List loaded services
+    /// Get unit definition
+    pub fn get_unit(&self, name: &str) -> Option<&Unit> {
+        let name = self.normalize_name(name);
+        self.units.get(&name)
+    }
+
+    /// List loaded units
     pub fn list(&self) -> impl Iterator<Item = (&String, &ServiceState)> {
         self.states.iter()
     }
 
-    /// Normalize service name (add .service suffix if needed)
+    /// Normalize unit name (add .service suffix if no suffix present)
     fn normalize_name(&self, name: &str) -> String {
-        if name.ends_with(".service") {
+        if name.ends_with(".service") || name.ends_with(".target") {
             name.to_string()
         } else {
             format!("{}.service", name)
@@ -355,16 +392,16 @@ impl Default for Manager {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ManagerError {
-    #[error("Service not found: {0}")]
+    #[error("Unit not found: {0}")]
     NotFound(String),
 
-    #[error("Failed to parse service: {0}")]
+    #[error("Failed to parse unit: {0}")]
     Parse(String),
 
-    #[error("Service already active: {0}")]
+    #[error("Unit already active: {0}")]
     AlreadyActive(String),
 
-    #[error("Service not active: {0}")]
+    #[error("Unit not active: {0}")]
     NotActive(String),
 
     #[error("Failed to spawn: {0}")]
@@ -372,4 +409,7 @@ pub enum ManagerError {
 
     #[error("Dependency cycle detected: {}", .0.join(" -> "))]
     Cycle(Vec<String>),
+
+    #[error("Unit is a target (no process): {0}")]
+    IsTarget(String),
 }

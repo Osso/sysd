@@ -1,11 +1,11 @@
-//! Dependency resolution for service ordering
+//! Dependency resolution for unit ordering
 //!
 //! Builds a directed acyclic graph from unit dependencies and performs
 //! topological sort to determine start order.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::units::Service;
+use crate::units::{Service, Unit};
 
 /// Dependency graph for ordering service startup
 #[derive(Debug, Default)]
@@ -47,6 +47,39 @@ impl DepGraph {
         }
 
         for dep in &service.unit.wants {
+            self.add_edge(name, dep);
+        }
+    }
+
+    /// Add a unit (service or target) to the graph
+    pub fn add_unit(&mut self, unit: &Unit) {
+        let name = unit.name();
+        self.nodes.insert(name.to_string());
+
+        let section = unit.unit_section();
+
+        // After=X means X must start before us
+        for dep in &section.after {
+            self.add_edge(name, dep);
+        }
+
+        // Before=X means we must start before X
+        for dep in &section.before {
+            self.nodes.insert(dep.clone());
+            self.edges.entry(dep.clone()).or_default().insert(name.to_string());
+        }
+
+        // Requires=X and Wants=X imply ordering dependency
+        for dep in &section.requires {
+            self.add_edge(name, dep);
+        }
+
+        for dep in &section.wants {
+            self.add_edge(name, dep);
+        }
+
+        // For targets, .wants directory entries are also dependencies
+        for dep in unit.wants_dir() {
             self.add_edge(name, dep);
         }
     }

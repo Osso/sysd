@@ -1,12 +1,16 @@
 //! Unit file parsing and type definitions
 //!
-//! Parses systemd .service files into typed Rust structures.
+//! Parses systemd .service and .target files into typed Rust structures.
 
 mod parser;
 mod service;
+mod target;
+mod unit;
 
 pub use parser::{parse_file, parse_unit_file, ParseError, ParsedFile};
 pub use service::*;
+pub use target::Target;
+pub use unit::Unit;
 
 use std::path::Path;
 
@@ -164,6 +168,106 @@ pub async fn load_service(path: &Path) -> Result<Service, ParseError> {
 
     let parsed = parse_unit_file(path).await?;
     parse_service(name, &parsed)
+}
+
+/// Convert parsed INI data into a typed Target
+pub fn parse_target(name: &str, parsed: &ParsedFile) -> Result<Target, ParseError> {
+    let mut target = Target::new(name.to_string());
+
+    // [Unit] section - same as Service
+    if let Some(unit) = parsed.get("[Unit]") {
+        if let Some(vals) = unit.get("DESCRIPTION") {
+            target.unit.description = vals.first().map(|(_, v)| v.clone());
+        }
+        if let Some(vals) = unit.get("AFTER") {
+            target.unit.after = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("BEFORE") {
+            target.unit.before = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("REQUIRES") {
+            target.unit.requires = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("WANTS") {
+            target.unit.wants = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONFLICTS") {
+            target.unit.conflicts = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+    }
+
+    Ok(target)
+}
+
+/// Parse a target file from disk, including .wants directory
+pub async fn load_target(path: &Path) -> Result<Target, ParseError> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    let parsed = parse_unit_file(path).await?;
+    let mut target = parse_target(name, &parsed)?;
+
+    // Look for .wants directory in same location
+    let wants_dir = path.with_extension("target.wants");
+    if wants_dir.is_dir() {
+        target.wants_dir = read_wants_dir(&wants_dir);
+    }
+
+    // Also check /etc/systemd/system/<target>.wants
+    let etc_wants = Path::new("/etc/systemd/system")
+        .join(format!("{}.wants", name));
+    if etc_wants.is_dir() {
+        target.wants_dir.extend(read_wants_dir(&etc_wants));
+    }
+
+    Ok(target)
+}
+
+/// Read unit names from a .wants directory
+fn read_wants_dir(path: &Path) -> Vec<String> {
+    let mut units = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                // Include all unit types we might encounter
+                // For now we only fully support .service and .target
+                // but we should track .path, .socket, .mount etc for deps
+                if name.ends_with(".service")
+                    || name.ends_with(".target")
+                    || name.ends_with(".path")
+                    || name.ends_with(".socket")
+                    || name.ends_with(".mount")
+                {
+                    units.push(name.to_string());
+                }
+            }
+        }
+    }
+
+    units
+}
+
+/// Load a unit file (service or target) from disk
+pub async fn load_unit(path: &Path) -> Result<Unit, ParseError> {
+    let ext = path.extension().and_then(|e| e.to_str());
+
+    match ext {
+        Some("service") => {
+            let service = load_service(path).await?;
+            Ok(Unit::Service(service))
+        }
+        Some("target") => {
+            let target = load_target(path).await?;
+            Ok(Unit::Target(target))
+        }
+        _ => Err(ParseError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Unknown unit type: {:?}", path),
+        ))),
+    }
 }
 
 #[cfg(test)]
