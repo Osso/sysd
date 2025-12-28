@@ -21,7 +21,10 @@ pub async fn list(user: bool) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let scope = if user { "user" } else { "system" };
-    println!("UNIT                                 STATE       DESCRIPTION");
+    println!(
+        "{:<32} {:<10} {:>7}  {}",
+        "SERVICE", "STATE", "PID", "DESCRIPTION"
+    );
 
     let mut count = 0;
     for base in &paths {
@@ -56,26 +59,28 @@ pub async fn list(user: bool) -> Result<(), Box<dyn std::error::Error>> {
                         .as_deref()
                         .unwrap_or("-")
                         .chars()
-                        .take(40)
+                        .take(36)
                         .collect::<String>();
 
+                    // TODO: get actual state from daemon
+                    let state = "inactive";
+                    let pid = "-";
+
                     println!(
-                        "{:<36} {:<11} {}",
-                        name,
-                        "loaded",
-                        desc
+                        "{:<32} {:<10} {:>7}  {}",
+                        name, state, pid, desc
                     );
                     count += 1;
                 }
                 Err(_) => {
-                    println!("{:<36} {:<11} (parse error)", name, "error");
+                    println!("{:<32} {:<10} {:>7}  (parse error)", name, "error", "-");
                 }
             }
         }
     }
 
     println!();
-    println!("{} {} units listed", count, scope);
+    println!("{} {} units", count, scope);
 
     Ok(())
 }

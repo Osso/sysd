@@ -17,9 +17,30 @@ A Rust implementation of a minimal init system that:
 
 - Full systemd compatibility
 - Socket activation (initially)
-- Timers
+- Timers (use cron/fcron)
 - User sessions (systemd --user)
 - Generators
+- Separate "jobs" queue (state shown inline on units)
+
+## CLI Interface
+
+```
+sysd list [--user]     # List units with state/PID
+sysd status <service>  # Show service details
+sysd start <service>   # Start a service
+sysd stop <service>    # Stop a service
+sysd parse <file>      # Debug: show parsed unit file
+```
+
+Output example:
+```
+SERVICE                          STATE      PID     DESCRIPTION
+docker.service                   running    1234    Docker Container Engine
+nginx.service                    starting   -       Web Server
+postgres.service                 inactive   -       PostgreSQL Database
+```
+
+States: `inactive`, `starting`, `running`, `stopping`, `failed`
 
 ## Architecture
 
