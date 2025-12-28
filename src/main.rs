@@ -43,6 +43,12 @@ enum Command {
         /// Service name
         name: String,
     },
+
+    /// Show service dependencies
+    Deps {
+        /// Service name
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -69,6 +75,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Status { name } => {
             commands::status(&name).await?;
+        }
+        Command::Deps { name } => {
+            commands::deps(&name).await?;
         }
     }
 

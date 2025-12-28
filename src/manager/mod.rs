@@ -2,9 +2,11 @@
 //!
 //! Loads, starts, stops, and monitors services.
 
+mod deps;
 mod process;
 mod state;
 
+pub use deps::{CycleError, DepGraph};
 pub use process::SpawnError;
 pub use state::{ActiveState, ServiceState, SubState};
 
@@ -86,24 +88,132 @@ impl Manager {
         Err(ManagerError::NotFound(name.to_string()))
     }
 
-    /// Start a service
+    /// Start a single service (no dependency resolution)
     pub async fn start(&mut self, name: &str) -> Result<(), ManagerError> {
         let name = self.normalize_name(name);
+        self.start_single(&name).await
+    }
 
-        // Load if not already loaded
-        if !self.services.contains_key(&name) {
-            self.load(&name).await?;
+    /// Start a service with all its dependencies
+    pub async fn start_with_deps(&mut self, name: &str) -> Result<Vec<String>, ManagerError> {
+        let name = self.normalize_name(name);
+
+        // Load the target service and discover all dependencies
+        let order = self.resolve_start_order(&name).await?;
+
+        log::info!("Start order for {}: {:?}", name, order);
+
+        // Start services in order
+        let mut started = Vec::new();
+        for svc_name in &order {
+            // Skip if already running
+            if let Some(state) = self.states.get(svc_name) {
+                if state.is_active() {
+                    log::debug!("{} already running, skipping", svc_name);
+                    continue;
+                }
+            }
+
+            match self.start_single(svc_name).await {
+                Ok(()) => {
+                    started.push(svc_name.clone());
+                }
+                Err(e) => {
+                    // Check if this is a hard dependency (Requires)
+                    let is_required = self.services.get(&name)
+                        .map(|s| s.unit.requires.contains(svc_name))
+                        .unwrap_or(false);
+
+                    if is_required {
+                        log::error!("Required dependency {} failed: {}", svc_name, e);
+                        return Err(e);
+                    } else {
+                        // Soft dependency (Wants) - log and continue
+                        log::warn!("Optional dependency {} failed: {}", svc_name, e);
+                    }
+                }
+            }
         }
 
-        let service = self.services.get(&name)
-            .ok_or_else(|| ManagerError::NotFound(name.clone()))?;
+        Ok(started)
+    }
 
-        let state = self.states.get_mut(&name)
-            .ok_or_else(|| ManagerError::NotFound(name.clone()))?;
+    /// Resolve start order for a service and its dependencies
+    async fn resolve_start_order(&mut self, name: &str) -> Result<Vec<String>, ManagerError> {
+        // Load the target service first
+        if !self.services.contains_key(name) {
+            self.load(name).await?;
+        }
+
+        // Collect all dependencies transitively
+        let mut to_load: Vec<String> = vec![name.to_string()];
+        let mut loaded: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        while let Some(svc_name) = to_load.pop() {
+            if loaded.contains(&svc_name) {
+                continue;
+            }
+
+            // Try to load the service
+            if !self.services.contains_key(&svc_name) {
+                if let Err(e) = self.load(&svc_name).await {
+                    log::warn!("Could not load dependency {}: {}", svc_name, e);
+                    // Skip missing dependencies - they might be targets or optional
+                    continue;
+                }
+            }
+
+            loaded.insert(svc_name.clone());
+
+            // Queue its dependencies
+            if let Some(svc) = self.services.get(&svc_name) {
+                for dep in &svc.unit.after {
+                    if !loaded.contains(dep) {
+                        to_load.push(dep.clone());
+                    }
+                }
+                for dep in &svc.unit.requires {
+                    if !loaded.contains(dep) {
+                        to_load.push(dep.clone());
+                    }
+                }
+                for dep in &svc.unit.wants {
+                    if !loaded.contains(dep) {
+                        to_load.push(dep.clone());
+                    }
+                }
+            }
+        }
+
+        // Build dependency graph from loaded services
+        let mut graph = deps::DepGraph::new();
+        for svc in self.services.values() {
+            if loaded.contains(&svc.name) {
+                graph.add_service(svc);
+            }
+        }
+
+        // Get topological order
+        graph.start_order_for(name)
+            .map_err(|e| ManagerError::Cycle(e.nodes))
+    }
+
+    /// Start a single service (internal, assumes already loaded)
+    async fn start_single(&mut self, name: &str) -> Result<(), ManagerError> {
+        // Load if not already loaded
+        if !self.services.contains_key(name) {
+            self.load(name).await?;
+        }
+
+        let service = self.services.get(name)
+            .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
+
+        let state = self.states.get_mut(name)
+            .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
 
         // Check if already running
         if state.is_active() {
-            return Err(ManagerError::AlreadyActive(name));
+            return Err(ManagerError::AlreadyActive(name.to_string()));
         }
 
         // Update state to starting
@@ -117,7 +227,7 @@ impl Manager {
         state.set_running(pid);
 
         // Store the child process
-        self.processes.insert(name.clone(), child);
+        self.processes.insert(name.to_string(), child);
 
         log::info!("Started {} (PID {})", name, pid);
         Ok(())
@@ -259,4 +369,7 @@ pub enum ManagerError {
 
     #[error("Failed to spawn: {0}")]
     Spawn(#[from] SpawnError),
+
+    #[error("Dependency cycle detected: {}", .0.join(" -> "))]
+    Cycle(Vec<String>),
 }
