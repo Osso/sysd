@@ -13,6 +13,13 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// List available units
+    List {
+        /// Show user units instead of system units
+        #[arg(long)]
+        user: bool,
+    },
+
     /// Parse a unit file and display its contents
     Parse {
         /// Path to the .service file
@@ -48,6 +55,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     match args.command {
+        Command::List { user } => {
+            commands::list(user).await?;
+        }
         Command::Parse { path } => {
             commands::parse(&path).await?;
         }
