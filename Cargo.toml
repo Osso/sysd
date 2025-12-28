@@ -1,0 +1,33 @@
+[package]
+name = "sysd"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal systemd-compatible init system"
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.48", features = ["full", "signal"] }
+
+# D-Bus
+zbus = "5.12"
+
+# Logging
+log = "0.4"
+fern = "0.7"
+chrono = "0.4"
+
+# Config/parsing
+shlex = "1.3"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+
+# Unix/Linux
+nix = { version = "0.29", features = ["signal", "process", "user", "fs"] }
+libc = "0.2"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
