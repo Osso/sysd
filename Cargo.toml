@@ -14,8 +14,7 @@ zbus = "5.12"
 
 # Logging
 log = "0.4"
-fern = "0.7"
-chrono = "0.4"
+env_logger = "0.11"
 
 # Config/parsing
 shlex = "1.3"

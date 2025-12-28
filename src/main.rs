@@ -13,25 +13,52 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Parse a unit file and display its contents (for testing)
+    /// Parse a unit file and display its contents
     Parse {
         /// Path to the .service file
         path: PathBuf,
     },
-    // Future commands:
-    // /// Run as PID 1 init system
-    // Init,
-    // /// Start the D-Bus service manager (non-PID 1 mode)
-    // Daemon,
+
+    /// Start a service
+    Start {
+        /// Service name (e.g., "docker" or "docker.service")
+        name: String,
+    },
+
+    /// Stop a service
+    Stop {
+        /// Service name
+        name: String,
+    },
+
+    /// Show service status
+    Status {
+        /// Service name
+        name: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logging
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info")
+    ).init();
+
     let args = Args::parse();
 
     match args.command {
         Command::Parse { path } => {
             commands::parse(&path).await?;
+        }
+        Command::Start { name } => {
+            commands::start(&name).await?;
+        }
+        Command::Stop { name } => {
+            commands::stop(&name).await?;
+        }
+        Command::Status { name } => {
+            commands::status(&name).await?;
         }
     }
 

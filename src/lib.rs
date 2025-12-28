@@ -19,6 +19,7 @@
 
 pub mod cgroups;
 pub mod dbus;
+pub mod manager;
 pub mod units;
 
 // Re-exports for D-Bus interfaces
