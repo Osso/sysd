@@ -351,6 +351,26 @@ impl Manager {
         }
     }
 
+    /// Get the default target (resolves default.target symlink)
+    pub fn get_default_target(&self) -> Result<String, ManagerError> {
+        // Look for default.target in unit paths
+        for base in &self.unit_paths {
+            let path = base.join("default.target");
+            if path.exists() || path.is_symlink() {
+                // Resolve the symlink to get the actual target
+                if let Ok(resolved) = std::fs::read_link(&path) {
+                    // Extract just the filename
+                    if let Some(name) = resolved.file_name().and_then(|n| n.to_str()) {
+                        return Ok(name.to_string());
+                    }
+                }
+                // If not a symlink or can't resolve, use as-is
+                return Ok("default.target".to_string());
+            }
+        }
+        Err(ManagerError::NotFound("default.target".to_string()))
+    }
+
     /// Check on running processes and update states
     pub async fn reap(&mut self) {
         let mut exited = Vec::new();

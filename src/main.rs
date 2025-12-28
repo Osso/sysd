@@ -49,6 +49,16 @@ enum Command {
         /// Service name
         name: String,
     },
+
+    /// Show the default boot target
+    GetBootTarget,
+
+    /// Boot to default target (start all services)
+    Boot {
+        /// Show what would be started without actually starting
+        #[arg(long, short = 'n')]
+        dry_run: bool,
+    },
 }
 
 #[tokio::main]
@@ -78,6 +88,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Deps { name } => {
             commands::deps(&name).await?;
+        }
+        Command::GetBootTarget => {
+            commands::default_target().await?;
+        }
+        Command::Boot { dry_run } => {
+            commands::boot(dry_run).await?;
         }
     }
 
