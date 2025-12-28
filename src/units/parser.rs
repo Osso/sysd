@@ -167,7 +167,7 @@ pub fn parse_environment(raw: &str) -> Result<Vec<(String, String)>, ParseError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_parse_simple_service() {
         let content = r#"
@@ -183,23 +183,236 @@ ExecStart=/usr/bin/test
 WantedBy=multi-user.target
 "#;
         let parsed = parse_file(content).unwrap();
-        
+
         assert!(parsed.contains_key("[Unit]"));
         assert!(parsed.contains_key("[Service]"));
         assert!(parsed.contains_key("[Install]"));
-        
+
         let unit = &parsed["[Unit]"];
-        assert_eq!(extract_values(unit["DESCRIPTION"].clone()), vec!["Test Service"]);
+        assert_eq!(
+            extract_values(unit["DESCRIPTION"].clone()),
+            vec!["Test Service"]
+        );
     }
-    
+
     #[test]
     fn test_string_to_bool() {
         assert!(string_to_bool("yes"));
         assert!(string_to_bool("YES"));
         assert!(string_to_bool("true"));
         assert!(string_to_bool("1"));
+        assert!(string_to_bool("on"));
         assert!(!string_to_bool("no"));
+        assert!(!string_to_bool("false"));
         assert!(!string_to_bool("0"));
+        assert!(!string_to_bool("off"));
         assert!(!string_to_bool(""));
+    }
+
+    #[test]
+    fn test_empty_file() {
+        let parsed = parse_file("").unwrap();
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn test_comments_only() {
+        let content = "# This is a comment\n; Another comment\n";
+        let parsed = parse_file(content).unwrap();
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn test_hash_comments() {
+        let content = r#"
+[Unit]
+# This is a comment
+Description=Test
+# Another comment
+After=network.target
+"#;
+        let parsed = parse_file(content).unwrap();
+        let unit = &parsed["[Unit]"];
+        assert_eq!(unit.len(), 2); // Description and After
+    }
+
+    #[test]
+    fn test_semicolon_comments() {
+        let content = r#"
+[Unit]
+; This is a comment
+Description=Test
+"#;
+        let parsed = parse_file(content).unwrap();
+        let unit = &parsed["[Unit]"];
+        assert_eq!(
+            extract_values(unit["DESCRIPTION"].clone()),
+            vec!["Test"]
+        );
+    }
+
+    #[test]
+    fn test_space_separated_dependencies() {
+        let content = r#"
+[Unit]
+After=a.target b.target c.target
+Wants=x.service y.service
+"#;
+        let parsed = parse_file(content).unwrap();
+        let unit = &parsed["[Unit]"];
+
+        let after = extract_values(unit["AFTER"].clone());
+        assert_eq!(after, vec!["a.target", "b.target", "c.target"]);
+
+        let wants = extract_values(unit["WANTS"].clone());
+        assert_eq!(wants, vec!["x.service", "y.service"]);
+    }
+
+    #[test]
+    fn test_repeated_keys() {
+        let content = r#"
+[Service]
+ExecStartPre=/bin/echo one
+ExecStartPre=/bin/echo two
+ExecStartPre=/bin/echo three
+"#;
+        let parsed = parse_file(content).unwrap();
+        let service = &parsed["[Service]"];
+
+        let pre = extract_values(service["EXECSTARTPRE"].clone());
+        assert_eq!(
+            pre,
+            vec!["/bin/echo one", "/bin/echo two", "/bin/echo three"]
+        );
+    }
+
+    #[test]
+    fn test_empty_value() {
+        let content = r#"
+[Service]
+ExecStart=
+"#;
+        let parsed = parse_file(content).unwrap();
+        let service = &parsed["[Service]"];
+        // Empty value should result in empty vec
+        assert!(service.get("EXECSTART").map_or(true, |v| v.is_empty()));
+    }
+
+    #[test]
+    fn test_value_with_equals() {
+        let content = r#"
+[Service]
+Environment=FOO=bar=baz
+"#;
+        let parsed = parse_file(content).unwrap();
+        let service = &parsed["[Service]"];
+        let env = extract_values(service["ENVIRONMENT"].clone());
+        assert_eq!(env, vec!["FOO=bar=baz"]);
+    }
+
+    #[test]
+    fn test_key_case_insensitive() {
+        let content = r#"
+[Unit]
+description=Lower
+DESCRIPTION=Upper
+Description=Mixed
+"#;
+        let parsed = parse_file(content).unwrap();
+        let unit = &parsed["[Unit]"];
+        // All should be normalized to uppercase and combined
+        let desc = extract_values(unit["DESCRIPTION"].clone());
+        assert_eq!(desc.len(), 3);
+    }
+
+    #[test]
+    fn test_whitespace_handling() {
+        let content = r#"
+[Unit]
+   Description   =   Test Service
+After    =    network.target
+"#;
+        let parsed = parse_file(content).unwrap();
+        let unit = &parsed["[Unit]"];
+        assert_eq!(
+            extract_values(unit["DESCRIPTION"].clone()),
+            vec!["Test Service"]
+        );
+    }
+
+    #[test]
+    fn test_duplicate_section_error() {
+        let content = r#"
+[Unit]
+Description=First
+
+[Unit]
+Description=Second
+"#;
+        let result = parse_file(content);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ParseError::DuplicateSection(_)));
+    }
+
+    #[test]
+    fn test_lines_before_first_section() {
+        let content = r#"
+# Header comment
+; Another comment
+
+[Unit]
+Description=Test
+"#;
+        let parsed = parse_file(content).unwrap();
+        assert!(parsed.contains_key("[Unit]"));
+    }
+
+    #[test]
+    fn test_parse_environment() {
+        let result = parse_environment("FOO=bar BAZ=qux").unwrap();
+        assert_eq!(result, vec![("FOO".into(), "bar".into()), ("BAZ".into(), "qux".into())]);
+    }
+
+    #[test]
+    fn test_parse_environment_quoted() {
+        let result = parse_environment(r#"FOO="bar baz" QUX=test"#).unwrap();
+        assert_eq!(result, vec![("FOO".into(), "bar baz".into()), ("QUX".into(), "test".into())]);
+    }
+
+    #[test]
+    fn test_special_characters_in_value() {
+        let content = r#"
+[Service]
+ExecStart=/usr/bin/test --flag="value with spaces" -x
+"#;
+        let parsed = parse_file(content).unwrap();
+        let service = &parsed["[Service]"];
+        let exec = extract_values(service["EXECSTART"].clone());
+        assert_eq!(exec, vec![r#"/usr/bin/test --flag="value with spaces" -x"#]);
+    }
+
+    #[test]
+    fn test_percent_specifiers_preserved() {
+        let content = r#"
+[Service]
+ExecStart=/usr/bin/test %n %i %h
+"#;
+        let parsed = parse_file(content).unwrap();
+        let service = &parsed["[Service]"];
+        let exec = extract_values(service["EXECSTART"].clone());
+        assert_eq!(exec, vec!["/usr/bin/test %n %i %h"]);
+    }
+
+    #[test]
+    fn test_dollar_variables_preserved() {
+        let content = r#"
+[Service]
+ExecStart=/bin/sh -c "echo $HOME"
+ExecReload=/bin/kill -HUP $MAINPID
+"#;
+        let parsed = parse_file(content).unwrap();
+        let service = &parsed["[Service]"];
+        let reload = extract_values(service["EXECRELOAD"].clone());
+        assert_eq!(reload, vec!["/bin/kill -HUP $MAINPID"]);
     }
 }
