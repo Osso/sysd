@@ -5,6 +5,14 @@ edition = "2021"
 description = "Minimal systemd-compatible init system"
 license = "MIT"
 
+[[bin]]
+name = "sysd"
+path = "src/bin/sysd.rs"
+
+[[bin]]
+name = "sysdctl"
+path = "src/bin/sysdctl.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.48", features = ["full", "signal"] }
@@ -28,6 +36,10 @@ libc = "0.2"
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 dirs = "6.0"
+
+# IPC
+unix-ipc = { path = "../unix-ipc" }
+rmp-serde = "1"
 
 [dev-dependencies]
 tokio-test = "0.4"
