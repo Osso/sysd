@@ -144,3 +144,98 @@ impl ServiceState {
         matches!(self.active, ActiveState::Active | ActiveState::Activating)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_state_new() {
+        let state = ServiceState::new();
+        assert_eq!(state.active, ActiveState::Inactive);
+        assert_eq!(state.sub, SubState::Dead);
+        assert!(state.main_pid.is_none());
+        assert!(!state.is_active());
+    }
+
+    #[test]
+    fn test_state_starting() {
+        let mut state = ServiceState::new();
+        state.set_starting();
+        assert_eq!(state.active, ActiveState::Activating);
+        assert_eq!(state.sub, SubState::Starting);
+        assert!(state.is_active());
+    }
+
+    #[test]
+    fn test_state_running() {
+        let mut state = ServiceState::new();
+        state.set_starting();
+        state.set_running(1234);
+        assert_eq!(state.active, ActiveState::Active);
+        assert_eq!(state.sub, SubState::Running);
+        assert_eq!(state.main_pid, Some(1234));
+        assert!(state.is_active());
+    }
+
+    #[test]
+    fn test_state_stopping() {
+        let mut state = ServiceState::new();
+        state.set_running(1234);
+        state.set_stopping();
+        assert_eq!(state.active, ActiveState::Deactivating);
+        assert_eq!(state.sub, SubState::Stopping);
+        assert!(!state.is_active());
+    }
+
+    #[test]
+    fn test_state_stopped_clean() {
+        let mut state = ServiceState::new();
+        state.set_running(1234);
+        state.set_stopped(0);
+        assert_eq!(state.active, ActiveState::Inactive);
+        assert_eq!(state.sub, SubState::Exited);
+        assert!(state.main_pid.is_none());
+        assert_eq!(state.exit_code, Some(0));
+    }
+
+    #[test]
+    fn test_state_stopped_error() {
+        let mut state = ServiceState::new();
+        state.set_running(1234);
+        state.set_stopped(1);
+        assert_eq!(state.active, ActiveState::Inactive);
+        assert_eq!(state.sub, SubState::Dead);
+        assert_eq!(state.exit_code, Some(1));
+    }
+
+    #[test]
+    fn test_state_failed() {
+        let mut state = ServiceState::new();
+        state.set_running(1234);
+        state.set_failed("timeout".to_string());
+        assert_eq!(state.active, ActiveState::Failed);
+        assert_eq!(state.sub, SubState::Failed);
+        assert!(state.main_pid.is_none());
+        assert_eq!(state.error, Some("timeout".to_string()));
+    }
+
+    #[test]
+    fn test_active_state_as_str() {
+        assert_eq!(ActiveState::Inactive.as_str(), "inactive");
+        assert_eq!(ActiveState::Activating.as_str(), "activating");
+        assert_eq!(ActiveState::Active.as_str(), "active");
+        assert_eq!(ActiveState::Deactivating.as_str(), "deactivating");
+        assert_eq!(ActiveState::Failed.as_str(), "failed");
+    }
+
+    #[test]
+    fn test_sub_state_as_str() {
+        assert_eq!(SubState::Dead.as_str(), "dead");
+        assert_eq!(SubState::Starting.as_str(), "start");
+        assert_eq!(SubState::Running.as_str(), "running");
+        assert_eq!(SubState::Stopping.as_str(), "stop");
+        assert_eq!(SubState::Failed.as_str(), "failed");
+        assert_eq!(SubState::Exited.as_str(), "exited");
+    }
+}

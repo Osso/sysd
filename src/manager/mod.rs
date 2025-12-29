@@ -3,18 +3,22 @@
 //! Loads, starts, stops, and monitors services and targets.
 
 mod deps;
+mod notify;
 mod process;
 mod state;
 
 pub use deps::{CycleError, DepGraph};
-pub use process::SpawnError;
+pub use notify::{AsyncNotifyListener, NotifyMessage, NOTIFY_SOCKET_PATH};
+pub use process::{SpawnError, SpawnOptions};
 pub use state::{ActiveState, ServiceState, SubState};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::process::Child;
+use tokio::sync::mpsc;
 
-use crate::units::{self, Service, Unit};
+use crate::cgroups::{CgroupLimits, CgroupManager};
+use crate::units::{self, Service, ServiceType, Unit};
 
 /// Service manager that tracks and controls units (services and targets)
 pub struct Manager {
@@ -26,11 +30,33 @@ pub struct Manager {
     processes: HashMap<String, Child>,
     /// Unit search paths
     unit_paths: Vec<PathBuf>,
+    /// Notify socket listener for Type=notify services
+    notify_listener: Option<AsyncNotifyListener>,
+    /// Receiver for notify messages
+    notify_rx: Option<mpsc::Receiver<NotifyMessage>>,
+    /// Map of PIDs waiting for READY notification
+    waiting_ready: HashMap<u32, String>,
+    /// Cgroup manager (None if cgroups unavailable)
+    cgroup_manager: Option<CgroupManager>,
+    /// Active cgroup paths for services
+    cgroup_paths: HashMap<String, PathBuf>,
 }
 
 impl Manager {
     /// Create a new service manager
     pub fn new() -> Self {
+        // Try to initialize cgroup manager (may fail if not root or cgroups unavailable)
+        let cgroup_manager = match CgroupManager::new() {
+            Ok(mgr) => {
+                log::debug!("Cgroup manager initialized");
+                Some(mgr)
+            }
+            Err(e) => {
+                log::debug!("Cgroup manager unavailable: {} (running without cgroups)", e);
+                None
+            }
+        };
+
         Self {
             units: HashMap::new(),
             states: HashMap::new(),
@@ -39,7 +65,31 @@ impl Manager {
                 PathBuf::from("/etc/systemd/system"),
                 PathBuf::from("/usr/lib/systemd/system"),
             ],
+            notify_listener: None,
+            notify_rx: None,
+            waiting_ready: HashMap::new(),
+            cgroup_manager,
+            cgroup_paths: HashMap::new(),
         }
+    }
+
+    /// Check if cgroup management is available
+    pub fn cgroups_available(&self) -> bool {
+        self.cgroup_manager.is_some()
+    }
+
+    /// Initialize the notify socket listener
+    pub fn init_notify_socket(&mut self) -> std::io::Result<()> {
+        let (listener, rx) = AsyncNotifyListener::new(std::path::Path::new(NOTIFY_SOCKET_PATH))?;
+        self.notify_listener = Some(listener);
+        self.notify_rx = Some(rx);
+        log::info!("Notify socket listening at {}", NOTIFY_SOCKET_PATH);
+        Ok(())
+    }
+
+    /// Get the notify socket path (if initialized)
+    pub fn notify_socket_path(&self) -> Option<&std::path::Path> {
+        self.notify_listener.as_ref().map(|l| l.socket_path())
     }
 
     /// Load a unit (service or target) by name
@@ -250,17 +300,70 @@ impl Manager {
         // Update state to starting
         state.set_starting();
 
+        // Prepare spawn options
+        let is_notify = service.service.service_type == ServiceType::Notify;
+        let options = if is_notify {
+            SpawnOptions {
+                notify_socket: self.notify_socket_path()
+                    .map(|p| p.to_string_lossy().to_string()),
+            }
+        } else {
+            SpawnOptions::default()
+        };
+
         // Spawn the process
-        let child = process::spawn_service(service)?;
+        let child = process::spawn_service_with_options(service, &options)?;
         let pid = child.id().unwrap_or(0);
 
-        // Update state to running
-        state.set_running(pid);
+        // Set up cgroup for the process (if available)
+        let limits = CgroupLimits {
+            memory_max: service.service.memory_max,
+            cpu_quota: service.service.cpu_quota,
+            tasks_max: service.service.tasks_max,
+        };
+        let has_resource_limits = limits.memory_max.is_some()
+            || limits.cpu_quota.is_some()
+            || limits.tasks_max.is_some();
+
+        if let Some(ref cgroup_mgr) = self.cgroup_manager {
+            match cgroup_mgr.setup_service_cgroup(name, pid, &limits) {
+                Ok(cgroup_path) => {
+                    log::debug!("Created cgroup {} for {}", cgroup_path.display(), name);
+                    self.cgroup_paths.insert(name.to_string(), cgroup_path);
+                }
+                Err(e) => {
+                    if has_resource_limits {
+                        log::error!(
+                            "Failed to set up cgroup for {} (resource limits NOT enforced): {}",
+                            name, e
+                        );
+                    } else {
+                        log::warn!("Failed to set up cgroup for {}: {}", name, e);
+                    }
+                }
+            }
+        } else if has_resource_limits {
+            log::error!(
+                "Service {} requests resource limits but cgroups unavailable - limits NOT enforced",
+                name
+            );
+        }
 
         // Store the child process
         self.processes.insert(name.to_string(), child);
 
-        log::info!("Started {} (PID {})", name, pid);
+        if is_notify {
+            // Type=notify: stay in starting state until READY=1 received
+            self.waiting_ready.insert(pid, name.to_string());
+            log::info!("Started {} (PID {}), waiting for READY", name, pid);
+        } else {
+            // Type=simple: immediately mark as running
+            if let Some(state) = self.states.get_mut(name) {
+                state.set_running(pid);
+            }
+            log::info!("Started {} (PID {})", name, pid);
+        }
+
         Ok(())
     }
 
@@ -314,6 +417,15 @@ impl Manager {
             }
         } else {
             state.set_stopped(0);
+        }
+
+        // Clean up cgroup (if we created one)
+        if self.cgroup_paths.remove(&name).is_some() {
+            if let Some(ref cgroup_mgr) = self.cgroup_manager {
+                if let Err(e) = cgroup_mgr.cleanup_service_cgroup(&name) {
+                    log::debug!("Failed to clean up cgroup for {}: {}", name, e);
+                }
+            }
         }
 
         Ok(())
@@ -568,6 +680,59 @@ impl Manager {
         Err(ManagerError::NotFound("default.target".to_string()))
     }
 
+    /// Process pending notify messages (READY, STOPPING, etc.)
+    pub async fn process_notify(&mut self) {
+        let Some(rx) = &mut self.notify_rx else {
+            return;
+        };
+
+        // Process all pending messages without blocking
+        while let Ok(msg) = rx.try_recv() {
+            if msg.is_ready() {
+                // Find which service this PID belongs to
+                // First check waiting_ready map, then fall back to process map
+                let service_name = if let Some(pid) = msg.main_pid() {
+                    self.waiting_ready.remove(&pid)
+                } else {
+                    // Try to find by iterating processes
+                    let mut found = None;
+                    for (name, child) in &self.processes {
+                        if let Some(pid) = child.id() {
+                            if self.waiting_ready.contains_key(&pid) {
+                                found = Some((pid, name.clone()));
+                                break;
+                            }
+                        }
+                    }
+                    if let Some((pid, name)) = found {
+                        self.waiting_ready.remove(&pid);
+                        Some(name)
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(name) = service_name {
+                    if let Some(state) = self.states.get_mut(&name) {
+                        let pid = self.processes.get(&name)
+                            .and_then(|c| c.id())
+                            .unwrap_or(0);
+                        state.set_running(pid);
+                        log::info!("{} signaled READY", name);
+                    }
+                }
+            }
+
+            if msg.is_stopping() {
+                log::debug!("Service signaled STOPPING (PID hint: {})", msg.pid);
+            }
+
+            if let Some(status) = msg.status() {
+                log::debug!("Service status: {}", status);
+            }
+        }
+    }
+
     /// Check on running processes and update states
     pub async fn reap(&mut self) {
         let mut exited = Vec::new();
@@ -595,6 +760,15 @@ impl Manager {
                 } else {
                     state.set_failed(format!("Exit code {}", code));
                     log::warn!("{} failed with exit code {}", name, code);
+                }
+            }
+
+            // Clean up cgroup
+            if self.cgroup_paths.remove(&name).is_some() {
+                if let Some(ref cgroup_mgr) = self.cgroup_manager {
+                    if let Err(e) = cgroup_mgr.cleanup_service_cgroup(&name) {
+                        log::debug!("Failed to clean up cgroup for {}: {}", name, e);
+                    }
                 }
             }
         }

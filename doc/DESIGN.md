@@ -44,12 +44,23 @@ This allows:
 
 ## CLI Interface
 
+Split architecture: `sysd` is the daemon, `sysdctl` is the CLI.
+
 ```
-sysd list [--user]     # List units with state/PID
-sysd status <service>  # Show service details
-sysd start <service>   # Start a service
-sysd stop <service>    # Stop a service
-sysd parse <file>      # Debug: show parsed unit file
+sysdctl list [--user]        # List units with state/PID
+sysdctl status <service>     # Show service details
+sysdctl start <service>      # Start a service
+sysdctl stop <service>       # Stop a service
+sysdctl restart <service>    # Restart a service
+sysdctl enable <service>     # Enable service at boot
+sysdctl disable <service>    # Disable service at boot
+sysdctl is-enabled <service> # Check if enabled
+sysdctl deps <service>       # Show dependencies
+sysdctl get-boot-target      # Show default target
+sysdctl reload-unit-files    # Reload unit files from disk
+sysdctl sync-units           # Reload + restart changed
+sysdctl parse <file>         # Debug: parse unit file (local)
+sysdctl ping                 # Check daemon is running
 ```
 
 Output example:
@@ -90,12 +101,31 @@ States: `inactive`, `starting`, `running`, `stopping`, `failed`
 
 ### 1. PID 1 Core
 
-Responsibilities:
-- Mount essential filesystems (/proc, /sys, /dev, /run)
-- Set up cgroup v2 hierarchy
-- Reap zombie processes (wait4 loop)
-- Handle signals (SIGTERM, SIGINT, SIGCHLD, SIGUSR1/2)
-- Orderly shutdown sequence
+When running as PID 1 (detected via `getpid() == 1`), sysd handles:
+
+**Hardcoded early init** (like systemd):
+- Mount /proc, /sys, /dev, /dev/pts, /dev/shm, /run, /sys/fs/cgroup
+- Skips already-mounted filesystems (e.g., if initramfs handled them)
+
+**Zombie reaping**:
+- Polls `waitpid(-1, WNOHANG)` every 100ms
+- Required: orphaned processes reparent to PID 1
+
+**Signal handling**:
+- SIGTERM → orderly poweroff
+- SIGINT → orderly reboot
+- SIGHUP → reload unit files (stub)
+- SIGUSR1 → dump state to log
+- SIGCHLD → triggers reap cycle
+
+**Shutdown sequence**:
+1. Stop all managed services
+2. SIGTERM to all remaining processes
+3. Wait 5s for graceful exit
+4. SIGKILL to stragglers
+5. sync() filesystems
+6. Unmount all (except /, /proc, /sys, /dev)
+7. reboot() syscall
 
 ### 2. Unit File Parser
 
@@ -104,58 +134,108 @@ Supported unit types:
 - `.target` - Grouping/synchronization points
 - `.scope` - Transient units for logind (created via D-Bus only)
 
-Supported .service directives:
+#### Directive Support Matrix
 
-```ini
-[Unit]
-Description=             # String, informational
-After=                   # Ordering (wait for these before starting)
-Before=                  # Ordering (these wait for us)
-Requires=                # Hard dependency (fail if dep fails)
-Wants=                   # Soft dependency (don't fail if dep fails)
-Conflicts=               # Stop these when starting us
-ConditionPathExists=     # Skip if path doesn't exist
+Usage counts from `/usr/lib/systemd/system/*.service` on Arch Linux.
 
-[Service]
-Type=simple              # Fork/exec, ready immediately
-Type=forking             # Fork/exec, ready when main exits
-Type=notify              # Fork/exec, ready on sd_notify READY=1
-Type=dbus                # Fork/exec, ready when D-Bus name acquired
-Type=oneshot             # Run once, no main process
+**[Unit] Section**
 
-ExecStart=               # Command to run (required)
-ExecStartPre=            # Commands before ExecStart
-ExecStartPost=           # Commands after ExecStart
-ExecStop=                # Command for stopping
-ExecReload=              # Command for reloading
+| Directive | Count | Status | Notes |
+|-----------|-------|--------|-------|
+| Description= | 259 | ✓ done | Informational |
+| Documentation= | 255 | ignore | URLs for man pages |
+| After= | 205 | ✓ done | Ordering dependency |
+| Before= | 197 | ✓ done | Reverse ordering |
+| DefaultDependencies= | 146 | TODO | Usually `no` for early-boot units |
+| Conflicts= | 126 | ✓ done | Stop these when starting |
+| ConditionPathExists= | 82 | ✓ done | Skip if path missing |
+| Wants= | 67 | ✓ done | Soft dependency |
+| Requires= | 42 | ✓ done | Hard dependency |
+| ConditionDirectoryNotEmpty= | 37 | TODO | Skip if dir empty |
 
-Restart=no               # Don't restart
-Restart=on-failure       # Restart on non-zero exit
-Restart=always           # Always restart
+**[Service] Section - Core**
 
-RestartSec=              # Delay before restart (default 100ms)
-TimeoutStartSec=         # Timeout for startup
-TimeoutStopSec=          # Timeout for stop (then SIGKILL)
+| Directive | Count | Status | Notes |
+|-----------|-------|--------|-------|
+| ExecStart= | 251 | ✓ done | Command to run |
+| Type= | 213 | partial | simple/notify/oneshot done; dbus/forking/idle TODO |
+| RemainAfterExit= | 96 | TODO | For oneshot: stay "active" after exit |
+| Restart= | 44 | TODO | no/on-failure/always |
+| BusName= | 37 | TODO | Required for Type=dbus |
+| ExecStop= | 25 | ✓ done | Stop command |
+| TimeoutSec= | 24 | partial | Sets both start and stop timeout |
+| RestartSec= | 23 | parsed | Delay before restart |
+| KillMode= | 23 | TODO | control-group/process/mixed/none |
+| User= | 22 | ✓ done | Run as user |
+| ExecReload= | 16 | ✓ done | Reload command |
+| ExecStartPre= | 10 | ✓ done | Pre-start commands |
+| NotifyAccess= | 10 | TODO | Who can send sd_notify |
 
-User=                    # Run as user
-Group=                   # Run as group
-WorkingDirectory=        # Chdir before exec
+**[Service] Section - I/O**
 
-Environment=             # KEY=value
-EnvironmentFile=         # Path to env file
+| Directive | Count | Status | Notes |
+|-----------|-------|--------|-------|
+| StandardInput= | 21 | TODO | null/tty/socket |
+| StandardOutput= | 19 | ✓ done | journal/inherit/null |
+| StandardError= | 15 | ✓ done | journal/inherit/null |
+| TTYPath= | 9 | TODO | For getty-like services |
+| TTYReset= | 9 | TODO | Reset TTY on start |
 
-StandardOutput=journal   # Pipe stdout to journal
-StandardError=journal    # Pipe stderr to journal
+**[Service] Section - Environment**
 
-# Cgroup resource controls
-MemoryMax=               # Memory limit
-CPUQuota=                # CPU limit (percentage)
-TasksMax=                # Max processes
+| Directive | Count | Status | Notes |
+|-----------|-------|--------|-------|
+| Environment= | 28 | ✓ done | KEY=value |
+| EnvironmentFile= | 7 | ✓ done | Load from file |
+| UnsetEnvironment= | 7 | TODO | Remove vars |
+| WorkingDirectory= | ~20 | ✓ done | Chdir before exec |
 
-[Install]
-WantedBy=                # Target that pulls this in
-RequiredBy=              # Target that requires this
-```
+**[Service] Section - Resource Limits**
+
+| Directive | Count | Status | Notes |
+|-----------|-------|--------|-------|
+| MemoryMax= | ~10 | ✓ done | Cgroup memory limit |
+| CPUQuota= | ~5 | ✓ done | Cgroup CPU limit |
+| TasksMax= | ~10 | ✓ done | Cgroup process limit |
+| LimitNOFILE= | 15 | TODO | File descriptor limit |
+| OOMScoreAdjust= | 12 | TODO | OOM killer priority |
+
+**[Service] Section - Watchdog**
+
+| Directive | Count | Status | Notes |
+|-----------|-------|--------|-------|
+| WatchdogSec= | 29 | TODO | sd_notify watchdog timeout |
+
+**[Service] Section - Security/Sandboxing** (can ignore initially)
+
+| Directive | Count | Notes |
+|-----------|-------|-------|
+| DeviceAllow= | 64 | Cgroup device access |
+| ImportCredential= | 62 | systemd credentials |
+| SystemCallFilter= | 59 | seccomp |
+| ProtectSystem= | 53 | read-only /, /usr |
+| ProtectHome= | 51 | hide /home |
+| NoNewPrivileges= | 47 | no setuid |
+| CapabilityBoundingSet= | 42 | drop capabilities |
+| ProtectKernelModules= | 37 | block module loading |
+| PrivateTmp= | 36 | isolated /tmp |
+| RestrictNamespaces= | 33 | block namespace creation |
+| PrivateDevices= | 27 | isolated /dev |
+| PrivateNetwork= | 20 | no network |
+| ProtectProc= | 19 | /proc visibility |
+| ReadWritePaths= | 15 | filesystem access |
+| AmbientCapabilities= | 9 | grant capabilities |
+| KeyringMode= | 5 | kernel keyring |
+
+**[Install] Section**
+
+| Directive | Count | Status | Notes |
+|-----------|-------|--------|-------|
+| WantedBy= | 94 | ✓ done | Pulled by target |
+| Also= | 25 | TODO | Enable related units |
+| Alias= | 12 | TODO | Symlink name |
+| DefaultInstance= | 2 | TODO | For templates |
+| RequiredBy= | 1 | ✓ done | Required by target |
 
 ### 3. Dependency Resolver
 
@@ -278,55 +358,79 @@ Operations:
 
 ```toml
 [dependencies]
+tokio = { version = "1", features = ["full", "signal"] }
 zbus = "5"                    # D-Bus
-tokio = { version = "1", features = ["full"] }
-nix = "0.29"                  # Unix syscalls
+nix = { version = "0.29", features = ["signal", "process", "user", "fs", "mount", "reboot"] }
 serde = { version = "1", features = ["derive"] }
-tracing = "0.1"               # Logging
-tracing-subscriber = "0.3"
-
-# Unit file parsing
-configparser = "3"            # INI parser (or custom)
+thiserror = "2"               # Error types
+log = "0.4"                   # Logging facade
+env_logger = "0.11"           # Log output
+clap = { version = "4", features = ["derive"] }  # CLI
+shlex = "1"                   # Command parsing
+libc = "0.2"                  # Low-level syscalls
 ```
 
 ## Milestones
 
 ### M1: Minimal Service Manager (no PID 1)
-- [ ] Parse .service files
-- [ ] Start/stop Type=simple services
-- [ ] Basic dependency ordering
-- [ ] CLI tool for testing (sysdctl)
+- [x] Parse .service files
+- [x] Start/stop Type=simple services
+- [x] Basic dependency ordering
+- [x] CLI tool for testing (sysdctl)
 
 ### M2: sd_notify Support
-- [ ] NOTIFY_SOCKET listener
-- [ ] Type=notify services
-- [ ] READY/STOPPING handling
+- [x] NOTIFY_SOCKET listener
+- [x] Type=notify services
+- [x] READY/STOPPING handling
 
 ### M3: D-Bus Interface
-- [ ] org.freedesktop.systemd1.Manager
-- [ ] StartUnit/StopUnit/KillUnit
-- [ ] StartTransientUnit (for logind)
-- [ ] Signals (JobRemoved, UnitRemoved)
+- [x] org.freedesktop.systemd1.Manager
+- [x] StartUnit/StopUnit/KillUnit
+- [x] StartTransientUnit (stub - awaiting cgroups)
+- [x] Signals (JobRemoved, UnitRemoved)
 
 ### M4: Cgroup Management
-- [ ] Create/remove cgroup directories
-- [ ] Move processes to cgroups
-- [ ] Resource limits (MemoryMax, etc.)
-- [ ] Empty cgroup detection
+- [x] Create/remove cgroup directories
+- [x] Move processes to cgroups
+- [x] Resource limits (MemoryMax, CPUQuota, TasksMax)
+- [x] Empty cgroup detection
+- [x] Integrated with Manager (auto cgroup setup on start, cleanup on stop)
 
 ### M5: PID 1 Mode
-- [ ] Mount essential filesystems
-- [ ] Zombie reaping
-- [ ] Signal handling
-- [ ] Shutdown sequence
-- [ ] Run as init (exec from initramfs)
+- [x] Mount essential filesystems (hardcoded, same as systemd)
+- [x] Zombie reaping (waitpid loop)
+- [x] Signal handling (SIGTERM/SIGINT/SIGHUP/SIGUSR1)
+- [x] Shutdown sequence (stop services → SIGTERM → SIGKILL → sync → unmount → reboot)
+- [ ] Run as init (kernel cmdline `init=/usr/bin/sysd`)
 
-### M6: Polish
-- [ ] Type=dbus support
-- [ ] Type=forking support
-- [ ] Restart logic
-- [ ] Drop-in directories
-- [ ] Template units (foo@.service)
+### M6: Service Types & Restart
+- [ ] Restart= logic (on-failure, always) with RestartSec=
+- [ ] RemainAfterExit= for oneshot services
+- [ ] Type=dbus (watch BusName= on D-Bus)
+- [ ] Type=forking (wait for parent exit, read PIDFile=)
+- [ ] Type=idle (wait for job queue empty)
+- [ ] KillMode= (control-group/process/mixed)
+
+### M7: Extended Features
+- [ ] DefaultDependencies= (146 uses)
+- [ ] WatchdogSec= (29 uses)
+- [ ] Also= in [Install] (25 uses)
+- [ ] Alias= in [Install] (12 uses)
+- [ ] Template units (foo@.service) with %i/%I specifiers
+- [ ] Drop-in directories (.d/*.conf)
+- [ ] ConditionDirectoryNotEmpty=
+
+### M8: Resource Limits
+- [ ] LimitNOFILE= (file descriptors)
+- [ ] OOMScoreAdjust=
+- [ ] StandardInput=tty, TTYPath=, TTYReset= (for getty)
+
+### Future: Security Sandboxing
+Low priority - services run without sandboxing (like traditional init):
+- ProtectSystem=, ProtectHome=, PrivateTmp=
+- NoNewPrivileges=, CapabilityBoundingSet=
+- SystemCallFilter= (seccomp)
+- PrivateDevices=, PrivateNetwork=
 
 ## Testing Strategy
 

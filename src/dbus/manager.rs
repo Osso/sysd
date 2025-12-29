@@ -7,10 +7,11 @@
 //! - Subscribe to signals (Subscribe)
 
 use std::sync::Arc;
+use tokio::runtime::Handle;
 use tokio::sync::RwLock;
 use zbus::{interface, fdo, object_server::SignalEmitter, zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value}};
 
-use crate::runtime::RuntimeInfo;
+use crate::manager::Manager;
 use super::unit_object_path;
 
 /// Job counter for generating unique job IDs
@@ -27,12 +28,37 @@ fn job_path(id: u32) -> OwnedObjectPath {
 }
 
 pub struct ManagerInterface {
-    runtime: Arc<RwLock<RuntimeInfo>>,
+    manager: Arc<RwLock<Manager>>,
+    handle: Handle,
 }
 
 impl ManagerInterface {
-    pub fn new(runtime: Arc<RwLock<RuntimeInfo>>) -> Self {
-        Self { runtime }
+    pub fn new(manager: Arc<RwLock<Manager>>) -> Self {
+        Self {
+            manager,
+            handle: Handle::current(),
+        }
+    }
+
+    /// Emit JobRemoved signal
+    pub async fn emit_job_removed(
+        ctx: &zbus::object_server::SignalEmitter<'_>,
+        job_id: u32,
+        unit: &str,
+        result: &str,
+    ) -> zbus::Result<()> {
+        let job = job_path(job_id);
+        Self::job_removed(ctx, job_id, job.as_ref(), unit, result).await
+    }
+
+    /// Emit UnitRemoved signal
+    pub async fn emit_unit_removed(
+        ctx: &zbus::object_server::SignalEmitter<'_>,
+        unit: &str,
+    ) -> zbus::Result<()> {
+        let path = super::unit_object_path(unit);
+        let obj_path = ObjectPath::try_from(path.as_str()).unwrap();
+        Self::unit_removed(ctx, unit, obj_path).await
     }
 }
 
@@ -40,51 +66,86 @@ impl ManagerInterface {
 impl ManagerInterface {
     /// Start a unit by name. Returns the job object path.
     async fn start_unit(&self, name: &str, mode: &str) -> fdo::Result<OwnedObjectPath> {
-        let _runtime = self.runtime.read().await;
-        log::info!("StartUnit: {} mode={}", name, mode);
+        log::info!("D-Bus StartUnit: {} mode={}", name, mode);
+        let manager = Arc::clone(&self.manager);
+        let name = name.to_string();
+        self.handle.spawn(async move {
+            let mut mgr = manager.write().await;
+            if let Err(e) = mgr.start(&name).await {
+                log::error!("StartUnit {} failed: {}", name, e);
+            }
+        });
         Ok(job_path(next_job_id()))
     }
 
     /// Stop a unit by name
     async fn stop_unit(&self, name: &str, mode: &str) -> fdo::Result<OwnedObjectPath> {
-        let _runtime = self.runtime.read().await;
-        log::info!("StopUnit: {} mode={}", name, mode);
+        log::info!("D-Bus StopUnit: {} mode={}", name, mode);
+        let manager = Arc::clone(&self.manager);
+        let name = name.to_string();
+        self.handle.spawn(async move {
+            let mut mgr = manager.write().await;
+            if let Err(e) = mgr.stop(&name).await {
+                log::error!("StopUnit {} failed: {}", name, e);
+            }
+        });
         Ok(job_path(next_job_id()))
     }
 
     /// Kill processes in a unit (whom: "main", "control", "all")
     async fn kill_unit(&self, name: &str, whom: &str, signal: i32) -> fdo::Result<()> {
-        let _runtime = self.runtime.read().await;
-        log::info!("KillUnit: {} whom={} signal={}", name, whom, signal);
-        // TODO: Find unit, get PIDs from cgroup, send signal
+        log::info!("D-Bus KillUnit: {} whom={} signal={}", name, whom, signal);
+        // Get the process and send signal
+        let manager = self.manager.read().await;
+        if let Some(state) = manager.status(name) {
+            if let Some(pid) = state.main_pid {
+                unsafe {
+                    libc::kill(pid as i32, signal);
+                }
+            }
+        }
         Ok(())
     }
 
     /// Create and start a transient unit (used by logind for session scopes)
+    ///
+    /// Logind uses this to create session scopes like "session-1.scope".
+    /// For now we stub this - PIDs stay in their current cgroup but logind thinks
+    /// the scope was created successfully.
     async fn start_transient_unit(
         &self,
+        #[zbus(signal_context)]
+        ctx: zbus::object_server::SignalEmitter<'_>,
         name: &str,
         mode: &str,
         properties: Vec<(String, OwnedValue)>,
         _aux: Vec<(String, Vec<(String, OwnedValue)>)>,
     ) -> fdo::Result<OwnedObjectPath> {
-        log::info!("StartTransientUnit: {} mode={}", name, mode);
-
         let (slice, description, pids) = parse_scope_properties(&properties);
 
         log::info!(
-            "Creating scope: name={} slice={:?} desc={:?} pids={:?}",
-            name, slice, description, pids
+            "StartTransientUnit: name={} mode={} slice={:?} desc={:?} pids={:?}",
+            name, mode, slice, description, pids
         );
 
-        // TODO:
+        // Generate job ID and path
+        let job_id = next_job_id();
+        let job = job_path(job_id);
+        let unit_name = name.to_string();
+
+        // Emit JobRemoved signal to indicate the job completed successfully
+        if let Err(e) = Self::job_removed(&ctx, job_id, job.as_ref(), &unit_name, "done").await {
+            log::warn!("Failed to emit JobRemoved signal: {}", e);
+        } else {
+            log::info!("Scope {} created (stub), JobRemoved emitted", unit_name);
+        }
+
+        // TODO: When cgroups are implemented:
         // 1. Create cgroup: /sys/fs/cgroup/{slice}/{name}/
         // 2. Move PIDs into cgroup
-        // 3. Create Scope unit in runtime
-        // 4. Register D-Bus object for the scope
-        // 5. Emit JobRemoved signal when done
+        // 3. Register D-Bus object for the scope
 
-        Ok(job_path(next_job_id()))
+        Ok(job)
     }
 
     /// Subscribe to Manager signals

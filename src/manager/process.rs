@@ -7,8 +7,21 @@ use tokio::process::{Child, Command};
 
 use crate::units::Service;
 
-/// Spawn a process for a service
+/// Options for spawning a service
+#[derive(Default)]
+pub struct SpawnOptions {
+    /// Path to NOTIFY_SOCKET for Type=notify services
+    pub notify_socket: Option<String>,
+}
+
+/// Spawn a process for a service (convenience wrapper)
+#[allow(dead_code)]
 pub fn spawn_service(service: &Service) -> Result<Child, SpawnError> {
+    spawn_service_with_options(service, &SpawnOptions::default())
+}
+
+/// Spawn a process for a service with options
+pub fn spawn_service_with_options(service: &Service, options: &SpawnOptions) -> Result<Child, SpawnError> {
     let exec_start = service.service.exec_start.first()
         .ok_or_else(|| SpawnError::NoExecStart(service.name.clone()))?;
 
@@ -34,6 +47,11 @@ pub fn spawn_service(service: &Service) -> Result<Child, SpawnError> {
         if let Ok(vars) = load_env_file(env_file) {
             cmd.envs(vars);
         }
+    }
+
+    // Set NOTIFY_SOCKET for Type=notify services
+    if let Some(socket_path) = &options.notify_socket {
+        cmd.env("NOTIFY_SOCKET", socket_path);
     }
 
     // Set user/group if specified

@@ -20,31 +20,9 @@
 pub mod cgroups;
 pub mod dbus;
 pub mod manager;
+pub mod pid1;
 pub mod protocol;
 pub mod units;
 
 // Re-exports for D-Bus interfaces
 pub use units::{Service, ServiceType, UnitSection, ServiceSection, InstallSection};
-
-/// Runtime state for the service manager
-pub mod runtime {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
-
-    /// Holds runtime state shared with D-Bus interfaces
-    #[derive(Default)]
-    pub struct RuntimeInfo {
-        /// Loaded units by name
-        pub units: HashMap<String, crate::Service>,
-        // TODO: add process tracking, fd store, etc.
-    }
-
-    pub type SharedRuntime = Arc<RwLock<RuntimeInfo>>;
-
-    impl RuntimeInfo {
-        pub fn new() -> Self {
-            Self::default()
-        }
-    }
-}

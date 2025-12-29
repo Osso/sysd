@@ -15,9 +15,18 @@ use std::path::{Path, PathBuf};
 use std::io;
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+const SYSTEM_SLICE: &str = "system.slice";
 
 pub struct CgroupManager {
     root: PathBuf,
+}
+
+impl Default for CgroupManager {
+    fn default() -> Self {
+        Self {
+            root: PathBuf::from(CGROUP_ROOT),
+        }
+    }
 }
 
 impl CgroupManager {
@@ -153,6 +162,80 @@ impl CgroupManager {
     }
 }
 
+/// Resource limits for a cgroup
+#[derive(Debug, Default, Clone)]
+pub struct CgroupLimits {
+    pub memory_max: Option<u64>,   // bytes
+    pub cpu_quota: Option<u32>,    // percentage
+    pub tasks_max: Option<u32>,
+}
+
+impl CgroupManager {
+    /// Create a cgroup for a service, move the PID into it, and apply limits
+    pub fn setup_service_cgroup(
+        &self,
+        service_name: &str,
+        pid: u32,
+        limits: &CgroupLimits,
+    ) -> io::Result<PathBuf> {
+        // Create the cgroup in system.slice
+        let cgroup_path = self.create_cgroup(Some(SYSTEM_SLICE), service_name)?;
+
+        // Move the process into the cgroup
+        self.add_pid(&cgroup_path, pid)?;
+
+        // Apply resource limits
+        if let Some(mem) = limits.memory_max {
+            if let Err(e) = self.set_memory_max(&cgroup_path, mem) {
+                log::warn!("Failed to set memory limit for {}: {}", service_name, e);
+            }
+        }
+
+        if let Some(cpu) = limits.cpu_quota {
+            if let Err(e) = self.set_cpu_quota(&cgroup_path, cpu) {
+                log::warn!("Failed to set CPU quota for {}: {}", service_name, e);
+            }
+        }
+
+        if let Some(tasks) = limits.tasks_max {
+            if let Err(e) = self.set_tasks_max(&cgroup_path, tasks as u64) {
+                log::warn!("Failed to set tasks limit for {}: {}", service_name, e);
+            }
+        }
+
+        Ok(cgroup_path)
+    }
+
+    /// Clean up a service cgroup (remove if empty)
+    pub fn cleanup_service_cgroup(&self, service_name: &str) -> io::Result<()> {
+        let cgroup_path = self.root.join(SYSTEM_SLICE).join(service_name);
+
+        if !cgroup_path.exists() {
+            return Ok(());
+        }
+
+        // Only remove if empty
+        match self.is_empty(&cgroup_path) {
+            Ok(true) => {
+                self.remove_cgroup(&cgroup_path)?;
+            }
+            Ok(false) => {
+                log::debug!("Cgroup {} not empty, skipping removal", cgroup_path.display());
+            }
+            Err(e) => {
+                log::debug!("Could not check cgroup {}: {}", cgroup_path.display(), e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get the cgroup path for a service
+    pub fn service_cgroup_path(&self, service_name: &str) -> PathBuf {
+        self.root.join(SYSTEM_SLICE).join(service_name)
+    }
+}
+
 /// Create a scope for a logind session
 pub async fn create_session_scope(
     cgroup_manager: &CgroupManager,
@@ -173,4 +256,54 @@ pub async fn create_session_scope(
     cgroup_manager.add_pids(&cgroup_path, pids)?;
 
     Ok(cgroup_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cgroup_limits_default() {
+        let limits = CgroupLimits::default();
+        assert!(limits.memory_max.is_none());
+        assert!(limits.cpu_quota.is_none());
+        assert!(limits.tasks_max.is_none());
+    }
+
+    #[test]
+    fn test_cgroup_limits_with_values() {
+        let limits = CgroupLimits {
+            memory_max: Some(1024 * 1024 * 1024), // 1GB
+            cpu_quota: Some(50),                   // 50%
+            tasks_max: Some(100),
+        };
+        assert_eq!(limits.memory_max, Some(1024 * 1024 * 1024));
+        assert_eq!(limits.cpu_quota, Some(50));
+        assert_eq!(limits.tasks_max, Some(100));
+    }
+
+    #[test]
+    fn test_cgroup_manager_default() {
+        let mgr = CgroupManager::default();
+        assert_eq!(mgr.root, PathBuf::from("/sys/fs/cgroup"));
+    }
+
+    #[test]
+    fn test_service_cgroup_path() {
+        let mgr = CgroupManager::default();
+        let path = mgr.service_cgroup_path("docker.service");
+        assert_eq!(path, PathBuf::from("/sys/fs/cgroup/system.slice/docker.service"));
+    }
+
+    #[test]
+    fn test_cgroup_manager_new_on_linux() {
+        // This test verifies that CgroupManager::new() works on systems with cgroups
+        let result = CgroupManager::new();
+        // On most Linux systems this should succeed, but we don't fail the test
+        // if cgroups aren't available (e.g., in containers)
+        if result.is_ok() {
+            let mgr = result.unwrap();
+            assert_eq!(mgr.root, PathBuf::from("/sys/fs/cgroup"));
+        }
+    }
 }

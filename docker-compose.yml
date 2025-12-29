@@ -1,0 +1,10 @@
+services:
+  sysd:
+    build: .
+    init: false  # We ARE the init
+    privileged: true  # For cgroup access
+    volumes:
+      - ./target/release/sysd:/usr/bin/sysd:ro
+      - ./target/release/sysdctl:/usr/bin/sysdctl:ro
+    tty: true
+    stop_signal: SIGTERM

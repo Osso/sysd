@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use zbus::{connection::Builder, zvariant::ObjectPath, Connection};
 
-use crate::runtime::RuntimeInfo;
+use crate::manager::Manager;
 
 /// D-Bus server state
 pub struct DbusServer {
@@ -28,12 +28,12 @@ pub struct DbusServer {
 
 impl DbusServer {
     /// Start the D-Bus server on the system bus
-    pub async fn new(runtime: Arc<RwLock<RuntimeInfo>>) -> zbus::Result<Self> {
-        let manager = ManagerInterface::new(runtime.clone());
+    pub async fn new(manager: Arc<RwLock<Manager>>) -> zbus::Result<Self> {
+        let manager_iface = ManagerInterface::new(manager.clone());
 
         let connection = Builder::system()?
             .name("org.freedesktop.systemd1")?
-            .serve_at("/org/freedesktop/systemd1", manager)?
+            .serve_at("/org/freedesktop/systemd1", manager_iface)?
             .build()
             .await?;
 
