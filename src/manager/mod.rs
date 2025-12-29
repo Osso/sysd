@@ -334,6 +334,145 @@ impl Manager {
         self.start(&name).await
     }
 
+    /// Enable a unit (create symlinks based on [Install] section)
+    pub async fn enable(&mut self, name: &str) -> Result<Vec<PathBuf>, ManagerError> {
+        let name = self.normalize_name(name);
+
+        // Load the unit to get its Install section
+        if !self.units.contains_key(&name) {
+            self.load(&name).await?;
+        }
+
+        let unit = self.units.get(&name)
+            .ok_or_else(|| ManagerError::NotFound(name.clone()))?;
+
+        let install = unit.install_section()
+            .ok_or_else(|| ManagerError::NoInstallSection(name.clone()))?;
+
+        if install.wanted_by.is_empty() && install.required_by.is_empty() {
+            return Err(ManagerError::NoInstallSection(name.clone()));
+        }
+
+        // Find the unit file path
+        let unit_path = self.find_unit(&name)?;
+
+        let mut created = Vec::new();
+
+        // Create symlinks in .wants directories
+        for target in &install.wanted_by {
+            let link = self.create_wants_link(&name, target, &unit_path)?;
+            created.push(link);
+        }
+
+        // Create symlinks in .requires directories
+        for target in &install.required_by {
+            let link = self.create_requires_link(&name, target, &unit_path)?;
+            created.push(link);
+        }
+
+        Ok(created)
+    }
+
+    /// Disable a unit (remove symlinks)
+    pub async fn disable(&mut self, name: &str) -> Result<Vec<PathBuf>, ManagerError> {
+        let name = self.normalize_name(name);
+
+        // Load to get Install section
+        if !self.units.contains_key(&name) {
+            self.load(&name).await?;
+        }
+
+        let unit = self.units.get(&name)
+            .ok_or_else(|| ManagerError::NotFound(name.clone()))?;
+
+        let install = unit.install_section()
+            .ok_or_else(|| ManagerError::NoInstallSection(name.clone()))?;
+
+        let mut removed = Vec::new();
+
+        // Remove from .wants directories
+        for target in &install.wanted_by {
+            if let Some(link) = self.remove_wants_link(&name, target)? {
+                removed.push(link);
+            }
+        }
+
+        // Remove from .requires directories
+        for target in &install.required_by {
+            if let Some(link) = self.remove_requires_link(&name, target)? {
+                removed.push(link);
+            }
+        }
+
+        Ok(removed)
+    }
+
+    /// Create a symlink in target.wants/
+    fn create_wants_link(&self, unit_name: &str, target: &str, unit_path: &PathBuf) -> Result<PathBuf, ManagerError> {
+        let wants_dir = PathBuf::from("/etc/systemd/system").join(format!("{}.wants", target));
+        std::fs::create_dir_all(&wants_dir)
+            .map_err(|e| ManagerError::Io(e.to_string()))?;
+
+        let link_path = wants_dir.join(unit_name);
+        if link_path.exists() || link_path.is_symlink() {
+            std::fs::remove_file(&link_path)
+                .map_err(|e| ManagerError::Io(e.to_string()))?;
+        }
+
+        std::os::unix::fs::symlink(unit_path, &link_path)
+            .map_err(|e| ManagerError::Io(e.to_string()))?;
+
+        Ok(link_path)
+    }
+
+    /// Create a symlink in target.requires/
+    fn create_requires_link(&self, unit_name: &str, target: &str, unit_path: &PathBuf) -> Result<PathBuf, ManagerError> {
+        let requires_dir = PathBuf::from("/etc/systemd/system").join(format!("{}.requires", target));
+        std::fs::create_dir_all(&requires_dir)
+            .map_err(|e| ManagerError::Io(e.to_string()))?;
+
+        let link_path = requires_dir.join(unit_name);
+        if link_path.exists() || link_path.is_symlink() {
+            std::fs::remove_file(&link_path)
+                .map_err(|e| ManagerError::Io(e.to_string()))?;
+        }
+
+        std::os::unix::fs::symlink(unit_path, &link_path)
+            .map_err(|e| ManagerError::Io(e.to_string()))?;
+
+        Ok(link_path)
+    }
+
+    /// Remove symlink from target.wants/
+    fn remove_wants_link(&self, unit_name: &str, target: &str) -> Result<Option<PathBuf>, ManagerError> {
+        let link_path = PathBuf::from("/etc/systemd/system")
+            .join(format!("{}.wants", target))
+            .join(unit_name);
+
+        if link_path.exists() || link_path.is_symlink() {
+            std::fs::remove_file(&link_path)
+                .map_err(|e| ManagerError::Io(e.to_string()))?;
+            Ok(Some(link_path))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Remove symlink from target.requires/
+    fn remove_requires_link(&self, unit_name: &str, target: &str) -> Result<Option<PathBuf>, ManagerError> {
+        let link_path = PathBuf::from("/etc/systemd/system")
+            .join(format!("{}.requires", target))
+            .join(unit_name);
+
+        if link_path.exists() || link_path.is_symlink() {
+            std::fs::remove_file(&link_path)
+                .map_err(|e| ManagerError::Io(e.to_string()))?;
+            Ok(Some(link_path))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Get service status
     pub fn status(&self, name: &str) -> Option<&ServiceState> {
         let name = self.normalize_name(name);
@@ -447,4 +586,10 @@ pub enum ManagerError {
 
     #[error("Unit is a target (no process): {0}")]
     IsTarget(String),
+
+    #[error("Unit has no [Install] section: {0}")]
+    NoInstallSection(String),
+
+    #[error("I/O error: {0}")]
+    Io(String),
 }

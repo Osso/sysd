@@ -17,6 +17,10 @@ pub enum Request {
     Stop { name: String },
     /// Restart a unit
     Restart { name: String },
+    /// Enable a unit (create symlinks for boot)
+    Enable { name: String },
+    /// Disable a unit (remove symlinks)
+    Disable { name: String },
     /// Get unit status
     Status { name: String },
     /// Get unit dependencies

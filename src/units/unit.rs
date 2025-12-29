@@ -1,6 +1,6 @@
 //! Common unit type that wraps both Service and Target
 
-use super::{Service, Target, UnitSection};
+use super::{InstallSection, Service, Target, UnitSection};
 
 /// A unit can be either a Service or a Target
 #[derive(Debug, Clone)]
@@ -23,6 +23,14 @@ impl Unit {
         match self {
             Unit::Service(s) => &s.unit,
             Unit::Target(t) => &t.unit,
+        }
+    }
+
+    /// Get the [Install] section
+    pub fn install_section(&self) -> Option<&InstallSection> {
+        match self {
+            Unit::Service(s) => Some(&s.install),
+            Unit::Target(_) => None, // Targets don't have install sections
         }
     }
 

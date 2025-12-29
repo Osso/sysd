@@ -42,6 +42,18 @@ enum Command {
         name: String,
     },
 
+    /// Enable a unit to start at boot
+    Enable {
+        /// Unit name
+        name: String,
+    },
+
+    /// Disable a unit from starting at boot
+    Disable {
+        /// Unit name
+        name: String,
+    },
+
     /// Show unit status
     Status {
         /// Unit name
@@ -84,6 +96,8 @@ fn main() {
         Command::Start { name } => Request::Start { name },
         Command::Stop { name } => Request::Stop { name },
         Command::Restart { name } => Request::Restart { name },
+        Command::Enable { name } => Request::Enable { name },
+        Command::Disable { name } => Request::Disable { name },
         Command::Status { name } => Request::Status { name },
         Command::Deps { name } => Request::Deps { name },
         Command::GetDefaultTarget => Request::GetBootTarget,

@@ -120,6 +120,32 @@ async fn handle_request(request: Request, state: &Arc<RwLock<DaemonState>>) -> R
             }
         }
 
+        Request::Enable { name } => {
+            let mut state = state.write().await;
+            match state.manager.enable(&name).await {
+                Ok(links) => {
+                    for link in &links {
+                        info!("Created symlink: {}", link.display());
+                    }
+                    Response::Ok
+                }
+                Err(e) => Response::Error(e.to_string()),
+            }
+        }
+
+        Request::Disable { name } => {
+            let mut state = state.write().await;
+            match state.manager.disable(&name).await {
+                Ok(links) => {
+                    for link in &links {
+                        info!("Removed symlink: {}", link.display());
+                    }
+                    Response::Ok
+                }
+                Err(e) => Response::Error(e.to_string()),
+            }
+        }
+
         Request::Status { name } => {
             let state = state.read().await;
             match state.manager.status(&name) {
