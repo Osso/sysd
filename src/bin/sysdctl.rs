@@ -78,6 +78,9 @@ enum Command {
     /// Reload unit files from disk
     ReloadUnitFiles,
 
+    /// Sync units (reload + restart changed)
+    SyncUnits,
+
     /// Parse a unit file locally (doesn't require daemon)
     Parse {
         /// Path to the unit file
@@ -109,6 +112,7 @@ fn main() {
         Command::Deps { name } => Request::Deps { name },
         Command::GetBootTarget => Request::GetBootTarget,
         Command::ReloadUnitFiles => Request::ReloadUnitFiles,
+        Command::SyncUnits => Request::SyncUnits,
         Command::Ping => Request::Ping,
         Command::Parse { .. } => unreachable!(),
     };
