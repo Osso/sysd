@@ -83,7 +83,7 @@ fn send_signal(signal: &str) -> bool {
 }
 
 #[test]
-#[ignore] // Requires Docker, run with --test-threads=1
+
 fn test_pid1_detection() {
     let _lock = DOCKER_LOCK.lock().unwrap();
 
@@ -116,7 +116,7 @@ fn test_pid1_detection() {
 }
 
 #[test]
-#[ignore] // Requires Docker, run with --test-threads=1
+
 fn test_essential_filesystems_mounted() {
     let _lock = DOCKER_LOCK.lock().unwrap();
 
@@ -139,7 +139,7 @@ fn test_essential_filesystems_mounted() {
 }
 
 #[test]
-#[ignore] // Requires Docker, run with --test-threads=1
+
 fn test_zombie_reaping() {
     let _lock = DOCKER_LOCK.lock().unwrap();
 
@@ -173,7 +173,7 @@ fn test_zombie_reaping() {
 }
 
 #[test]
-#[ignore] // Requires Docker, run with --test-threads=1
+
 fn test_sigusr1_state_dump() {
     let _lock = DOCKER_LOCK.lock().unwrap();
 
@@ -200,7 +200,7 @@ fn test_sigusr1_state_dump() {
 }
 
 #[test]
-#[ignore] // Requires Docker, run with --test-threads=1
+
 fn test_sigterm_shutdown_sequence() {
     let _lock = DOCKER_LOCK.lock().unwrap();
 
@@ -254,7 +254,7 @@ fn test_sigterm_shutdown_sequence() {
 }
 
 #[test]
-#[ignore] // Requires Docker, run with --test-threads=1
+
 fn test_sysd_is_pid1() {
     let _lock = DOCKER_LOCK.lock().unwrap();
 

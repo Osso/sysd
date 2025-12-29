@@ -58,7 +58,7 @@ fn run_qemu_test() -> (bool, String) {
 }
 
 #[test]
-#[ignore] // Requires QEMU and kernel
+
 fn test_qemu_pid1_mounts() {
     if !qemu_available() {
         eprintln!("QEMU not available, skipping test");
@@ -95,7 +95,7 @@ fn test_qemu_pid1_mounts() {
 }
 
 #[test]
-#[ignore]
+
 fn test_qemu_prerequisites() {
     // Just check prerequisites without running full test
     println!("QEMU available: {}", qemu_available());
