@@ -7,6 +7,7 @@ mod reload_unit_files;
 mod start;
 mod status;
 mod stop;
+mod sync_units;
 
 pub use boot::boot;
 pub use default::default_target;
@@ -17,3 +18,4 @@ pub use reload_unit_files::reload_unit_files;
 pub use start::start;
 pub use status::status;
 pub use stop::stop;
+pub use sync_units::sync_units;

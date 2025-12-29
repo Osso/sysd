@@ -62,6 +62,9 @@ enum Command {
 
     /// Reload unit files from disk (like systemctl daemon-reload)
     ReloadUnitFiles,
+
+    /// Sync units: reload files and restart affected services
+    SyncUnits,
 }
 
 #[tokio::main]
@@ -100,6 +103,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::ReloadUnitFiles => {
             commands::reload_unit_files().await?;
+        }
+        Command::SyncUnits => {
+            commands::sync_units().await?;
         }
     }
 
