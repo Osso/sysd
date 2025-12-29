@@ -1,0 +1,7 @@
+#!/bin/bash
+# Reload sysd unit files after package changes
+
+# Only run if sysd is running
+if [[ -S /run/sysd.sock ]]; then
+    /usr/bin/sysdctl daemon-reload 2>/dev/null || true
+fi

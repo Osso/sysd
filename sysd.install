@@ -1,0 +1,18 @@
+post_install() {
+    echo "sysd installed."
+    echo ""
+    echo "To start the daemon:"
+    echo "  sudo sysd"
+    echo ""
+    echo "To control services:"
+    echo "  sysdctl start|stop|restart|status <unit>"
+    echo "  sysdctl enable|disable|is-enabled <unit>"
+    echo "  sysdctl list"
+}
+
+post_upgrade() {
+    if [[ -S /run/sysd.sock ]]; then
+        echo "Reloading sysd unit files..."
+        /usr/bin/sysdctl daemon-reload 2>/dev/null || true
+    fi
+}

@@ -1,0 +1,12 @@
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = usr/lib/systemd/system/*
+Target = etc/systemd/system/*
+
+[Action]
+Description = Reloading sysd unit files...
+When = PostTransaction
+Exec = /usr/share/libalpm/scripts/sysd-daemon-reload
