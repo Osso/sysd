@@ -319,6 +319,21 @@ impl Manager {
         Ok(())
     }
 
+    /// Restart a service (stop then start)
+    pub async fn restart(&mut self, name: &str) -> Result<(), ManagerError> {
+        let name = self.normalize_name(name);
+
+        // Stop if running (ignore NotActive error)
+        match self.stop(&name).await {
+            Ok(()) => {}
+            Err(ManagerError::NotActive(_)) => {}
+            Err(e) => return Err(e),
+        }
+
+        // Start
+        self.start(&name).await
+    }
+
     /// Get service status
     pub fn status(&self, name: &str) -> Option<&ServiceState> {
         let name = self.normalize_name(name);

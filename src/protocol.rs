@@ -15,6 +15,8 @@ pub enum Request {
     Start { name: String },
     /// Stop a unit
     Stop { name: String },
+    /// Restart a unit
+    Restart { name: String },
     /// Get unit status
     Status { name: String },
     /// Get unit dependencies

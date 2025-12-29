@@ -112,6 +112,14 @@ async fn handle_request(request: Request, state: &Arc<RwLock<DaemonState>>) -> R
             }
         }
 
+        Request::Restart { name } => {
+            let mut state = state.write().await;
+            match state.manager.restart(&name).await {
+                Ok(_) => Response::Ok,
+                Err(e) => Response::Error(e.to_string()),
+            }
+        }
+
         Request::Status { name } => {
             let state = state.read().await;
             match state.manager.status(&name) {

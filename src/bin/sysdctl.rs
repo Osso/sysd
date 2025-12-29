@@ -36,6 +36,12 @@ enum Command {
         name: String,
     },
 
+    /// Restart a unit
+    Restart {
+        /// Unit name
+        name: String,
+    },
+
     /// Show unit status
     Status {
         /// Unit name
@@ -77,6 +83,7 @@ fn main() {
         Command::List { user } => Request::List { user },
         Command::Start { name } => Request::Start { name },
         Command::Stop { name } => Request::Stop { name },
+        Command::Restart { name } => Request::Restart { name },
         Command::Status { name } => Request::Status { name },
         Command::Deps { name } => Request::Deps { name },
         Command::GetDefaultTarget => Request::GetBootTarget,
