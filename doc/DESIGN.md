@@ -401,7 +401,7 @@ libc = "0.2"                  # Low-level syscalls
 - [x] Zombie reaping (waitpid loop)
 - [x] Signal handling (SIGTERM/SIGINT/SIGHUP/SIGUSR1)
 - [x] Shutdown sequence (stop services → SIGTERM → SIGKILL → sync → unmount → reboot)
-- [ ] Run as init (kernel cmdline `init=/usr/bin/sysd`)
+- [x] Run as init (kernel cmdline `init=/usr/bin/sysd`)
 
 ### M6: Service Types & Restart
 - [ ] Restart= logic (on-failure, always) with RestartSec=
