@@ -473,6 +473,49 @@ impl Manager {
         }
     }
 
+    /// Check if a unit is enabled
+    pub async fn is_enabled(&mut self, name: &str) -> Result<String, ManagerError> {
+        let name = self.normalize_name(name);
+
+        // Load to get Install section
+        if !self.units.contains_key(&name) {
+            self.load(&name).await?;
+        }
+
+        let unit = self.units.get(&name)
+            .ok_or_else(|| ManagerError::NotFound(name.clone()))?;
+
+        // No install section = static (can't be enabled/disabled)
+        let Some(install) = unit.install_section() else {
+            return Ok("static".to_string());
+        };
+
+        if install.wanted_by.is_empty() && install.required_by.is_empty() {
+            return Ok("static".to_string());
+        }
+
+        // Check if any symlinks exist
+        for target in &install.wanted_by {
+            let link_path = PathBuf::from("/etc/systemd/system")
+                .join(format!("{}.wants", target))
+                .join(&name);
+            if link_path.exists() || link_path.is_symlink() {
+                return Ok("enabled".to_string());
+            }
+        }
+
+        for target in &install.required_by {
+            let link_path = PathBuf::from("/etc/systemd/system")
+                .join(format!("{}.requires", target))
+                .join(&name);
+            if link_path.exists() || link_path.is_symlink() {
+                return Ok("enabled".to_string());
+            }
+        }
+
+        Ok("disabled".to_string())
+    }
+
     /// Get service status
     pub fn status(&self, name: &str) -> Option<&ServiceState> {
         let name = self.normalize_name(name);

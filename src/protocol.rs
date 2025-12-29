@@ -21,6 +21,8 @@ pub enum Request {
     Enable { name: String },
     /// Disable a unit (remove symlinks)
     Disable { name: String },
+    /// Check if unit is enabled
+    IsEnabled { name: String },
     /// Get unit status
     Status { name: String },
     /// Get unit dependencies
@@ -61,6 +63,8 @@ pub enum Response {
     BootTarget(String),
     /// Boot plan (units to start)
     BootPlan(Vec<String>),
+    /// Enabled state (enabled, disabled, static, etc.)
+    EnabledState(String),
     /// Error with message
     Error(String),
     /// Pong (response to ping)

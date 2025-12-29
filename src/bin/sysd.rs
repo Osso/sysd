@@ -146,6 +146,14 @@ async fn handle_request(request: Request, state: &Arc<RwLock<DaemonState>>) -> R
             }
         }
 
+        Request::IsEnabled { name } => {
+            let mut state = state.write().await;
+            match state.manager.is_enabled(&name).await {
+                Ok(enabled_state) => Response::EnabledState(enabled_state),
+                Err(e) => Response::Error(e.to_string()),
+            }
+        }
+
         Request::Status { name } => {
             let state = state.read().await;
             match state.manager.status(&name) {

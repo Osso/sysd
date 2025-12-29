@@ -54,6 +54,12 @@ enum Command {
         name: String,
     },
 
+    /// Check if a unit is enabled
+    IsEnabled {
+        /// Unit name
+        name: String,
+    },
+
     /// Show unit status
     Status {
         /// Unit name
@@ -98,6 +104,7 @@ fn main() {
         Command::Restart { name } => Request::Restart { name },
         Command::Enable { name } => Request::Enable { name },
         Command::Disable { name } => Request::Disable { name },
+        Command::IsEnabled { name } => Request::IsEnabled { name },
         Command::Status { name } => Request::Status { name },
         Command::Deps { name } => Request::Deps { name },
         Command::GetDefaultTarget => Request::GetBootTarget,
@@ -168,6 +175,13 @@ fn print_response(response: Response) {
                 for unit in units {
                     println!("  → {}", unit);
                 }
+            }
+        }
+        Response::EnabledState(state) => {
+            println!("{}", state);
+            // Exit with code 1 if disabled (like systemctl)
+            if state == "disabled" {
+                std::process::exit(1);
             }
         }
     }
