@@ -130,39 +130,3 @@ impl Default for ZombieReaper {
         Self::new()
     }
 }
-
-/// Reap zombies once (synchronous, non-blocking)
-///
-/// This is a simple function for use outside the reaper struct.
-/// Returns the number of zombies reaped.
-pub fn reap_zombies() -> usize {
-    let mut count = 0;
-
-    loop {
-        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => break,
-            Ok(status) => {
-                let pid = match status {
-                    WaitStatus::Exited(p, code) => {
-                        log::debug!("Reaped PID {} (exited {})", p.as_raw(), code);
-                        p.as_raw()
-                    }
-                    WaitStatus::Signaled(p, sig, _) => {
-                        log::debug!("Reaped PID {} (killed by {})", p.as_raw(), sig);
-                        p.as_raw()
-                    }
-                    _ => continue,
-                };
-                let _ = pid; // suppress unused warning
-                count += 1;
-            }
-            Err(nix::errno::Errno::ECHILD) => break,
-            Err(e) => {
-                log::error!("waitpid error: {}", e);
-                break;
-            }
-        }
-    }
-
-    count
-}

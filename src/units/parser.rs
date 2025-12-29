@@ -135,20 +135,6 @@ pub async fn parse_unit_file(path: &Path) -> Result<ParsedFile, ParseError> {
     parse_file(&content)
 }
 
-/// Convert "yes/true/1" to bool
-pub fn string_to_bool(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-    let upper = s.to_uppercase();
-    matches!(upper.as_str(), "YES" | "TRUE" | "1" | "ON")
-}
-
-/// Extract values from a section, ignoring entry numbers
-pub fn extract_values(entries: Vec<(u32, String)>) -> Vec<String> {
-    entries.into_iter().map(|(_, v)| v).collect()
-}
-
 /// Parse Environment= values using shell-like quoting
 pub fn parse_environment(raw: &str) -> Result<Vec<(String, String)>, ParseError> {
     let parts = shlex::split(raw).ok_or_else(|| {
