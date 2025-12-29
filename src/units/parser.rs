@@ -154,6 +154,18 @@ pub fn parse_environment(raw: &str) -> Result<Vec<(String, String)>, ParseError>
 mod tests {
     use super::*;
 
+    /// Extract just the string values from parsed entries (for tests)
+    fn extract_values(entries: Vec<(u32, String)>) -> Vec<String> {
+        let mut sorted = entries;
+        sorted.sort_by_key(|(order, _)| *order);
+        sorted.into_iter().map(|(_, v)| v).collect()
+    }
+
+    /// Parse a boolean string value (for tests)
+    fn string_to_bool(s: &str) -> bool {
+        matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on")
+    }
+
     #[test]
     fn test_parse_simple_service() {
         let content = r#"

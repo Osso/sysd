@@ -12,7 +12,6 @@
 
 use std::process::Command;
 use std::path::Path;
-use std::fs;
 
 /// Check if QEMU is available
 fn qemu_available() -> bool {
