@@ -14,7 +14,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORK_DIR="${PROJECT_DIR}/target/qemu-test"
-SYSD_BIN="${PROJECT_DIR}/target/release/sysd"
+SYSD_BIN="${PROJECT_DIR}/target/x86_64-unknown-linux-musl/release/sysd"
 
 # Colors
 RED='\033[0;31m'
@@ -63,22 +63,11 @@ create_initramfs() {
 
     local initrd_dir="$WORK_DIR/initrd"
     rm -rf "$initrd_dir"
-    mkdir -p "$initrd_dir"/{bin,dev,proc,sys,run,tmp,etc,lib,lib64,usr/lib}
+    mkdir -p "$initrd_dir"/{bin,dev,proc,sys,run,tmp,etc}
 
-    # Copy sysd as init
+    # Copy sysd as init (statically linked with musl)
     cp "$SYSD_BIN" "$initrd_dir/init"
     chmod +x "$initrd_dir/init"
-
-    # Copy required shared libraries for sysd
-    log "Copying shared libraries..."
-    cp /usr/lib/libgcc_s.so.1 "$initrd_dir/usr/lib/"
-    cp /usr/lib/libm.so.6 "$initrd_dir/usr/lib/"
-    cp /usr/lib/libc.so.6 "$initrd_dir/usr/lib/"
-    cp /usr/lib64/ld-linux-x86-64.so.2 "$initrd_dir/lib64/"
-    # Create symlinks for library path resolution
-    ln -sf ../usr/lib/libgcc_s.so.1 "$initrd_dir/lib/"
-    ln -sf ../usr/lib/libm.so.6 "$initrd_dir/lib/"
-    ln -sf ../usr/lib/libc.so.6 "$initrd_dir/lib/"
 
     # Copy busybox for utilities (if available)
     if command -v busybox &>/dev/null; then

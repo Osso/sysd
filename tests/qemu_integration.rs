@@ -8,7 +8,7 @@
 //! Requirements:
 //! - qemu-system-x86_64
 //! - Linux kernel at /boot/vmlinuz-linux (or set KERNEL env var)
-//! - cargo build --release
+//! - cargo build --release (musl target is default via .cargo/config.toml)
 
 use std::process::Command;
 use std::path::Path;
@@ -32,11 +32,11 @@ fn kernel_available() -> bool {
         })
 }
 
-/// Check if sysd release binary exists
+/// Check if sysd release binary exists (musl target)
 fn sysd_binary_exists() -> bool {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     Path::new(manifest_dir)
-        .join("target/release/sysd")
+        .join("target/x86_64-unknown-linux-musl/release/sysd")
         .exists()
 }
 
@@ -107,6 +107,6 @@ fn test_qemu_prerequisites() {
         println!("Install with: pacman -S qemu-system-x86");
     }
     if !sysd_binary_exists() {
-        println!("Build with: cargo build --release");
+        println!("Build with: cargo build --release (musl target is default)");
     }
 }
