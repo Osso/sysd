@@ -23,6 +23,8 @@ package() {
     install -Dm755 target/release/sysdctl "$pkgdir/usr/bin/sysdctl"
 
     # Pacman hooks
-    install -Dm644 hooks/sysd-daemon-reload.hook "$pkgdir/usr/share/libalpm/hooks/sysd-daemon-reload.hook"
+    install -Dm644 hooks/sysd-daemon-reload.hook "$pkgdir/usr/share/libalpm/hooks/30-sysd-daemon-reload.hook"
+    install -Dm644 hooks/sysd-restart-changed.hook "$pkgdir/usr/share/libalpm/hooks/30-sysd-restart-changed.hook"
     install -Dm755 hooks/sysd-daemon-reload "$pkgdir/usr/share/libalpm/scripts/sysd-daemon-reload"
+    install -Dm755 hooks/sysd-restart-changed "$pkgdir/usr/share/libalpm/scripts/sysd-restart-changed"
 }

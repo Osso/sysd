@@ -1,0 +1,20 @@
+#!/bin/bash
+# Restart services whose unit files were upgraded
+
+# Only run if sysd is running
+[[ -S /run/sysd.sock ]] || exit 0
+
+# Read changed files from stdin (passed by NeedsTargets)
+while read -r file; do
+    # Extract unit name from path
+    unit=$(basename "$file")
+
+    # Only handle .service files
+    [[ "$unit" == *.service ]] || continue
+
+    # Check if running, restart if so
+    if /usr/bin/sysdctl status "$unit" 2>/dev/null | grep -q "State: Active"; then
+        echo "  Restarting $unit..."
+        /usr/bin/sysdctl restart "$unit" 2>/dev/null || true
+    fi
+done

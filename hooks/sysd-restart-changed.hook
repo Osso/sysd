@@ -1,0 +1,10 @@
+[Trigger]
+Type = Path
+Operation = Upgrade
+Target = usr/lib/systemd/system/*
+
+[Action]
+Description = Restarting changed services...
+When = PostTransaction
+Exec = /usr/share/libalpm/scripts/sysd-restart-changed
+NeedsTargets
