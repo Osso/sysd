@@ -3,5 +3,5 @@
 
 # Only run if sysd is running
 if [[ -S /run/sysd.sock ]]; then
-    /usr/bin/sysdctl daemon-reload 2>/dev/null || true
+    /usr/bin/sysdctl reload-unit-files 2>/dev/null || true
 fi

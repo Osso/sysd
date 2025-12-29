@@ -73,10 +73,10 @@ enum Command {
     },
 
     /// Show the default boot target
-    GetDefaultTarget,
+    GetBootTarget,
 
-    /// Reload unit files from disk (like daemon-reload)
-    DaemonReload,
+    /// Reload unit files from disk
+    ReloadUnitFiles,
 
     /// Parse a unit file locally (doesn't require daemon)
     Parse {
@@ -107,8 +107,8 @@ fn main() {
         Command::IsEnabled { name } => Request::IsEnabled { name },
         Command::Status { name } => Request::Status { name },
         Command::Deps { name } => Request::Deps { name },
-        Command::GetDefaultTarget => Request::GetBootTarget,
-        Command::DaemonReload => Request::ReloadUnitFiles,
+        Command::GetBootTarget => Request::GetBootTarget,
+        Command::ReloadUnitFiles => Request::ReloadUnitFiles,
         Command::Ping => Request::Ping,
         Command::Parse { .. } => unreachable!(),
     };
