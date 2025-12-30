@@ -78,6 +78,7 @@ pub fn spawn_service_with_options(
     let tty_path = service.service.tty_path.clone();
     let tty_reset = service.service.tty_reset;
     let std_input = service.service.standard_input.clone();
+    let service_section = service.service.clone(); // For sandbox
 
     // Apply process settings in pre_exec (runs after fork, before exec)
     #[cfg(unix)]
@@ -102,7 +103,13 @@ pub fn spawn_service_with_options(
                 }
             }
 
-            // Set user ID (if specified)
+            // Apply security sandbox (must be done before dropping privileges)
+            if let Err(e) = super::sandbox::apply_sandbox(&service_section) {
+                log::warn!("Sandbox setup failed: {}", e);
+                // Continue anyway - sandbox failures shouldn't prevent service start
+            }
+
+            // Set user ID (if specified) - must be after sandbox setup
             if let Some(uid) = uid {
                 nix::unistd::setuid(nix::unistd::Uid::from_raw(uid))?;
             }

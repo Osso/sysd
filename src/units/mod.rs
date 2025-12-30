@@ -12,7 +12,7 @@ pub use service::*;
 pub use target::Target;
 pub use unit::Unit;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Convert parsed INI data into a typed Service
 pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseError> {
@@ -207,6 +207,120 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
         if let Some(vals) = service.get("OOMSCOREADJUST") {
             if let Some((_, s)) = vals.first() {
                 svc.service.oom_score_adjust = s.parse().ok();
+            }
+        }
+
+        // Security sandboxing
+        if let Some(vals) = service.get("NONEWPRIVILEGES") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.no_new_privileges =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("PROTECTSYSTEM") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.protect_system = ProtectSystem::parse(s).unwrap_or_default();
+            }
+        }
+        if let Some(vals) = service.get("PROTECTHOME") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.protect_home = ProtectHome::parse(s).unwrap_or_default();
+            }
+        }
+        if let Some(vals) = service.get("PRIVATETMP") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.private_tmp =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("PRIVATEDEVICES") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.private_devices =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("PRIVATENETWORK") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.private_network =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("PROTECTKERNELMODULES") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.protect_kernel_modules =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("PROTECTPROC") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.protect_proc = ProtectProc::parse(s).unwrap_or_default();
+            }
+        }
+
+        // Capabilities (space-separated list, possibly with ~ prefix for drop)
+        if let Some(vals) = service.get("CAPABILITYBOUNDINGSET") {
+            for (_, v) in vals {
+                svc.service.capability_bounding_set.extend(
+                    v.split_whitespace().map(|s| s.to_string())
+                );
+            }
+        }
+        if let Some(vals) = service.get("AMBIENTCAPABILITIES") {
+            for (_, v) in vals {
+                svc.service.ambient_capabilities.extend(
+                    v.split_whitespace().map(|s| s.to_string())
+                );
+            }
+        }
+
+        // RestrictNamespaces (true/false or space-separated list)
+        if let Some(vals) = service.get("RESTRICTNAMESPACES") {
+            if let Some((_, s)) = vals.first() {
+                let lower = s.to_lowercase();
+                if matches!(lower.as_str(), "yes" | "true" | "1" | "on") {
+                    // Block all namespaces
+                    svc.service.restrict_namespaces = Some(Vec::new());
+                } else if matches!(lower.as_str(), "no" | "false" | "0" | "off") {
+                    // Allow all namespaces (no restriction)
+                    svc.service.restrict_namespaces = None;
+                } else {
+                    // Space-separated list of allowed/denied namespaces
+                    svc.service.restrict_namespaces = Some(
+                        s.split_whitespace().map(|s| s.to_string()).collect()
+                    );
+                }
+            }
+        }
+
+        // Path restrictions
+        if let Some(vals) = service.get("READWRITEPATHS") {
+            for (_, v) in vals {
+                svc.service.read_write_paths.extend(
+                    v.split_whitespace().map(|s| PathBuf::from(s))
+                );
+            }
+        }
+        if let Some(vals) = service.get("READONLYPATHS") {
+            for (_, v) in vals {
+                svc.service.read_only_paths.extend(
+                    v.split_whitespace().map(|s| PathBuf::from(s))
+                );
+            }
+        }
+        if let Some(vals) = service.get("INACCESSIBLEPATHS") {
+            for (_, v) in vals {
+                svc.service.inaccessible_paths.extend(
+                    v.split_whitespace().map(|s| PathBuf::from(s))
+                );
+            }
+        }
+
+        // Seccomp system call filter
+        if let Some(vals) = service.get("SYSTEMCALLFILTER") {
+            for (_, v) in vals {
+                svc.service.system_call_filter.extend(
+                    v.split_whitespace().map(|s| s.to_string())
+                );
             }
         }
     }
@@ -787,5 +901,56 @@ WantedBy=getty.target
         assert_eq!(svc.service.standard_input, StdInput::TtyForce);
         assert_eq!(svc.service.tty_path, Some("/dev/%I".into()));
         assert!(svc.service.tty_reset);
+    }
+
+    #[test]
+    fn test_parse_security_sandboxing() {
+        let content = r#"
+[Unit]
+Description=Hardened service
+
+[Service]
+ExecStart=/usr/bin/myservice
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelModules=yes
+ProtectProc=invisible
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+RestrictNamespaces=yes
+ReadWritePaths=/var/lib/myservice /run/myservice
+ReadOnlyPaths=/etc/myservice
+InaccessiblePaths=/home
+SystemCallFilter=@system-service ~@privileged
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("hardened.service", &parsed).unwrap();
+
+        assert!(svc.service.no_new_privileges);
+        assert_eq!(svc.service.protect_system, ProtectSystem::Strict);
+        assert_eq!(svc.service.protect_home, ProtectHome::ReadOnly);
+        assert!(svc.service.private_tmp);
+        assert!(svc.service.private_devices);
+        assert!(svc.service.private_network);
+        assert!(svc.service.protect_kernel_modules);
+        assert_eq!(svc.service.protect_proc, ProtectProc::Invisible);
+
+        assert_eq!(svc.service.capability_bounding_set, vec![
+            "CAP_NET_BIND_SERVICE", "CAP_DAC_OVERRIDE"
+        ]);
+        assert_eq!(svc.service.ambient_capabilities, vec!["CAP_NET_BIND_SERVICE"]);
+
+        // RestrictNamespaces=yes means block all (empty vec)
+        assert_eq!(svc.service.restrict_namespaces, Some(Vec::new()));
+
+        assert_eq!(svc.service.read_write_paths.len(), 2);
+        assert_eq!(svc.service.read_only_paths, vec![PathBuf::from("/etc/myservice")]);
+        assert_eq!(svc.service.inaccessible_paths, vec![PathBuf::from("/home")]);
+
+        assert_eq!(svc.service.system_call_filter, vec!["@system-service", "~@privileged"]);
     }
 }

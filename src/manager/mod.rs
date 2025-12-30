@@ -5,11 +5,13 @@
 mod deps;
 mod notify;
 mod process;
+pub mod sandbox;
 mod state;
 
 pub use deps::{CycleError, DepGraph};
 pub use notify::{AsyncNotifyListener, NotifyMessage, NOTIFY_SOCKET_PATH};
 pub use process::{SpawnError, SpawnOptions};
+pub use sandbox::apply_sandbox;
 pub use state::{ActiveState, ServiceState, SubState};
 
 use std::collections::HashMap;

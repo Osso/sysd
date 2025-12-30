@@ -425,12 +425,20 @@ libc = "0.2"                  # Low-level syscalls
 - [x] OOMScoreAdjust=
 - [x] StandardInput=tty, TTYPath=, TTYReset= (for getty)
 
-### Future: Security Sandboxing
-Low priority - services run without sandboxing (like traditional init):
-- ProtectSystem=, ProtectHome=, PrivateTmp=
-- NoNewPrivileges=, CapabilityBoundingSet=
-- SystemCallFilter= (seccomp)
-- PrivateDevices=, PrivateNetwork=
+### M9: Security Sandboxing ✓
+- [x] NoNewPrivileges= (47 uses) - prctl(PR_SET_NO_NEW_PRIVS)
+- [x] ProtectSystem= (53 uses) - read-only bind mounts for /, /usr
+- [x] ProtectHome= (51 uses) - hide/read-only /home, /root, /run/user
+- [x] PrivateTmp= (36 uses) - isolated /tmp and /var/tmp
+- [x] CapabilityBoundingSet= (42 uses) - drop capabilities
+- [x] AmbientCapabilities= (9 uses) - grant capabilities
+- [x] PrivateDevices= (27 uses) - isolated /dev with only null/zero/full/random/urandom
+- [x] PrivateNetwork= (20 uses) - isolated network namespace
+- [x] RestrictNamespaces= (33 uses) - block namespace creation (parsed, not enforced)
+- [x] ProtectKernelModules= (37 uses) - block module loading
+- [x] ProtectProc= (19 uses) - /proc visibility restrictions
+- [x] ReadWritePaths=/ReadOnlyPaths= (15 uses) - filesystem access control
+- [x] SystemCallFilter= (59 uses) - seccomp filtering (parsed, not enforced)
 
 ## Testing Strategy
 

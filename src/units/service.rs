@@ -79,6 +79,72 @@ impl StdInput {
     }
 }
 
+/// ProtectSystem= settings
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum ProtectSystem {
+    #[default]
+    No,      // No protection (default)
+    Yes,     // /usr and /boot read-only
+    Full,    // /usr, /boot, and /etc read-only
+    Strict,  // Entire filesystem read-only except /dev, /proc, /sys
+}
+
+impl ProtectSystem {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "no" | "false" | "0" => Some(Self::No),
+            "yes" | "true" | "1" => Some(Self::Yes),
+            "full" => Some(Self::Full),
+            "strict" => Some(Self::Strict),
+            _ => None,
+        }
+    }
+}
+
+/// ProtectHome= settings
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum ProtectHome {
+    #[default]
+    No,       // No protection (default)
+    Yes,      // /home, /root, /run/user inaccessible
+    ReadOnly, // /home, /root, /run/user read-only
+    Tmpfs,    // /home, /root, /run/user as empty tmpfs
+}
+
+impl ProtectHome {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "no" | "false" | "0" => Some(Self::No),
+            "yes" | "true" | "1" => Some(Self::Yes),
+            "read-only" => Some(Self::ReadOnly),
+            "tmpfs" => Some(Self::Tmpfs),
+            _ => None,
+        }
+    }
+}
+
+/// ProtectProc= settings for /proc visibility
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum ProtectProc {
+    #[default]
+    Default,     // Normal /proc visibility
+    Invisible,   // Hide processes of other users
+    Ptraceable,  // Only show ptraceable processes
+    NoAccess,    // /proc completely inaccessible
+}
+
+impl ProtectProc {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "default" => Some(Self::Default),
+            "invisible" => Some(Self::Invisible),
+            "ptraceable" => Some(Self::Ptraceable),
+            "noaccess" => Some(Self::NoAccess),
+            _ => None,
+        }
+    }
+}
+
 /// [Unit] section
 #[derive(Debug, Clone)]
 pub struct UnitSection {
@@ -169,6 +235,31 @@ pub struct ServiceSection {
 
     // OOM killer
     pub oom_score_adjust: Option<i32>, // OOMScoreAdjust= (-1000 to 1000)
+
+    // Security sandboxing
+    pub no_new_privileges: bool,              // NoNewPrivileges=
+    pub protect_system: ProtectSystem,        // ProtectSystem=
+    pub protect_home: ProtectHome,            // ProtectHome=
+    pub private_tmp: bool,                    // PrivateTmp=
+    pub private_devices: bool,                // PrivateDevices=
+    pub private_network: bool,                // PrivateNetwork=
+    pub protect_kernel_modules: bool,         // ProtectKernelModules=
+    pub protect_proc: ProtectProc,            // ProtectProc=
+
+    // Capabilities
+    pub capability_bounding_set: Vec<String>, // CapabilityBoundingSet=
+    pub ambient_capabilities: Vec<String>,    // AmbientCapabilities=
+
+    // Namespace restrictions (None = not set, Some(empty) = all blocked)
+    pub restrict_namespaces: Option<Vec<String>>, // RestrictNamespaces=
+
+    // Path restrictions
+    pub read_write_paths: Vec<PathBuf>,   // ReadWritePaths=
+    pub read_only_paths: Vec<PathBuf>,    // ReadOnlyPaths=
+    pub inaccessible_paths: Vec<PathBuf>, // InaccessiblePaths=
+
+    // Seccomp
+    pub system_call_filter: Vec<String>, // SystemCallFilter=
 }
 
 impl Default for ServiceSection {
@@ -204,6 +295,22 @@ impl Default for ServiceSection {
             tasks_max: None,
             limit_nofile: None,
             oom_score_adjust: None,
+            // Security sandboxing defaults (all disabled)
+            no_new_privileges: false,
+            protect_system: ProtectSystem::default(),
+            protect_home: ProtectHome::default(),
+            private_tmp: false,
+            private_devices: false,
+            private_network: false,
+            protect_kernel_modules: false,
+            protect_proc: ProtectProc::default(),
+            capability_bounding_set: Vec::new(),
+            ambient_capabilities: Vec::new(),
+            restrict_namespaces: None,
+            read_write_paths: Vec::new(),
+            read_only_paths: Vec::new(),
+            inaccessible_paths: Vec::new(),
+            system_call_filter: Vec::new(),
         }
     }
 }
