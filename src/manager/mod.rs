@@ -42,6 +42,8 @@ pub struct Manager {
     cgroup_paths: HashMap<String, PathBuf>,
     /// PIDFile paths for Type=forking services
     pid_files: HashMap<String, PathBuf>,
+    /// Count of active jobs (for Type=idle)
+    active_jobs: u32,
 }
 
 impl Manager {
@@ -73,6 +75,7 @@ impl Manager {
             cgroup_manager,
             cgroup_paths: HashMap::new(),
             pid_files: HashMap::new(),
+            active_jobs: 0,
         }
     }
 
@@ -302,6 +305,20 @@ impl Manager {
 
         // Update state to starting
         state.set_starting();
+        self.active_jobs += 1;
+
+        // Type=idle: wait for job queue to be empty (or timeout)
+        let is_idle = service.service.service_type == ServiceType::Idle;
+        if is_idle {
+            // Wait up to 5 seconds for other jobs to complete
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while self.active_jobs > 1 && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            if self.active_jobs > 1 {
+                log::debug!("{}: idle timeout, proceeding anyway", name);
+            }
+        }
 
         // Prepare spawn options
         let is_notify = service.service.service_type == ServiceType::Notify;
@@ -371,10 +388,11 @@ impl Manager {
                 self.pid_files.insert(name.to_string(), pf);
             }
         } else {
-            // Type=simple: immediately mark as running
+            // Type=simple/idle: immediately mark as running
             if let Some(state) = self.states.get_mut(name) {
                 state.set_running(pid);
             }
+            self.active_jobs = self.active_jobs.saturating_sub(1);
             log::info!("Started {} (PID {})", name, pid);
         }
 
@@ -758,6 +776,7 @@ impl Manager {
                             .and_then(|c| c.id())
                             .unwrap_or(0);
                         state.set_running(pid);
+                        self.active_jobs = self.active_jobs.saturating_sub(1);
                         log::info!("{} signaled READY", name);
                     }
                 }
@@ -815,6 +834,7 @@ impl Manager {
                             if let Ok(child_pid) = content.trim().parse::<u32>() {
                                 if let Some(state) = self.states.get_mut(&name) {
                                     state.set_running(child_pid);
+                                    self.active_jobs = self.active_jobs.saturating_sub(1);
                                     log::info!("{} forked, main PID {} (from {})",
                                         name, child_pid, pid_file.display());
                                 }
@@ -833,6 +853,7 @@ impl Manager {
                     if let Some(state) = self.states.get_mut(&name) {
                         state.set_running(0); // Unknown PID
                     }
+                    self.active_jobs = self.active_jobs.saturating_sub(1);
                     continue;
                 }
             }

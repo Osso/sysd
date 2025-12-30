@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use sysd::protocol::{Request, Response, SOCKET_PATH};
-use unix_ipc::Client;
+use peercred_ipc::Client;
 
 #[derive(Parser)]
 #[command(name = "sysdctl")]

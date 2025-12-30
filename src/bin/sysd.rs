@@ -17,7 +17,7 @@ use sysd::dbus::DbusServer;
 use sysd::manager::Manager;
 use sysd::pid1::{self, SignalHandler, SysdSignal, ShutdownType, ZombieReaper};
 use sysd::protocol::{Request, Response, UnitInfo, SOCKET_PATH};
-use unix_ipc::{CallerInfo, Connection, Server};
+use peercred_ipc::{CallerInfo, Connection, Server};
 
 #[derive(Parser)]
 #[command(name = "sysd")]

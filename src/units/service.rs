@@ -14,6 +14,7 @@ pub enum ServiceType {
     Notify,   // Ready on sd_notify READY=1
     Dbus,     // Ready when D-Bus name acquired
     Oneshot,  // Run once, no main process
+    Idle,     // Like simple, but wait for job queue empty
 }
 
 /// Restart policy
@@ -179,6 +180,7 @@ impl ServiceType {
             "notify" => Some(Self::Notify),
             "dbus" => Some(Self::Dbus),
             "oneshot" => Some(Self::Oneshot),
+            "idle" => Some(Self::Idle),
             _ => None,
         }
     }
