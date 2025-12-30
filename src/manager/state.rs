@@ -55,6 +55,7 @@ pub enum SubState {
     Stopping,
     Failed,
     Exited,
+    AutoRestart,  // Waiting for restart delay
 }
 
 impl SubState {
@@ -66,6 +67,7 @@ impl SubState {
             Self::Stopping => "stop",
             Self::Failed => "failed",
             Self::Exited => "exited",
+            Self::AutoRestart => "auto-restart",
         }
     }
 }
@@ -83,6 +85,10 @@ pub struct ServiceState {
     pub exit_code: Option<i32>,
     /// Error message if failed
     pub error: Option<String>,
+    /// When to restart (if auto-restart pending)
+    pub restart_at: Option<Instant>,
+    /// Number of restarts since last successful run
+    pub restart_count: u32,
 }
 
 impl Default for ServiceState {
@@ -94,6 +100,8 @@ impl Default for ServiceState {
             state_change_time: Instant::now(),
             exit_code: None,
             error: None,
+            restart_at: None,
+            restart_count: 0,
         }
     }
 }
@@ -130,6 +138,33 @@ impl ServiceState {
         self.main_pid = None;
         self.exit_code = Some(exit_code);
         self.state_change_time = Instant::now();
+        self.restart_at = None;
+    }
+
+    /// Schedule an automatic restart after a delay
+    pub fn set_auto_restart(&mut self, delay: std::time::Duration) {
+        self.active = ActiveState::Activating;
+        self.sub = SubState::AutoRestart;
+        self.main_pid = None;
+        self.restart_at = Some(Instant::now() + delay);
+        self.restart_count += 1;
+        self.state_change_time = Instant::now();
+    }
+
+    /// Check if restart is due
+    pub fn restart_due(&self) -> bool {
+        self.restart_at.map(|t| Instant::now() >= t).unwrap_or(false)
+    }
+
+    /// Clear restart state (after successful start)
+    pub fn clear_restart(&mut self) {
+        self.restart_at = None;
+        // Don't reset count here - only on explicit stop or long uptime
+    }
+
+    /// Reset restart count (after successful long run)
+    pub fn reset_restart_count(&mut self) {
+        self.restart_count = 0;
     }
 
     pub fn set_failed(&mut self, error: String) {

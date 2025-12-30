@@ -92,6 +92,22 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
                 svc.service.timeout_stop_sec = parse_duration(s);
             }
         }
+        if let Some(vals) = service.get("REMAINAFTEREXIT") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.remain_after_exit = matches!(
+                    s.to_lowercase().as_str(),
+                    "yes" | "true" | "1" | "on"
+                );
+            }
+        }
+        if let Some(vals) = service.get("PIDFILE") {
+            svc.service.pid_file = vals.first().map(|(_, v)| v.into());
+        }
+        if let Some(vals) = service.get("KILLMODE") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.kill_mode = KillMode::parse(s).unwrap_or_default();
+            }
+        }
 
         // Credentials
         if let Some(vals) = service.get("USER") {
@@ -338,5 +354,42 @@ WantedBy=multi-user.target
         );
         assert!(svc.service.environment.contains(&("FOO".into(), "bar".into())));
         assert!(svc.service.environment.contains(&("BAZ".into(), "qux".into())));
+    }
+
+    #[test]
+    fn test_parse_oneshot_remain_after_exit() {
+        let content = r#"
+[Unit]
+Description=Run once at boot
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/setup-something
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("setup.service", &parsed).unwrap();
+
+        assert_eq!(svc.service.service_type, ServiceType::Oneshot);
+        assert!(svc.service.remain_after_exit);
+    }
+
+    #[test]
+    fn test_parse_restart_on_failure() {
+        let content = r#"
+[Service]
+Type=simple
+ExecStart=/usr/bin/myapp
+Restart=on-failure
+RestartSec=5s
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("myapp.service", &parsed).unwrap();
+
+        assert_eq!(svc.service.restart, RestartPolicy::OnFailure);
+        assert_eq!(svc.service.restart_sec, std::time::Duration::from_secs(5));
     }
 }

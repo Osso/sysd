@@ -18,7 +18,7 @@ use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use crate::cgroups::{CgroupLimits, CgroupManager};
-use crate::units::{self, Service, ServiceType, Unit};
+use crate::units::{self, KillMode, RestartPolicy, Service, ServiceType, Unit};
 
 /// Service manager that tracks and controls units (services and targets)
 pub struct Manager {
@@ -40,6 +40,8 @@ pub struct Manager {
     cgroup_manager: Option<CgroupManager>,
     /// Active cgroup paths for services
     cgroup_paths: HashMap<String, PathBuf>,
+    /// PIDFile paths for Type=forking services
+    pid_files: HashMap<String, PathBuf>,
 }
 
 impl Manager {
@@ -70,6 +72,7 @@ impl Manager {
             waiting_ready: HashMap::new(),
             cgroup_manager,
             cgroup_paths: HashMap::new(),
+            pid_files: HashMap::new(),
         }
     }
 
@@ -352,10 +355,21 @@ impl Manager {
         // Store the child process
         self.processes.insert(name.to_string(), child);
 
+        let is_forking = service.service.service_type == ServiceType::Forking;
+        let pid_file = service.service.pid_file.clone();
+
         if is_notify {
             // Type=notify: stay in starting state until READY=1 received
             self.waiting_ready.insert(pid, name.to_string());
             log::info!("Started {} (PID {}), waiting for READY", name, pid);
+        } else if is_forking {
+            // Type=forking: wait for parent to exit, then read PIDFile
+            log::info!("Started {} (PID {}), waiting for fork", name, pid);
+            // Store PIDFile path for later use in reap()
+            if let Some(pf) = pid_file {
+                log::debug!("{} will read PID from {}", name, pf.display());
+                self.pid_files.insert(name.to_string(), pf);
+            }
         } else {
             // Type=simple: immediately mark as running
             if let Some(state) = self.states.get_mut(name) {
@@ -380,43 +394,69 @@ impl Manager {
 
         state.set_stopping();
 
+        // Get kill mode from service config
+        let kill_mode = self.units.get(&name)
+            .and_then(|u| u.as_service())
+            .map(|s| s.service.kill_mode.clone())
+            .unwrap_or_default();
+
         // Get the child process
         if let Some(mut child) = self.processes.remove(&name) {
-            // Send SIGTERM
             if let Some(pid) = child.id() {
-                log::info!("Stopping {} (PID {})", name, pid);
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGTERM);
+                log::info!("Stopping {} (PID {}, KillMode={:?})", name, pid, kill_mode);
+
+                match kill_mode {
+                    KillMode::None => {
+                        // Don't send any signals, just wait (or timeout)
+                    }
+                    KillMode::Process => {
+                        // Only kill the main process
+                        unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                    }
+                    KillMode::Mixed | KillMode::ControlGroup => {
+                        // SIGTERM to main process first
+                        unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                        // For cgroup killing, we'd also send to all cgroup members
+                        // This requires cgroup iteration which we'll skip for now
+                    }
                 }
             }
 
             // Wait for exit (with timeout)
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                child.wait()
-            ).await {
+            let timeout_sec = self.units.get(&name)
+                .and_then(|u| u.as_service())
+                .and_then(|s| s.service.timeout_stop_sec)
+                .unwrap_or(std::time::Duration::from_secs(10));
+
+            match tokio::time::timeout(timeout_sec, child.wait()).await {
                 Ok(Ok(status)) => {
                     let code = status.code().unwrap_or(-1);
-                    state.set_stopped(code);
+                    if let Some(state) = self.states.get_mut(&name) {
+                        state.set_stopped(code);
+                    }
                     log::info!("Stopped {} (exit code {})", name, code);
                 }
                 Ok(Err(e)) => {
-                    state.set_failed(e.to_string());
+                    if let Some(state) = self.states.get_mut(&name) {
+                        state.set_failed(e.to_string());
+                    }
                 }
                 Err(_) => {
                     // Timeout - send SIGKILL
                     log::warn!("Timeout stopping {}, sending SIGKILL", name);
                     if let Some(pid) = child.id() {
-                        unsafe {
-                            libc::kill(pid as i32, libc::SIGKILL);
-                        }
+                        unsafe { libc::kill(pid as i32, libc::SIGKILL); }
                     }
                     let _ = child.wait().await;
-                    state.set_stopped(-9);
+                    if let Some(state) = self.states.get_mut(&name) {
+                        state.set_stopped(-9);
+                    }
                 }
             }
         } else {
-            state.set_stopped(0);
+            if let Some(state) = self.states.get_mut(&name) {
+                state.set_stopped(0);
+            }
         }
 
         // Clean up cgroup (if we created one)
@@ -753,13 +793,85 @@ impl Manager {
 
         for (name, code) in exited {
             self.processes.remove(&name);
+
+            // Get service config for restart policy
+            let (restart_policy, restart_sec, remain_after_exit, is_oneshot, is_forking) =
+                self.units.get(&name)
+                    .and_then(|u| u.as_service())
+                    .map(|s| (
+                        s.service.restart.clone(),
+                        s.service.restart_sec,
+                        s.service.remain_after_exit,
+                        s.service.service_type == ServiceType::Oneshot,
+                        s.service.service_type == ServiceType::Forking,
+                    ))
+                    .unwrap_or((RestartPolicy::No, std::time::Duration::from_millis(100), false, false, false));
+
+            // Handle Type=forking: parent exited, read PIDFile
+            if is_forking && code == 0 {
+                if let Some(pid_file) = self.pid_files.remove(&name) {
+                    match std::fs::read_to_string(&pid_file) {
+                        Ok(content) => {
+                            if let Ok(child_pid) = content.trim().parse::<u32>() {
+                                if let Some(state) = self.states.get_mut(&name) {
+                                    state.set_running(child_pid);
+                                    log::info!("{} forked, main PID {} (from {})",
+                                        name, child_pid, pid_file.display());
+                                }
+                                continue; // Don't process as normal exit
+                            } else {
+                                log::warn!("{}: invalid PID in {}", name, pid_file.display());
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("{}: failed to read PIDFile {}: {}", name, pid_file.display(), e);
+                        }
+                    }
+                } else {
+                    // No PIDFile - assume forked successfully, but we can't track the child
+                    log::warn!("{} forked but no PIDFile configured", name);
+                    if let Some(state) = self.states.get_mut(&name) {
+                        state.set_running(0); // Unknown PID
+                    }
+                    continue;
+                }
+            }
+
+            // Determine if we should restart
+            let should_restart = match restart_policy {
+                RestartPolicy::No => false,
+                RestartPolicy::OnFailure => code != 0,
+                RestartPolicy::Always => true,
+            };
+
             if let Some(state) = self.states.get_mut(&name) {
                 if code == 0 {
-                    state.set_stopped(code);
-                    log::info!("{} exited cleanly", name);
+                    // Clean exit
+                    if is_oneshot && remain_after_exit {
+                        // Keep as active (exited) for oneshot with RemainAfterExit=yes
+                        state.active = ActiveState::Active;
+                        state.sub = SubState::Exited;
+                        state.main_pid = None;
+                        state.exit_code = Some(code);
+                        state.reset_restart_count();
+                        log::info!("{} exited (RemainAfterExit=yes)", name);
+                    } else if should_restart {
+                        state.set_auto_restart(restart_sec);
+                        log::info!("{} exited, scheduling restart in {:?}", name, restart_sec);
+                    } else {
+                        state.set_stopped(code);
+                        state.reset_restart_count();
+                        log::info!("{} exited cleanly", name);
+                    }
                 } else {
-                    state.set_failed(format!("Exit code {}", code));
-                    log::warn!("{} failed with exit code {}", name, code);
+                    // Failed exit
+                    if should_restart {
+                        state.set_auto_restart(restart_sec);
+                        log::warn!("{} failed (exit {}), scheduling restart in {:?}", name, code, restart_sec);
+                    } else {
+                        state.set_failed(format!("Exit code {}", code));
+                        log::warn!("{} failed with exit code {}", name, code);
+                    }
                 }
             }
 
@@ -769,6 +881,28 @@ impl Manager {
                     if let Err(e) = cgroup_mgr.cleanup_service_cgroup(&name) {
                         log::debug!("Failed to clean up cgroup for {}: {}", name, e);
                     }
+                }
+            }
+        }
+    }
+
+    /// Process pending restarts
+    pub async fn process_restarts(&mut self) {
+        // Collect services due for restart
+        let due: Vec<String> = self.states.iter()
+            .filter(|(_, state)| state.sub == SubState::AutoRestart && state.restart_due())
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        for name in due {
+            log::info!("Restarting {}", name);
+            if let Some(state) = self.states.get_mut(&name) {
+                state.clear_restart();
+            }
+            if let Err(e) = self.start_single(&name).await {
+                log::error!("Failed to restart {}: {}", name, e);
+                if let Some(state) = self.states.get_mut(&name) {
+                    state.set_failed(format!("Restart failed: {}", e));
                 }
             }
         }

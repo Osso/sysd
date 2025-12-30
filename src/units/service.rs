@@ -25,6 +25,28 @@ pub enum RestartPolicy {
     Always,
 }
 
+/// Kill mode for stopping services
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum KillMode {
+    #[default]
+    ControlGroup,  // Kill all processes in the cgroup
+    Process,       // Only kill the main process
+    Mixed,         // SIGTERM main, SIGKILL others
+    None,          // Don't kill anything
+}
+
+impl KillMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "control-group" => Some(Self::ControlGroup),
+            "process" => Some(Self::Process),
+            "mixed" => Some(Self::Mixed),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
 /// Output destination
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum StdOutput {
@@ -63,6 +85,13 @@ pub struct ServiceSection {
     pub restart_sec: Duration,  // Default: 100ms per systemd docs
     pub timeout_start_sec: Option<Duration>,
     pub timeout_stop_sec: Option<Duration>,
+    pub remain_after_exit: bool,  // For Type=oneshot: stay active after exit
+
+    // Type=forking
+    pub pid_file: Option<PathBuf>,  // PIDFile= for Type=forking
+
+    // Stop behavior
+    pub kill_mode: KillMode,
 
     // Credentials
     pub user: Option<String>,
@@ -96,6 +125,9 @@ impl Default for ServiceSection {
             restart_sec: Duration::from_millis(100), // systemd default
             timeout_start_sec: None,
             timeout_stop_sec: None,
+            remain_after_exit: false,
+            pid_file: None,
+            kill_mode: KillMode::default(),
             user: None,
             group: None,
             working_directory: None,
