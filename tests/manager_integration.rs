@@ -252,3 +252,80 @@ ExecStart=/bin/true
     assert!(section.requires.contains(&"dbus.service".to_string()));
     assert!(section.wants.contains(&"syslog.service".to_string()));
 }
+
+#[tokio::test]
+async fn test_manager_type_idle_immediate_when_no_jobs() {
+    // Type=idle should start immediately when there are no other jobs
+    let dir = unique_test_dir();
+    let path = write_test_service(&dir, "test-idle.service", r#"
+[Unit]
+Description=Test idle service
+
+[Service]
+Type=idle
+ExecStart=/bin/sleep 60
+"#);
+
+    let mut manager = Manager::new();
+    manager.load_from_path(&path).await.unwrap();
+
+    // Start the idle service - should start immediately since no other jobs
+    manager.start("test-idle.service").await.unwrap();
+
+    // Check it's running (Type=idle acts like simple once started)
+    let state = manager.status("test-idle.service").unwrap();
+    assert!(state.is_active());
+
+    manager.stop("test-idle.service").await.unwrap();
+}
+
+#[tokio::test]
+async fn test_manager_type_dbus_waits_for_name() {
+    // Type=dbus should stay in starting state waiting for BusName
+    let dir = unique_test_dir();
+    let path = write_test_service(&dir, "test-dbus.service", r#"
+[Unit]
+Description=Test D-Bus service
+
+[Service]
+Type=dbus
+BusName=org.test.NonExistentService12345
+ExecStart=/bin/sleep 60
+"#);
+
+    let mut manager = Manager::new();
+    manager.load_from_path(&path).await.unwrap();
+
+    manager.start("test-dbus.service").await.unwrap();
+
+    // Should be in starting state (waiting for BusName)
+    let state = manager.status("test-dbus.service").unwrap();
+    assert_eq!(state.active, sysd::manager::ActiveState::Activating);
+
+    manager.stop("test-dbus.service").await.unwrap();
+}
+
+#[tokio::test]
+async fn test_manager_type_dbus_no_busname_fallback() {
+    // Type=dbus without BusName should act like simple (with warning)
+    let dir = unique_test_dir();
+    let path = write_test_service(&dir, "test-dbus-nobusname.service", r#"
+[Unit]
+Description=Test D-Bus service without BusName
+
+[Service]
+Type=dbus
+ExecStart=/bin/sleep 60
+"#);
+
+    let mut manager = Manager::new();
+    manager.load_from_path(&path).await.unwrap();
+
+    manager.start("test-dbus-nobusname.service").await.unwrap();
+
+    // Should be running immediately (fallback to simple behavior)
+    let state = manager.status("test-dbus-nobusname.service").unwrap();
+    assert!(state.is_active());
+
+    manager.stop("test-dbus-nobusname.service").await.unwrap();
+}

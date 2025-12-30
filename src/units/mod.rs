@@ -416,4 +416,23 @@ WantedBy=multi-user.target
         assert_eq!(svc.service.service_type, ServiceType::Dbus);
         assert_eq!(svc.service.bus_name, Some("org.example.MyService".into()));
     }
+
+    #[test]
+    fn test_parse_idle_service() {
+        let content = r#"
+[Unit]
+Description=Getty on tty1
+
+[Service]
+Type=idle
+ExecStart=/sbin/agetty -o '-p -- \\u' --noclear - $TERM
+
+[Install]
+WantedBy=multi-user.target
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("getty@tty1.service", &parsed).unwrap();
+
+        assert_eq!(svc.service.service_type, ServiceType::Idle);
+    }
 }
