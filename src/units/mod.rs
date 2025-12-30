@@ -724,4 +724,68 @@ ExecStartPre=/usr/bin/setup
         assert_eq!(exec_pre.len(), 1);
         assert!(exec_pre[0].1.contains("/usr/bin/setup"));
     }
+
+    #[test]
+    fn test_parse_resource_limits() {
+        let content = r#"
+[Unit]
+Description=Service with resource limits
+
+[Service]
+ExecStart=/usr/bin/myservice
+LimitNOFILE=65536
+OOMScoreAdjust=-500
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("resource.service", &parsed).unwrap();
+
+        assert_eq!(svc.service.limit_nofile, Some(65536));
+        assert_eq!(svc.service.oom_score_adjust, Some(-500));
+        assert_eq!(svc.service.standard_input, StdInput::Tty);
+        assert_eq!(svc.service.tty_path, Some("/dev/tty1".into()));
+        assert!(svc.service.tty_reset);
+    }
+
+    #[test]
+    fn test_parse_limit_nofile_infinity() {
+        let content = r#"
+[Service]
+ExecStart=/usr/bin/myservice
+LimitNOFILE=infinity
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("unlimited.service", &parsed).unwrap();
+
+        assert_eq!(svc.service.limit_nofile, Some(u64::MAX));
+    }
+
+    #[test]
+    fn test_parse_getty_service() {
+        // Based on real getty@.service
+        let content = r#"
+[Unit]
+Description=Getty on %I
+After=systemd-user-sessions.service
+
+[Service]
+Type=idle
+ExecStart=/sbin/agetty -o '-p -- \\u' --noclear - $TERM
+StandardInput=tty-force
+TTYPath=/dev/%I
+TTYReset=yes
+
+[Install]
+WantedBy=getty.target
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("getty@tty1.service", &parsed).unwrap();
+
+        assert_eq!(svc.service.service_type, ServiceType::Idle);
+        assert_eq!(svc.service.standard_input, StdInput::TtyForce);
+        assert_eq!(svc.service.tty_path, Some("/dev/%I".into()));
+        assert!(svc.service.tty_reset);
+    }
 }

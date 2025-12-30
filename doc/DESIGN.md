@@ -420,10 +420,10 @@ libc = "0.2"                  # Low-level syscalls
 - [x] Drop-in directories (.d/*.conf)
 - [x] ConditionDirectoryNotEmpty=
 
-### M8: Resource Limits
-- [ ] LimitNOFILE= (file descriptors)
-- [ ] OOMScoreAdjust=
-- [ ] StandardInput=tty, TTYPath=, TTYReset= (for getty)
+### M8: Resource Limits ✓
+- [x] LimitNOFILE= (file descriptors)
+- [x] OOMScoreAdjust=
+- [x] StandardInput=tty, TTYPath=, TTYReset= (for getty)
 
 ### Future: Security Sandboxing
 Low priority - services run without sandboxing (like traditional init):
