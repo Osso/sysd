@@ -11,8 +11,8 @@
 //!         ├── session-1.scope/    # Login session
 //!         └── user@1000.service/  # User manager
 
-use std::path::{Path, PathBuf};
 use std::io;
+use std::path::{Path, PathBuf};
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 const SYSTEM_SLICE: &str = "system.slice";
@@ -135,14 +135,21 @@ impl CgroupManager {
     /// Set max number of tasks/processes
     pub fn set_tasks_max(&self, cgroup_path: &Path, max: u64) -> io::Result<()> {
         let file = cgroup_path.join("pids.max");
-        let value = if max == u64::MAX { "max".to_string() } else { max.to_string() };
+        let value = if max == u64::MAX {
+            "max".to_string()
+        } else {
+            max.to_string()
+        };
         std::fs::write(&file, value)?;
         Ok(())
     }
 
     /// Watch for cgroup becoming empty (polls cgroup.events)
     /// Returns a channel that signals when the cgroup is empty
-    pub fn watch_empty(&self, cgroup_path: PathBuf) -> io::Result<tokio::sync::oneshot::Receiver<()>> {
+    pub fn watch_empty(
+        &self,
+        cgroup_path: PathBuf,
+    ) -> io::Result<tokio::sync::oneshot::Receiver<()>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let events_file = cgroup_path.join("cgroup.events");
 
@@ -165,8 +172,8 @@ impl CgroupManager {
 /// Resource limits for a cgroup
 #[derive(Debug, Default, Clone)]
 pub struct CgroupLimits {
-    pub memory_max: Option<u64>,   // bytes
-    pub cpu_quota: Option<u32>,    // percentage
+    pub memory_max: Option<u64>, // bytes
+    pub cpu_quota: Option<u32>,  // percentage
     pub tasks_max: Option<u32>,
 }
 
@@ -220,7 +227,10 @@ impl CgroupManager {
                 self.remove_cgroup(&cgroup_path)?;
             }
             Ok(false) => {
-                log::debug!("Cgroup {} not empty, skipping removal", cgroup_path.display());
+                log::debug!(
+                    "Cgroup {} not empty, skipping removal",
+                    cgroup_path.display()
+                );
             }
             Err(e) => {
                 log::debug!("Could not check cgroup {}: {}", cgroup_path.display(), e);
@@ -239,8 +249,8 @@ impl CgroupManager {
 /// Create a scope for a logind session
 pub async fn create_session_scope(
     cgroup_manager: &CgroupManager,
-    name: &str,           // e.g., "session-1.scope"
-    slice: &str,          // e.g., "user-1000.slice"
+    name: &str,  // e.g., "session-1.scope"
+    slice: &str, // e.g., "user-1000.slice"
     pids: &[u32],
     memory_max: Option<u64>,
 ) -> io::Result<PathBuf> {
@@ -274,7 +284,7 @@ mod tests {
     fn test_cgroup_limits_with_values() {
         let limits = CgroupLimits {
             memory_max: Some(1024 * 1024 * 1024), // 1GB
-            cpu_quota: Some(50),                   // 50%
+            cpu_quota: Some(50),                  // 50%
             tasks_max: Some(100),
         };
         assert_eq!(limits.memory_max, Some(1024 * 1024 * 1024));
@@ -292,7 +302,10 @@ mod tests {
     fn test_service_cgroup_path() {
         let mgr = CgroupManager::default();
         let path = mgr.service_cgroup_path("docker.service");
-        assert_eq!(path, PathBuf::from("/sys/fs/cgroup/system.slice/docker.service"));
+        assert_eq!(
+            path,
+            PathBuf::from("/sys/fs/cgroup/system.slice/docker.service")
+        );
     }
 
     #[test]

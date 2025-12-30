@@ -25,12 +25,18 @@ impl NotifyMessage {
 
     /// Check if this is a STOPPING=1 notification
     pub fn is_stopping(&self) -> bool {
-        self.fields.get("STOPPING").map(|v| v == "1").unwrap_or(false)
+        self.fields
+            .get("STOPPING")
+            .map(|v| v == "1")
+            .unwrap_or(false)
     }
 
     /// Check if this is a WATCHDOG=1 ping
     pub fn is_watchdog(&self) -> bool {
-        self.fields.get("WATCHDOG").map(|v| v == "1").unwrap_or(false)
+        self.fields
+            .get("WATCHDOG")
+            .map(|v| v == "1")
+            .unwrap_or(false)
     }
 
     /// Get STATUS message if present

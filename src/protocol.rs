@@ -79,8 +79,12 @@ mod tests {
     fn request_roundtrip() {
         let requests = vec![
             Request::List { user: false },
-            Request::Start { name: "docker.service".into() },
-            Request::Stop { name: "nginx.service".into() },
+            Request::Start {
+                name: "docker.service".into(),
+            },
+            Request::Stop {
+                name: "nginx.service".into(),
+            },
             Request::Ping,
         ];
 

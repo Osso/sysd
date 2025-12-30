@@ -127,7 +127,11 @@ fn unmount_filesystems() {
 
         if let Err(e) = nix::mount::umount(path) {
             // Try lazy unmount if normal fails
-            log::debug!("Normal unmount failed for {}: {}, trying lazy", mount_point, e);
+            log::debug!(
+                "Normal unmount failed for {}: {}, trying lazy",
+                mount_point,
+                e
+            );
             if let Err(e) = nix::mount::umount2(path, nix::mount::MntFlags::MNT_DETACH) {
                 log::warn!("Failed to unmount {}: {}", mount_point, e);
             }

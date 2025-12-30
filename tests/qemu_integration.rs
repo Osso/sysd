@@ -10,8 +10,8 @@
 //! - Linux kernel at /boot/vmlinuz-linux (or set KERNEL env var)
 //! - cargo build --release (musl target is default via .cargo/config.toml)
 
-use std::process::Command;
 use std::path::Path;
+use std::process::Command;
 
 /// Check if QEMU is available
 fn qemu_available() -> bool {

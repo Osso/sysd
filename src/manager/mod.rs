@@ -60,7 +60,10 @@ impl Manager {
                 Some(mgr)
             }
             Err(e) => {
-                log::debug!("Cgroup manager unavailable: {} (running without cgroups)", e);
+                log::debug!(
+                    "Cgroup manager unavailable: {} (running without cgroups)",
+                    e
+                );
                 None
             }
         };
@@ -118,7 +121,8 @@ impl Manager {
         let path = self.find_unit(&name)?;
 
         // Parse it
-        let unit = units::load_unit(&path).await
+        let unit = units::load_unit(&path)
+            .await
             .map_err(|e| ManagerError::Parse(e.to_string()))?;
 
         // Initialize state
@@ -130,7 +134,8 @@ impl Manager {
 
     /// Load a unit from a specific path
     pub async fn load_from_path(&mut self, path: &std::path::Path) -> Result<(), ManagerError> {
-        let unit = units::load_unit(path).await
+        let unit = units::load_unit(path)
+            .await
             .map_err(|e| ManagerError::Parse(e.to_string()))?;
 
         let name = unit.name().to_string();
@@ -217,7 +222,9 @@ impl Manager {
                 }
                 Err(e) => {
                     // Check if this is a hard dependency (Requires)
-                    let is_required = self.units.get(&name)
+                    let is_required = self
+                        .units
+                        .get(&name)
                         .map(|u| u.unit_section().requires.contains(unit_name))
                         .unwrap_or(false);
 
@@ -298,7 +305,8 @@ impl Manager {
         }
 
         // Get topological order
-        graph.start_order_for(name)
+        graph
+            .start_order_for(name)
             .map_err(|e| ManagerError::Cycle(e.nodes))
     }
 
@@ -309,7 +317,9 @@ impl Manager {
             self.load(name).await?;
         }
 
-        let unit = self.units.get(name)
+        let unit = self
+            .units
+            .get(name)
             .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
 
         // Targets are synchronization points, no process to start
@@ -323,10 +333,13 @@ impl Manager {
             return Err(ManagerError::ConditionFailed(name.to_string(), reason));
         }
 
-        let service = unit.as_service()
+        let service = unit
+            .as_service()
             .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
 
-        let state = self.states.get_mut(name)
+        let state = self
+            .states
+            .get_mut(name)
             .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
 
         // Check if already running
@@ -353,8 +366,7 @@ impl Manager {
 
         // Prepare spawn options
         let is_notify = service.service.service_type == ServiceType::Notify;
-        let watchdog_usec = service.service.watchdog_sec
-            .map(|d| d.as_micros() as u64);
+        let watchdog_usec = service.service.watchdog_sec.map(|d| d.as_micros() as u64);
         let options = SpawnOptions {
             notify_socket: if is_notify || watchdog_usec.is_some() {
                 self.notify_socket_path()
@@ -375,9 +387,8 @@ impl Manager {
             cpu_quota: service.service.cpu_quota,
             tasks_max: service.service.tasks_max,
         };
-        let has_resource_limits = limits.memory_max.is_some()
-            || limits.cpu_quota.is_some()
-            || limits.tasks_max.is_some();
+        let has_resource_limits =
+            limits.memory_max.is_some() || limits.cpu_quota.is_some() || limits.tasks_max.is_some();
 
         if let Some(ref cgroup_mgr) = self.cgroup_manager {
             match cgroup_mgr.setup_service_cgroup(name, pid, &limits) {
@@ -389,7 +400,8 @@ impl Manager {
                     if has_resource_limits {
                         log::error!(
                             "Failed to set up cgroup for {} (resource limits NOT enforced): {}",
-                            name, e
+                            name,
+                            e
                         );
                     } else {
                         log::warn!("Failed to set up cgroup for {}: {}", name, e);
@@ -419,10 +431,18 @@ impl Manager {
             // Type=dbus: wait for BusName to appear on D-Bus
             if let Some(ref bn) = bus_name {
                 self.waiting_bus_name.insert(bn.clone(), name.to_string());
-                log::info!("Started {} (PID {}), waiting for D-Bus name {}", name, pid, bn);
+                log::info!(
+                    "Started {} (PID {}), waiting for D-Bus name {}",
+                    name,
+                    pid,
+                    bn
+                );
             } else {
                 // No BusName specified - treat like simple
-                log::warn!("{} is Type=dbus but has no BusName=, treating as simple", name);
+                log::warn!(
+                    "{} is Type=dbus but has no BusName=, treating as simple",
+                    name
+                );
                 if let Some(state) = self.states.get_mut(name) {
                     state.set_running(pid);
                 }
@@ -445,10 +465,8 @@ impl Manager {
             self.active_jobs = self.active_jobs.saturating_sub(1);
             // Set watchdog deadline if configured
             if let Some(wd) = service.service.watchdog_sec {
-                self.watchdog_deadlines.insert(
-                    name.to_string(),
-                    std::time::Instant::now() + wd,
-                );
+                self.watchdog_deadlines
+                    .insert(name.to_string(), std::time::Instant::now() + wd);
             }
             log::info!("Started {} (PID {})", name, pid);
         }
@@ -460,7 +478,9 @@ impl Manager {
     pub async fn stop(&mut self, name: &str) -> Result<(), ManagerError> {
         let name = self.normalize_name(name);
 
-        let state = self.states.get_mut(&name)
+        let state = self
+            .states
+            .get_mut(&name)
             .ok_or_else(|| ManagerError::NotFound(name.clone()))?;
 
         if !state.is_active() {
@@ -470,7 +490,9 @@ impl Manager {
         state.set_stopping();
 
         // Get kill mode from service config
-        let kill_mode = self.units.get(&name)
+        let kill_mode = self
+            .units
+            .get(&name)
             .and_then(|u| u.as_service())
             .map(|s| s.service.kill_mode.clone())
             .unwrap_or_default();
@@ -486,11 +508,15 @@ impl Manager {
                     }
                     KillMode::Process => {
                         // Only kill the main process
-                        unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                        unsafe {
+                            libc::kill(pid as i32, libc::SIGTERM);
+                        }
                     }
                     KillMode::Mixed | KillMode::ControlGroup => {
                         // SIGTERM to main process first
-                        unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                        unsafe {
+                            libc::kill(pid as i32, libc::SIGTERM);
+                        }
                         // For cgroup killing, we'd also send to all cgroup members
                         // This requires cgroup iteration which we'll skip for now
                     }
@@ -498,7 +524,9 @@ impl Manager {
             }
 
             // Wait for exit (with timeout)
-            let timeout_sec = self.units.get(&name)
+            let timeout_sec = self
+                .units
+                .get(&name)
                 .and_then(|u| u.as_service())
                 .and_then(|s| s.service.timeout_stop_sec)
                 .unwrap_or(std::time::Duration::from_secs(10));
@@ -520,7 +548,9 @@ impl Manager {
                     // Timeout - send SIGKILL
                     log::warn!("Timeout stopping {}, sending SIGKILL", name);
                     if let Some(pid) = child.id() {
-                        unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+                        unsafe {
+                            libc::kill(pid as i32, libc::SIGKILL);
+                        }
                     }
                     let _ = child.wait().await;
                     if let Some(state) = self.states.get_mut(&name) {
@@ -588,7 +618,9 @@ impl Manager {
                 }
             }
 
-            let unit = self.units.get(&unit_name)
+            let unit = self
+                .units
+                .get(&unit_name)
                 .ok_or_else(|| ManagerError::NotFound(unit_name.clone()))?;
 
             let install = match unit.install_section() {
@@ -599,7 +631,10 @@ impl Manager {
                 }
             };
 
-            if install.wanted_by.is_empty() && install.required_by.is_empty() && install.alias.is_empty() {
+            if install.wanted_by.is_empty()
+                && install.required_by.is_empty()
+                && install.alias.is_empty()
+            {
                 log::debug!("Unit {} has empty Install section", unit_name);
                 continue;
             }
@@ -670,7 +705,9 @@ impl Manager {
                 }
             }
 
-            let unit = self.units.get(&unit_name)
+            let unit = self
+                .units
+                .get(&unit_name)
                 .ok_or_else(|| ManagerError::NotFound(unit_name.clone()))?;
 
             let install = match unit.install_section() {
@@ -720,15 +757,18 @@ impl Manager {
     }
 
     /// Create a symlink in target.wants/
-    fn create_wants_link(&self, unit_name: &str, target: &str, unit_path: &PathBuf) -> Result<PathBuf, ManagerError> {
+    fn create_wants_link(
+        &self,
+        unit_name: &str,
+        target: &str,
+        unit_path: &PathBuf,
+    ) -> Result<PathBuf, ManagerError> {
         let wants_dir = PathBuf::from("/etc/systemd/system").join(format!("{}.wants", target));
-        std::fs::create_dir_all(&wants_dir)
-            .map_err(|e| ManagerError::Io(e.to_string()))?;
+        std::fs::create_dir_all(&wants_dir).map_err(|e| ManagerError::Io(e.to_string()))?;
 
         let link_path = wants_dir.join(unit_name);
         if link_path.exists() || link_path.is_symlink() {
-            std::fs::remove_file(&link_path)
-                .map_err(|e| ManagerError::Io(e.to_string()))?;
+            std::fs::remove_file(&link_path).map_err(|e| ManagerError::Io(e.to_string()))?;
         }
 
         std::os::unix::fs::symlink(unit_path, &link_path)
@@ -738,15 +778,19 @@ impl Manager {
     }
 
     /// Create a symlink in target.requires/
-    fn create_requires_link(&self, unit_name: &str, target: &str, unit_path: &PathBuf) -> Result<PathBuf, ManagerError> {
-        let requires_dir = PathBuf::from("/etc/systemd/system").join(format!("{}.requires", target));
-        std::fs::create_dir_all(&requires_dir)
-            .map_err(|e| ManagerError::Io(e.to_string()))?;
+    fn create_requires_link(
+        &self,
+        unit_name: &str,
+        target: &str,
+        unit_path: &PathBuf,
+    ) -> Result<PathBuf, ManagerError> {
+        let requires_dir =
+            PathBuf::from("/etc/systemd/system").join(format!("{}.requires", target));
+        std::fs::create_dir_all(&requires_dir).map_err(|e| ManagerError::Io(e.to_string()))?;
 
         let link_path = requires_dir.join(unit_name);
         if link_path.exists() || link_path.is_symlink() {
-            std::fs::remove_file(&link_path)
-                .map_err(|e| ManagerError::Io(e.to_string()))?;
+            std::fs::remove_file(&link_path).map_err(|e| ManagerError::Io(e.to_string()))?;
         }
 
         std::os::unix::fs::symlink(unit_path, &link_path)
@@ -756,14 +800,17 @@ impl Manager {
     }
 
     /// Remove symlink from target.wants/
-    fn remove_wants_link(&self, unit_name: &str, target: &str) -> Result<Option<PathBuf>, ManagerError> {
+    fn remove_wants_link(
+        &self,
+        unit_name: &str,
+        target: &str,
+    ) -> Result<Option<PathBuf>, ManagerError> {
         let link_path = PathBuf::from("/etc/systemd/system")
             .join(format!("{}.wants", target))
             .join(unit_name);
 
         if link_path.exists() || link_path.is_symlink() {
-            std::fs::remove_file(&link_path)
-                .map_err(|e| ManagerError::Io(e.to_string()))?;
+            std::fs::remove_file(&link_path).map_err(|e| ManagerError::Io(e.to_string()))?;
             Ok(Some(link_path))
         } else {
             Ok(None)
@@ -771,14 +818,17 @@ impl Manager {
     }
 
     /// Remove symlink from target.requires/
-    fn remove_requires_link(&self, unit_name: &str, target: &str) -> Result<Option<PathBuf>, ManagerError> {
+    fn remove_requires_link(
+        &self,
+        unit_name: &str,
+        target: &str,
+    ) -> Result<Option<PathBuf>, ManagerError> {
         let link_path = PathBuf::from("/etc/systemd/system")
             .join(format!("{}.requires", target))
             .join(unit_name);
 
         if link_path.exists() || link_path.is_symlink() {
-            std::fs::remove_file(&link_path)
-                .map_err(|e| ManagerError::Io(e.to_string()))?;
+            std::fs::remove_file(&link_path).map_err(|e| ManagerError::Io(e.to_string()))?;
             Ok(Some(link_path))
         } else {
             Ok(None)
@@ -791,8 +841,7 @@ impl Manager {
 
         // Remove existing if present
         if link_path.exists() || link_path.is_symlink() {
-            std::fs::remove_file(&link_path)
-                .map_err(|e| ManagerError::Io(e.to_string()))?;
+            std::fs::remove_file(&link_path).map_err(|e| ManagerError::Io(e.to_string()))?;
         }
 
         std::os::unix::fs::symlink(unit_path, &link_path)
@@ -806,8 +855,7 @@ impl Manager {
         let link_path = PathBuf::from("/etc/systemd/system").join(alias);
 
         if link_path.exists() || link_path.is_symlink() {
-            std::fs::remove_file(&link_path)
-                .map_err(|e| ManagerError::Io(e.to_string()))?;
+            std::fs::remove_file(&link_path).map_err(|e| ManagerError::Io(e.to_string()))?;
             Ok(Some(link_path))
         } else {
             Ok(None)
@@ -823,7 +871,9 @@ impl Manager {
             self.load(&name).await?;
         }
 
-        let unit = self.units.get(&name)
+        let unit = self
+            .units
+            .get(&name)
             .ok_or_else(|| ManagerError::NotFound(name.clone()))?;
 
         // No install section = static (can't be enabled/disabled)
@@ -831,7 +881,10 @@ impl Manager {
             return Ok("static".to_string());
         };
 
-        if install.wanted_by.is_empty() && install.required_by.is_empty() && install.alias.is_empty() {
+        if install.wanted_by.is_empty()
+            && install.required_by.is_empty()
+            && install.alias.is_empty()
+        {
             return Ok("static".to_string());
         }
 
@@ -903,10 +956,16 @@ impl Manager {
 
             let exists = std::path::Path::new(path).exists();
             if negated && exists {
-                return Some(format!("ConditionPathExists=!{} failed (path exists)", path));
+                return Some(format!(
+                    "ConditionPathExists=!{} failed (path exists)",
+                    path
+                ));
             }
             if !negated && !exists {
-                return Some(format!("ConditionPathExists={} failed (path missing)", path));
+                return Some(format!(
+                    "ConditionPathExists={} failed (path missing)",
+                    path
+                ));
             }
         }
 
@@ -925,10 +984,16 @@ impl Manager {
                     .unwrap_or(false);
 
             if negated && is_not_empty {
-                return Some(format!("ConditionDirectoryNotEmpty=!{} failed (not empty)", path));
+                return Some(format!(
+                    "ConditionDirectoryNotEmpty=!{} failed (not empty)",
+                    path
+                ));
             }
             if !negated && !is_not_empty {
-                return Some(format!("ConditionDirectoryNotEmpty={} failed (empty or missing)", path));
+                return Some(format!(
+                    "ConditionDirectoryNotEmpty={} failed (empty or missing)",
+                    path
+                ));
             }
         }
 
@@ -998,22 +1063,20 @@ impl Manager {
 
                 if let Some(name) = service_name {
                     if let Some(state) = self.states.get_mut(&name) {
-                        let pid = self.processes.get(&name)
-                            .and_then(|c| c.id())
-                            .unwrap_or(0);
+                        let pid = self.processes.get(&name).and_then(|c| c.id()).unwrap_or(0);
                         state.set_running(pid);
                         self.active_jobs = self.active_jobs.saturating_sub(1);
                         log::info!("{} signaled READY", name);
 
                         // Set watchdog deadline for Type=notify services
-                        if let Some(wd) = self.units.get(&name)
+                        if let Some(wd) = self
+                            .units
+                            .get(&name)
                             .and_then(|u| u.as_service())
                             .and_then(|s| s.service.watchdog_sec)
                         {
-                            self.watchdog_deadlines.insert(
-                                name.clone(),
-                                std::time::Instant::now() + wd,
-                            );
+                            self.watchdog_deadlines
+                                .insert(name.clone(), std::time::Instant::now() + wd);
                         }
                     }
                 }
@@ -1022,19 +1085,21 @@ impl Manager {
             // Handle WATCHDOG=1 ping - reset the deadline
             if msg.is_watchdog() {
                 // Find service by PID
-                let service_name = self.processes.iter()
+                let service_name = self
+                    .processes
+                    .iter()
                     .find(|(_, child)| child.id() == Some(msg.pid))
                     .map(|(name, _)| name.clone());
 
                 if let Some(name) = service_name {
-                    if let Some(wd) = self.units.get(&name)
+                    if let Some(wd) = self
+                        .units
+                        .get(&name)
                         .and_then(|u| u.as_service())
                         .and_then(|s| s.service.watchdog_sec)
                     {
-                        self.watchdog_deadlines.insert(
-                            name.clone(),
-                            std::time::Instant::now() + wd,
-                        );
+                        self.watchdog_deadlines
+                            .insert(name.clone(), std::time::Instant::now() + wd);
                         log::trace!("{} watchdog ping received", name);
                     }
                 }
@@ -1072,17 +1137,26 @@ impl Manager {
             self.processes.remove(&name);
 
             // Get service config for restart policy
-            let (restart_policy, restart_sec, remain_after_exit, is_oneshot, is_forking) =
-                self.units.get(&name)
-                    .and_then(|u| u.as_service())
-                    .map(|s| (
+            let (restart_policy, restart_sec, remain_after_exit, is_oneshot, is_forking) = self
+                .units
+                .get(&name)
+                .and_then(|u| u.as_service())
+                .map(|s| {
+                    (
                         s.service.restart.clone(),
                         s.service.restart_sec,
                         s.service.remain_after_exit,
                         s.service.service_type == ServiceType::Oneshot,
                         s.service.service_type == ServiceType::Forking,
-                    ))
-                    .unwrap_or((RestartPolicy::No, std::time::Duration::from_millis(100), false, false, false));
+                    )
+                })
+                .unwrap_or((
+                    RestartPolicy::No,
+                    std::time::Duration::from_millis(100),
+                    false,
+                    false,
+                    false,
+                ));
 
             // Handle Type=forking: parent exited, read PIDFile
             if is_forking && code == 0 {
@@ -1093,18 +1167,22 @@ impl Manager {
                                 if let Some(state) = self.states.get_mut(&name) {
                                     state.set_running(child_pid);
                                     self.active_jobs = self.active_jobs.saturating_sub(1);
-                                    log::info!("{} forked, main PID {} (from {})",
-                                        name, child_pid, pid_file.display());
+                                    log::info!(
+                                        "{} forked, main PID {} (from {})",
+                                        name,
+                                        child_pid,
+                                        pid_file.display()
+                                    );
                                 }
                                 // Set watchdog deadline for Type=forking services
-                                if let Some(wd) = self.units.get(&name)
+                                if let Some(wd) = self
+                                    .units
+                                    .get(&name)
                                     .and_then(|u| u.as_service())
                                     .and_then(|s| s.service.watchdog_sec)
                                 {
-                                    self.watchdog_deadlines.insert(
-                                        name.clone(),
-                                        std::time::Instant::now() + wd,
-                                    );
+                                    self.watchdog_deadlines
+                                        .insert(name.clone(), std::time::Instant::now() + wd);
                                 }
                                 continue; // Don't process as normal exit
                             } else {
@@ -1112,7 +1190,12 @@ impl Manager {
                             }
                         }
                         Err(e) => {
-                            log::warn!("{}: failed to read PIDFile {}: {}", name, pid_file.display(), e);
+                            log::warn!(
+                                "{}: failed to read PIDFile {}: {}",
+                                name,
+                                pid_file.display(),
+                                e
+                            );
                         }
                     }
                 } else {
@@ -1123,14 +1206,14 @@ impl Manager {
                     }
                     self.active_jobs = self.active_jobs.saturating_sub(1);
                     // Set watchdog deadline even without PIDFile
-                    if let Some(wd) = self.units.get(&name)
+                    if let Some(wd) = self
+                        .units
+                        .get(&name)
                         .and_then(|u| u.as_service())
                         .and_then(|s| s.service.watchdog_sec)
                     {
-                        self.watchdog_deadlines.insert(
-                            name.clone(),
-                            std::time::Instant::now() + wd,
-                        );
+                        self.watchdog_deadlines
+                            .insert(name.clone(), std::time::Instant::now() + wd);
                     }
                     continue;
                 }
@@ -1166,7 +1249,12 @@ impl Manager {
                     // Failed exit
                     if should_restart {
                         state.set_auto_restart(restart_sec);
-                        log::warn!("{} failed (exit {}), scheduling restart in {:?}", name, code, restart_sec);
+                        log::warn!(
+                            "{} failed (exit {}), scheduling restart in {:?}",
+                            name,
+                            code,
+                            restart_sec
+                        );
                     } else {
                         state.set_failed(format!("Exit code {}", code));
                         log::warn!("{} failed with exit code {}", name, code);
@@ -1191,7 +1279,9 @@ impl Manager {
     /// Process pending restarts
     pub async fn process_restarts(&mut self) {
         // Collect services due for restart
-        let due: Vec<String> = self.states.iter()
+        let due: Vec<String> = self
+            .states
+            .iter()
             .filter(|(_, state)| state.sub == SubState::AutoRestart && state.restart_due())
             .map(|(name, _)| name.clone())
             .collect();
@@ -1229,13 +1319,16 @@ impl Manager {
         let mut ready = Vec::new();
         for (bus_name, service_name) in &self.waiting_bus_name {
             // Use the fdo DBus interface to check if the name has an owner
-            match conn.call_method(
-                Some("org.freedesktop.DBus"),
-                "/org/freedesktop/DBus",
-                Some("org.freedesktop.DBus"),
-                "GetNameOwner",
-                &(bus_name.as_str(),),
-            ).await {
+            match conn
+                .call_method(
+                    Some("org.freedesktop.DBus"),
+                    "/org/freedesktop/DBus",
+                    Some("org.freedesktop.DBus"),
+                    "GetNameOwner",
+                    &(bus_name.as_str(),),
+                )
+                .await
+            {
                 Ok(_) => {
                     // Name has an owner - service is ready
                     ready.push((bus_name.clone(), service_name.clone()));
@@ -1250,7 +1343,9 @@ impl Manager {
         for (bus_name, service_name) in ready {
             self.waiting_bus_name.remove(&bus_name);
             if let Some(state) = self.states.get_mut(&service_name) {
-                let pid = self.processes.get(&service_name)
+                let pid = self
+                    .processes
+                    .get(&service_name)
                     .and_then(|c| c.id())
                     .unwrap_or(0);
                 state.set_running(pid);
@@ -1258,14 +1353,14 @@ impl Manager {
                 log::info!("{} acquired D-Bus name {}", service_name, bus_name);
 
                 // Set watchdog deadline for Type=dbus services
-                if let Some(wd) = self.units.get(&service_name)
+                if let Some(wd) = self
+                    .units
+                    .get(&service_name)
                     .and_then(|u| u.as_service())
                     .and_then(|s| s.service.watchdog_sec)
                 {
-                    self.watchdog_deadlines.insert(
-                        service_name.clone(),
-                        std::time::Instant::now() + wd,
-                    );
+                    self.watchdog_deadlines
+                        .insert(service_name.clone(), std::time::Instant::now() + wd);
                 }
             }
         }
@@ -1290,7 +1385,9 @@ impl Manager {
             if let Some(mut child) = self.processes.remove(&name) {
                 if let Some(pid) = child.id() {
                     // Send SIGABRT (standard watchdog signal) then SIGKILL
-                    unsafe { libc::kill(pid as i32, libc::SIGABRT); }
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGABRT);
+                    }
                     // Give it a moment, then force kill
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     let _ = child.kill().await;
@@ -1303,13 +1400,18 @@ impl Manager {
             }
 
             // Schedule restart based on policy
-            let restart_policy = self.units.get(&name)
+            let restart_policy = self
+                .units
+                .get(&name)
                 .and_then(|u| u.as_service())
                 .map(|s| s.service.restart.clone())
                 .unwrap_or(RestartPolicy::No);
 
-            if restart_policy == RestartPolicy::Always || restart_policy == RestartPolicy::OnFailure {
-                let restart_sec = self.units.get(&name)
+            if restart_policy == RestartPolicy::Always || restart_policy == RestartPolicy::OnFailure
+            {
+                let restart_sec = self
+                    .units
+                    .get(&name)
                     .and_then(|u| u.as_service())
                     .map(|s| s.service.restart_sec)
                     .unwrap_or(std::time::Duration::from_millis(100));

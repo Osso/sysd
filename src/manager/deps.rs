@@ -37,7 +37,10 @@ impl DepGraph {
         // So X depends on us: edge from X to name
         for dep in &service.unit.before {
             self.nodes.insert(dep.clone());
-            self.edges.entry(dep.clone()).or_default().insert(name.clone());
+            self.edges
+                .entry(dep.clone())
+                .or_default()
+                .insert(name.clone());
         }
 
         // Requires=X and Wants=X imply After=X for ordering purposes
@@ -68,7 +71,8 @@ impl DepGraph {
 
             // Before=shutdown.target - shutdown.target depends on us
             self.nodes.insert("shutdown.target".to_string());
-            self.edges.entry("shutdown.target".to_string())
+            self.edges
+                .entry("shutdown.target".to_string())
                 .or_default()
                 .insert(name.to_string());
         }
@@ -81,7 +85,10 @@ impl DepGraph {
         // Before=X means we must start before X
         for dep in &section.before {
             self.nodes.insert(dep.clone());
-            self.edges.entry(dep.clone()).or_default().insert(name.to_string());
+            self.edges
+                .entry(dep.clone())
+                .or_default()
+                .insert(name.to_string());
         }
 
         // Requires=X and Wants=X imply ordering dependency
@@ -103,7 +110,10 @@ impl DepGraph {
     fn add_edge(&mut self, from: &str, to: &str) {
         self.nodes.insert(from.to_string());
         self.nodes.insert(to.to_string());
-        self.edges.entry(from.to_string()).or_default().insert(to.to_string());
+        self.edges
+            .entry(from.to_string())
+            .or_default()
+            .insert(to.to_string());
     }
 
     /// Get direct dependencies of a node (nodes that must start before it)
@@ -154,7 +164,8 @@ impl DepGraph {
 
         if result.len() != self.nodes.len() {
             // Find cycle participants
-            let remaining: Vec<String> = self.nodes
+            let remaining: Vec<String> = self
+                .nodes
                 .iter()
                 .filter(|n| !result.contains(n))
                 .cloned()
@@ -203,7 +214,11 @@ pub struct CycleError {
 
 impl std::fmt::Display for CycleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Dependency cycle detected involving: {}", self.nodes.join(", "))
+        write!(
+            f,
+            "Dependency cycle detected involving: {}",
+            self.nodes.join(", ")
+        )
     }
 }
 

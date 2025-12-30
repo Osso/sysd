@@ -24,8 +24,14 @@ pub fn spawn_service(service: &Service) -> Result<Child, SpawnError> {
 }
 
 /// Spawn a process for a service with options
-pub fn spawn_service_with_options(service: &Service, options: &SpawnOptions) -> Result<Child, SpawnError> {
-    let exec_start = service.service.exec_start.first()
+pub fn spawn_service_with_options(
+    service: &Service,
+    options: &SpawnOptions,
+) -> Result<Child, SpawnError> {
+    let exec_start = service
+        .service
+        .exec_start
+        .first()
         .ok_or_else(|| SpawnError::NoExecStart(service.name.clone()))?;
 
     // Substitute specifiers (%i, %n, etc.) for template instances
@@ -102,7 +108,10 @@ pub fn spawn_service_with_options(service: &Service, options: &SpawnOptions) -> 
             }
 
             // TTY setup (for getty-like services)
-            if matches!(std_input, StdInput::Tty | StdInput::TtyForce | StdInput::TtyFail) {
+            if matches!(
+                std_input,
+                StdInput::Tty | StdInput::TtyForce | StdInput::TtyFail
+            ) {
                 if let Some(ref path) = tty_path {
                     // Reset TTY if requested
                     if tty_reset {
@@ -178,10 +187,9 @@ pub fn spawn_service_with_options(service: &Service, options: &SpawnOptions) -> 
 /// Parse a command line into program and arguments
 fn parse_command(cmd: &str) -> Result<(String, Vec<String>), SpawnError> {
     // Handle special prefixes (-, @, +, !, !!)
-    let cmd = cmd.trim_start_matches(|c| c == '-' || c == '@' || c == '+' || c == '!' );
+    let cmd = cmd.trim_start_matches(|c| c == '-' || c == '@' || c == '+' || c == '!');
 
-    let parts = shlex::split(cmd)
-        .ok_or_else(|| SpawnError::InvalidCommand(cmd.to_string()))?;
+    let parts = shlex::split(cmd).ok_or_else(|| SpawnError::InvalidCommand(cmd.to_string()))?;
 
     if parts.is_empty() {
         return Err(SpawnError::InvalidCommand(cmd.to_string()));
@@ -202,14 +210,16 @@ pub fn substitute_specifiers(s: &str, service: &Service) -> String {
     result = result.replace("%n", &service.name);
 
     // %N - Full unit name without suffix (e.g., "foo@bar" from "foo@bar.service")
-    let name_without_suffix = service.name
+    let name_without_suffix = service
+        .name
         .strip_suffix(".service")
         .or_else(|| service.name.strip_suffix(".target"))
         .unwrap_or(&service.name);
     result = result.replace("%N", name_without_suffix);
 
     // %p - Prefix name (before @ or full name if no @)
-    let prefix = service.name
+    let prefix = service
+        .name
         .find('@')
         .map(|pos| &service.name[..pos])
         .unwrap_or(name_without_suffix);

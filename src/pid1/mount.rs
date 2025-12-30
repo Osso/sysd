@@ -27,7 +27,9 @@ const ESSENTIAL_MOUNTS: &[MountPoint] = &[
         source: "proc",
         target: "/proc",
         fstype: "proc",
-        flags: MsFlags::MS_NOSUID.union(MsFlags::MS_NODEV).union(MsFlags::MS_NOEXEC),
+        flags: MsFlags::MS_NOSUID
+            .union(MsFlags::MS_NODEV)
+            .union(MsFlags::MS_NOEXEC),
         data: None,
     },
     // /sys - sysfs
@@ -35,7 +37,9 @@ const ESSENTIAL_MOUNTS: &[MountPoint] = &[
         source: "sysfs",
         target: "/sys",
         fstype: "sysfs",
-        flags: MsFlags::MS_NOSUID.union(MsFlags::MS_NODEV).union(MsFlags::MS_NOEXEC),
+        flags: MsFlags::MS_NOSUID
+            .union(MsFlags::MS_NODEV)
+            .union(MsFlags::MS_NOEXEC),
         data: None,
     },
     // /dev - device nodes (devtmpfs)
@@ -75,7 +79,9 @@ const ESSENTIAL_MOUNTS: &[MountPoint] = &[
         source: "cgroup2",
         target: "/sys/fs/cgroup",
         fstype: "cgroup2",
-        flags: MsFlags::MS_NOSUID.union(MsFlags::MS_NODEV).union(MsFlags::MS_NOEXEC),
+        flags: MsFlags::MS_NOSUID
+            .union(MsFlags::MS_NODEV)
+            .union(MsFlags::MS_NOEXEC),
         data: None,
     },
 ];
@@ -112,17 +118,12 @@ fn mount_one(mp: &MountPoint) -> Result<(), MountError> {
     }
 
     // Mount the filesystem
-    mount(
-        Some(mp.source),
-        target,
-        Some(mp.fstype),
-        mp.flags,
-        mp.data,
-    )
-    .map_err(|e| MountError::Mount {
-        target: mp.target.to_string(),
-        fstype: mp.fstype.to_string(),
-        source: e,
+    mount(Some(mp.source), target, Some(mp.fstype), mp.flags, mp.data).map_err(|e| {
+        MountError::Mount {
+            target: mp.target.to_string(),
+            fstype: mp.fstype.to_string(),
+            source: e,
+        }
     })?;
 
     log::debug!("Mounted {} on {}", mp.fstype, mp.target);

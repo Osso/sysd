@@ -25,4 +25,4 @@ pub mod protocol;
 pub mod units;
 
 // Re-exports for D-Bus interfaces
-pub use units::{Service, ServiceType, UnitSection, ServiceSection, InstallSection};
+pub use units::{InstallSection, Service, ServiceSection, ServiceType, UnitSection};

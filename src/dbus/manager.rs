@@ -9,10 +9,14 @@
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::RwLock;
-use zbus::{interface, fdo, object_server::SignalEmitter, zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value}};
+use zbus::{
+    fdo, interface,
+    object_server::SignalEmitter,
+    zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value},
+};
 
-use crate::manager::Manager;
 use super::unit_object_path;
+use crate::manager::Manager;
 
 /// Job counter for generating unique job IDs
 static JOB_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
@@ -114,8 +118,7 @@ impl ManagerInterface {
     /// the scope was created successfully.
     async fn start_transient_unit(
         &self,
-        #[zbus(signal_context)]
-        ctx: zbus::object_server::SignalEmitter<'_>,
+        #[zbus(signal_context)] ctx: zbus::object_server::SignalEmitter<'_>,
         name: &str,
         mode: &str,
         properties: Vec<(String, OwnedValue)>,
@@ -125,7 +128,11 @@ impl ManagerInterface {
 
         log::info!(
             "StartTransientUnit: name={} mode={} slice={:?} desc={:?} pids={:?}",
-            name, mode, slice, description, pids
+            name,
+            mode,
+            slice,
+            description,
+            pids
         );
 
         // Generate job ID and path

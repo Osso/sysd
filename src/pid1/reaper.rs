@@ -106,7 +106,10 @@ impl ZombieReaper {
                     log::debug!("Reaped PID {} ({:?})", pid, result);
 
                     // Notify if anyone is listening
-                    let _ = self.tx.try_send(ReapedProcess { pid, status: result });
+                    let _ = self.tx.try_send(ReapedProcess {
+                        pid,
+                        status: result,
+                    });
 
                     count += 1;
                 }

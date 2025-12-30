@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use zbus::{interface, fdo};
+use zbus::{fdo, interface};
 
 use crate::cgroups::CgroupManager;
 
@@ -27,7 +27,10 @@ pub struct ScopeInterface {
 
 impl ScopeInterface {
     pub fn new(state: Arc<RwLock<ScopeState>>, cgroup_manager: Arc<CgroupManager>) -> Self {
-        Self { state, cgroup_manager }
+        Self {
+            state,
+            cgroup_manager,
+        }
     }
 }
 

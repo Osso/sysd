@@ -6,9 +6,9 @@
 //! Run with: cargo test --test pid1_integration -- --ignored --test-threads=1
 
 use std::process::{Command, Stdio};
-use std::time::Duration;
-use std::thread;
 use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 
 // Ensure only one test runs at a time (they share the same container)
 static DOCKER_LOCK: Mutex<()> = Mutex::new(());
@@ -111,7 +111,8 @@ fn test_pid1_detection() {
 
     assert!(
         logs.contains("Running as PID 1"),
-        "sysd did not detect PID 1 mode. Logs:\n{}", logs
+        "sysd did not detect PID 1 mode. Logs:\n{}",
+        logs
     );
 }
 
@@ -134,7 +135,8 @@ fn test_essential_filesystems_mounted() {
 
     assert!(
         logs.contains("Essential filesystems mounted"),
-        "Essential filesystems not mounted. Logs:\n{}", logs
+        "Essential filesystems not mounted. Logs:\n{}",
+        logs
     );
 }
 
@@ -195,7 +197,8 @@ fn test_sigusr1_state_dump() {
 
     assert!(
         logs.contains("Received SIGUSR1, dumping state"),
-        "SIGUSR1 not handled. Logs:\n{}", logs
+        "SIGUSR1 not handled. Logs:\n{}",
+        logs
     );
 }
 
@@ -229,27 +232,33 @@ fn test_sigterm_shutdown_sequence() {
     // Verify shutdown sequence
     assert!(
         logs.contains("Received SIGTERM, initiating poweroff"),
-        "SIGTERM not received. Logs:\n{}", logs
+        "SIGTERM not received. Logs:\n{}",
+        logs
     );
     assert!(
         logs.contains("Initiating Poweroff sequence"),
-        "Shutdown sequence not initiated. Logs:\n{}", logs
+        "Shutdown sequence not initiated. Logs:\n{}",
+        logs
     );
     assert!(
         logs.contains("Sending SIGTERM to all processes"),
-        "SIGTERM not sent to processes. Logs:\n{}", logs
+        "SIGTERM not sent to processes. Logs:\n{}",
+        logs
     );
     assert!(
         logs.contains("Syncing filesystems"),
-        "Filesystems not synced. Logs:\n{}", logs
+        "Filesystems not synced. Logs:\n{}",
+        logs
     );
     assert!(
         logs.contains("Unmounting filesystems"),
-        "Filesystems not unmounted. Logs:\n{}", logs
+        "Filesystems not unmounted. Logs:\n{}",
+        logs
     );
     assert!(
         logs.contains("Executing Poweroff"),
-        "Poweroff not executed. Logs:\n{}", logs
+        "Poweroff not executed. Logs:\n{}",
+        logs
     );
 }
 

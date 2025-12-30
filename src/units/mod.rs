@@ -46,10 +46,8 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
         }
         if let Some(vals) = unit.get("DEFAULTDEPENDENCIES") {
             if let Some((_, s)) = vals.first() {
-                svc.unit.default_dependencies = matches!(
-                    s.to_lowercase().as_str(),
-                    "yes" | "true" | "1" | "on"
-                );
+                svc.unit.default_dependencies =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
             }
         }
     }
@@ -59,8 +57,7 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
         // Type
         if let Some(vals) = service.get("TYPE") {
             if let Some((_, t)) = vals.first() {
-                svc.service.service_type =
-                    ServiceType::parse(t).unwrap_or_default();
+                svc.service.service_type = ServiceType::parse(t).unwrap_or_default();
             }
         }
 
@@ -105,10 +102,8 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
         }
         if let Some(vals) = service.get("REMAINAFTEREXIT") {
             if let Some((_, s)) = vals.first() {
-                svc.service.remain_after_exit = matches!(
-                    s.to_lowercase().as_str(),
-                    "yes" | "true" | "1" | "on"
-                );
+                svc.service.remain_after_exit =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
             }
         }
         if let Some(vals) = service.get("WATCHDOGSEC") {
@@ -174,10 +169,8 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
         }
         if let Some(vals) = service.get("TTYRESET") {
             if let Some((_, s)) = vals.first() {
-                svc.service.tty_reset = matches!(
-                    s.to_lowercase().as_str(),
-                    "yes" | "true" | "1" | "on"
-                );
+                svc.service.tty_reset =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
             }
         }
 
@@ -265,7 +258,8 @@ async fn load_dropins(unit_path: &Path, parsed: &mut ParsedFile) {
         Path::new("/etc/systemd/system").join(format!("{}.d", unit_name)),
         Path::new("/usr/lib/systemd/system").join(format!("{}.d", unit_name)),
         // Also check relative to the unit file location
-        unit_path.parent()
+        unit_path
+            .parent()
             .map(|p| p.join(format!("{}.d", unit_name)))
             .unwrap_or_default(),
     ];
@@ -314,7 +308,8 @@ fn merge_parsed_files(base: &mut ParsedFile, dropin: &ParsedFile) {
             // Note: For scalar directives, parse_service uses .first() so the last
             // value from the base takes precedence (systemd uses last value instead)
             // For list directives (After=, Wants=, etc.), all values are collected
-            base_section.entry(key.clone())
+            base_section
+                .entry(key.clone())
                 .or_default()
                 .extend(values.clone());
         }
@@ -349,14 +344,13 @@ pub fn parse_target(name: &str, parsed: &ParsedFile) -> Result<Target, ParseErro
             target.unit.condition_path_exists = vals.iter().map(|(_, v)| v.clone()).collect();
         }
         if let Some(vals) = unit.get("CONDITIONDIRECTORYNOTEMPTY") {
-            target.unit.condition_directory_not_empty = vals.iter().map(|(_, v)| v.clone()).collect();
+            target.unit.condition_directory_not_empty =
+                vals.iter().map(|(_, v)| v.clone()).collect();
         }
         if let Some(vals) = unit.get("DEFAULTDEPENDENCIES") {
             if let Some((_, s)) = vals.first() {
-                target.unit.default_dependencies = matches!(
-                    s.to_lowercase().as_str(),
-                    "yes" | "true" | "1" | "on"
-                );
+                target.unit.default_dependencies =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
             }
         }
     }
@@ -385,8 +379,7 @@ pub async fn load_target(path: &Path) -> Result<Target, ParseError> {
     }
 
     // Also check /etc/systemd/system/<target>.wants
-    let etc_wants = Path::new("/etc/systemd/system")
-        .join(format!("{}.wants", name));
+    let etc_wants = Path::new("/etc/systemd/system").join(format!("{}.wants", name));
     if etc_wants.is_dir() {
         target.wants_dir.extend(read_wants_dir(&etc_wants));
     }
@@ -467,7 +460,10 @@ WantedBy=multi-user.target
         let parsed = parse_file(content).unwrap();
         let svc = parse_service("docker.service", &parsed).unwrap();
 
-        assert_eq!(svc.unit.description, Some("Docker Application Container Engine".into()));
+        assert_eq!(
+            svc.unit.description,
+            Some("Docker Application Container Engine".into())
+        );
         assert!(svc.unit.after.contains(&"network-online.target".into()));
         assert!(svc.unit.wants.contains(&"network-online.target".into()));
         assert!(svc.unit.requires.contains(&"docker.socket".into()));
@@ -501,12 +497,15 @@ WantedBy=multi-user.target
 
         assert_eq!(svc.service.service_type, ServiceType::Simple);
         assert_eq!(svc.service.user, Some("nobody".into()));
-        assert_eq!(
-            svc.service.working_directory,
-            Some("/var/lib/myapp".into())
-        );
-        assert!(svc.service.environment.contains(&("FOO".into(), "bar".into())));
-        assert!(svc.service.environment.contains(&("BAZ".into(), "qux".into())));
+        assert_eq!(svc.service.working_directory, Some("/var/lib/myapp".into()));
+        assert!(svc
+            .service
+            .environment
+            .contains(&("FOO".into(), "bar".into())));
+        assert!(svc
+            .service
+            .environment
+            .contains(&("BAZ".into(), "qux".into())));
     }
 
     #[test]
@@ -627,7 +626,10 @@ ExecStart=/bin/true
         let parsed = parse_file(content).unwrap();
         let svc = parse_service("conditional.service", &parsed).unwrap();
 
-        assert_eq!(svc.unit.condition_directory_not_empty, vec!["/etc/modules-load.d"]);
+        assert_eq!(
+            svc.unit.condition_directory_not_empty,
+            vec!["/etc/modules-load.d"]
+        );
     }
 
     #[test]

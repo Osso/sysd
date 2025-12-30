@@ -9,12 +9,12 @@ use std::time::Duration;
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum ServiceType {
     #[default]
-    Simple,   // Ready immediately after exec
-    Forking,  // Ready when main process exits
-    Notify,   // Ready on sd_notify READY=1
-    Dbus,     // Ready when D-Bus name acquired
-    Oneshot,  // Run once, no main process
-    Idle,     // Like simple, but wait for job queue empty
+    Simple, // Ready immediately after exec
+    Forking, // Ready when main process exits
+    Notify,  // Ready on sd_notify READY=1
+    Dbus,    // Ready when D-Bus name acquired
+    Oneshot, // Run once, no main process
+    Idle,    // Like simple, but wait for job queue empty
 }
 
 /// Restart policy
@@ -30,10 +30,10 @@ pub enum RestartPolicy {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum KillMode {
     #[default]
-    ControlGroup,  // Kill all processes in the cgroup
-    Process,       // Only kill the main process
-    Mixed,         // SIGTERM main, SIGKILL others
-    None,          // Don't kill anything
+    ControlGroup, // Kill all processes in the cgroup
+    Process, // Only kill the main process
+    Mixed,   // SIGTERM main, SIGKILL others
+    None,    // Don't kill anything
 }
 
 impl KillMode {
@@ -62,9 +62,9 @@ pub enum StdOutput {
 pub enum StdInput {
     #[default]
     Null,
-    Tty,       // StandardInput=tty
-    TtyForce,  // StandardInput=tty-force
-    TtyFail,   // StandardInput=tty-fail
+    Tty,      // StandardInput=tty
+    TtyForce, // StandardInput=tty-force
+    TtyFail,  // StandardInput=tty-fail
 }
 
 impl StdInput {
@@ -124,19 +124,19 @@ pub struct ServiceSection {
 
     // Restart
     pub restart: RestartPolicy,
-    pub restart_sec: Duration,  // Default: 100ms per systemd docs
+    pub restart_sec: Duration, // Default: 100ms per systemd docs
     pub timeout_start_sec: Option<Duration>,
     pub timeout_stop_sec: Option<Duration>,
-    pub remain_after_exit: bool,  // For Type=oneshot: stay active after exit
+    pub remain_after_exit: bool, // For Type=oneshot: stay active after exit
 
     // Watchdog
-    pub watchdog_sec: Option<Duration>,  // Watchdog timeout (service must ping)
+    pub watchdog_sec: Option<Duration>, // Watchdog timeout (service must ping)
 
     // Type=forking
-    pub pid_file: Option<PathBuf>,  // PIDFile= for Type=forking
+    pub pid_file: Option<PathBuf>, // PIDFile= for Type=forking
 
     // Type=dbus
-    pub bus_name: Option<String>,  // BusName= for Type=dbus
+    pub bus_name: Option<String>, // BusName= for Type=dbus
 
     // Stop behavior
     pub kill_mode: KillMode,
@@ -160,12 +160,12 @@ pub struct ServiceSection {
     pub tty_reset: bool,
 
     // Resource limits (cgroup v2)
-    pub memory_max: Option<u64>,      // bytes
-    pub cpu_quota: Option<u32>,       // percentage (100 = 1 core)
+    pub memory_max: Option<u64>, // bytes
+    pub cpu_quota: Option<u32>,  // percentage (100 = 1 core)
     pub tasks_max: Option<u32>,
 
     // Process limits (setrlimit)
-    pub limit_nofile: Option<u64>,    // LimitNOFILE= (max open files)
+    pub limit_nofile: Option<u64>, // LimitNOFILE= (max open files)
 
     // OOM killer
     pub oom_score_adjust: Option<i32>, // OOMScoreAdjust= (-1000 to 1000)
@@ -374,8 +374,14 @@ mod tests {
     fn test_restart_policy_parse() {
         assert_eq!(RestartPolicy::parse("no"), Some(RestartPolicy::No));
         assert_eq!(RestartPolicy::parse("NO"), Some(RestartPolicy::No));
-        assert_eq!(RestartPolicy::parse("on-failure"), Some(RestartPolicy::OnFailure));
-        assert_eq!(RestartPolicy::parse("ON-FAILURE"), Some(RestartPolicy::OnFailure));
+        assert_eq!(
+            RestartPolicy::parse("on-failure"),
+            Some(RestartPolicy::OnFailure)
+        );
+        assert_eq!(
+            RestartPolicy::parse("ON-FAILURE"),
+            Some(RestartPolicy::OnFailure)
+        );
         assert_eq!(RestartPolicy::parse("always"), Some(RestartPolicy::Always));
         assert_eq!(RestartPolicy::parse("ALWAYS"), Some(RestartPolicy::Always));
         assert_eq!(RestartPolicy::parse("invalid"), None);
@@ -478,7 +484,10 @@ mod tests {
     #[test]
     fn test_extract_instance() {
         assert_eq!(extract_instance("foo@bar.service"), Some("bar".to_string()));
-        assert_eq!(extract_instance("getty@tty1.service"), Some("tty1".to_string()));
+        assert_eq!(
+            extract_instance("getty@tty1.service"),
+            Some("tty1".to_string())
+        );
         assert_eq!(extract_instance("foo@.service"), None); // Template file
         assert_eq!(extract_instance("foo.service"), None); // Not a template
         assert_eq!(extract_instance("foo@bar"), Some("bar".to_string()));
@@ -486,9 +495,18 @@ mod tests {
 
     #[test]
     fn test_get_template_name() {
-        assert_eq!(get_template_name("foo@bar.service"), Some("foo@.service".to_string()));
-        assert_eq!(get_template_name("getty@tty1.service"), Some("getty@.service".to_string()));
-        assert_eq!(get_template_name("foo@.service"), Some("foo@.service".to_string()));
+        assert_eq!(
+            get_template_name("foo@bar.service"),
+            Some("foo@.service".to_string())
+        );
+        assert_eq!(
+            get_template_name("getty@tty1.service"),
+            Some("getty@.service".to_string())
+        );
+        assert_eq!(
+            get_template_name("foo@.service"),
+            Some("foo@.service".to_string())
+        );
         assert_eq!(get_template_name("foo.service"), None); // Not a template
     }
 

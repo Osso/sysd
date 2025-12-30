@@ -63,7 +63,8 @@ impl Unit {
     /// Get all units this depends on (After + Requires + Wants)
     pub fn dependencies(&self) -> Vec<&String> {
         let unit = self.unit_section();
-        unit.after.iter()
+        unit.after
+            .iter()
             .chain(unit.requires.iter())
             .chain(unit.wants.iter())
             .collect()

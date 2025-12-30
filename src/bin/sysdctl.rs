@@ -2,10 +2,10 @@
 //!
 //! Communicates with the sysd daemon over /run/sysd.sock.
 
-use std::path::PathBuf;
 use clap::{Parser, Subcommand};
-use sysd::protocol::{Request, Response, SOCKET_PATH};
 use peercred_ipc::Client;
+use std::path::PathBuf;
+use sysd::protocol::{Request, Response, SOCKET_PATH};
 
 #[derive(Parser)]
 #[command(name = "sysdctl")]

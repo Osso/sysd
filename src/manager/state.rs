@@ -55,7 +55,7 @@ pub enum SubState {
     Stopping,
     Failed,
     Exited,
-    AutoRestart,  // Waiting for restart delay
+    AutoRestart, // Waiting for restart delay
 }
 
 impl SubState {
@@ -134,7 +134,11 @@ impl ServiceState {
 
     pub fn set_stopped(&mut self, exit_code: i32) {
         self.active = ActiveState::Inactive;
-        self.sub = if exit_code == 0 { SubState::Exited } else { SubState::Dead };
+        self.sub = if exit_code == 0 {
+            SubState::Exited
+        } else {
+            SubState::Dead
+        };
         self.main_pid = None;
         self.exit_code = Some(exit_code);
         self.state_change_time = Instant::now();
@@ -153,7 +157,9 @@ impl ServiceState {
 
     /// Check if restart is due
     pub fn restart_due(&self) -> bool {
-        self.restart_at.map(|t| Instant::now() >= t).unwrap_or(false)
+        self.restart_at
+            .map(|t| Instant::now() >= t)
+            .unwrap_or(false)
     }
 
     /// Clear restart state (after successful start)

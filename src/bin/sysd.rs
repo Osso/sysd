@@ -13,17 +13,19 @@ use log::info;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use peercred_ipc::{CallerInfo, Connection, Server};
 use sysd::dbus::DbusServer;
 use sysd::manager::Manager;
-use sysd::pid1::{self, SignalHandler, SysdSignal, ShutdownType, ZombieReaper};
+use sysd::pid1::{self, ShutdownType, SignalHandler, SysdSignal, ZombieReaper};
 use sysd::protocol::{Request, Response, UnitInfo, SOCKET_PATH};
-use peercred_ipc::{CallerInfo, Connection, Server};
 
 #[derive(Parser)]
 #[command(name = "sysd")]
 #[command(about = "Minimal systemd-compatible init daemon")]
-#[command(long_about = "sysd is a minimal init system that parses systemd unit files \
-    and manages services. It listens on /run/sysd.sock for commands from sysdctl.")]
+#[command(
+    long_about = "sysd is a minimal init system that parses systemd unit files \
+    and manages services. It listens on /run/sysd.sock for commands from sysdctl."
+)]
 struct Args {
     /// Run in foreground (don't daemonize)
     #[arg(long, short = 'f')]
@@ -53,7 +55,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize notify socket for Type=notify services
     if let Err(e) = manager.init_notify_socket() {
-        log::warn!("Failed to create notify socket: {} (Type=notify services won't work)", e);
+        log::warn!(
+            "Failed to create notify socket: {} (Type=notify services won't work)",
+            e
+        );
     }
 
     let manager: SharedManager = Arc::new(RwLock::new(manager));
@@ -65,7 +70,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(server)
         }
         Err(e) => {
-            log::warn!("Failed to start D-Bus server: {} (logind integration unavailable)", e);
+            log::warn!(
+                "Failed to start D-Bus server: {} (logind integration unavailable)",
+                e
+            );
             None
         }
     };
@@ -180,11 +188,7 @@ async fn stop_all_services(manager: &SharedManager) {
     }
 }
 
-async fn handle_connection(
-    mut conn: Connection,
-    caller: CallerInfo,
-    manager: SharedManager,
-) {
+async fn handle_connection(mut conn: Connection, caller: CallerInfo, manager: SharedManager) {
     info!(
         "connection from uid={} pid={} exe={:?}",
         caller.uid, caller.pid, caller.exe

@@ -82,7 +82,10 @@ async fn test_parse_etc_systemd() {
 
     // Ensure we actually tested something
     assert!(success > 0, "No service files found in /etc/systemd");
-    eprintln!("Successfully parsed {} service files from /etc/systemd", success);
+    eprintln!(
+        "Successfully parsed {} service files from /etc/systemd",
+        success
+    );
 }
 
 #[tokio::test]
@@ -104,7 +107,10 @@ async fn test_parse_usr_lib_systemd() {
     );
 
     // Ensure we actually tested something
-    assert!(success > 0, "No service files found in /usr/lib/systemd/system");
+    assert!(
+        success > 0,
+        "No service files found in /usr/lib/systemd/system"
+    );
     eprintln!(
         "Successfully parsed {} service files from /usr/lib/systemd/system",
         success

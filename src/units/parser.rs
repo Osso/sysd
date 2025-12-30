@@ -17,19 +17,19 @@ pub type ParsedFile = HashMap<String, ParsedSection>;
 pub enum ParseError {
     #[error("Section '{0}' appears more than once")]
     DuplicateSection(String),
-    
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     #[error("Unknown setting: {0}")]
     UnknownSetting(String),
-    
+
     #[error("Setting '{0}' has too many values: {1:?}")]
     TooManyValues(String, Vec<String>),
-    
+
     #[error("Unsupported setting: {0}")]
     UnsupportedSetting(String),
-    
+
     #[error("Parse error: {0}")]
     Generic(String),
 }
@@ -38,22 +38,22 @@ pub enum ParseError {
 pub fn parse_file(content: &str) -> Result<ParsedFile, ParseError> {
     let mut sections = HashMap::new();
     let lines: Vec<&str> = content.lines().map(|s| s.trim()).collect();
-    
+
     let mut lines_iter = lines.iter().peekable();
-    
+
     // Skip lines before the first section
     while lines_iter.peek().map_or(false, |l| !l.starts_with('[')) {
         lines_iter.next();
     }
-    
+
     // Get first section name
     let Some(first_section) = lines_iter.next() else {
         return Ok(sections); // Empty file
     };
-    
+
     let mut current_section_name = first_section.to_string();
     let mut current_section_lines = Vec::new();
-    
+
     for line in lines_iter {
         if line.starts_with('[') {
             // New section - store current one
@@ -70,7 +70,7 @@ pub fn parse_file(content: &str) -> Result<ParsedFile, ParseError> {
             current_section_lines.push(*line);
         }
     }
-    
+
     // Insert last section
     if !current_section_name.is_empty() {
         if sections.contains_key(&current_section_name) {
@@ -78,13 +78,19 @@ pub fn parse_file(content: &str) -> Result<ParsedFile, ParseError> {
         }
         sections.insert(current_section_name, parse_section(&current_section_lines));
     }
-    
+
     Ok(sections)
 }
 
 /// Keys that accept space-separated multiple values
 const SPACE_SEPARATED_KEYS: &[&str] = &[
-    "AFTER", "BEFORE", "REQUIRES", "WANTS", "CONFLICTS", "WANTEDBY", "REQUIREDBY",
+    "AFTER",
+    "BEFORE",
+    "REQUIRES",
+    "WANTS",
+    "CONFLICTS",
+    "WANTEDBY",
+    "REQUIREDBY",
     "CONDITIONPATHEXISTS",
 ];
 
@@ -137,10 +143,9 @@ pub async fn parse_unit_file(path: &Path) -> Result<ParsedFile, ParseError> {
 
 /// Parse Environment= values using shell-like quoting
 pub fn parse_environment(raw: &str) -> Result<Vec<(String, String)>, ParseError> {
-    let parts = shlex::split(raw).ok_or_else(|| {
-        ParseError::Generic(format!("Invalid shell quoting in: {}", raw))
-    })?;
-    
+    let parts = shlex::split(raw)
+        .ok_or_else(|| ParseError::Generic(format!("Invalid shell quoting in: {}", raw)))?;
+
     let mut vars = Vec::new();
     for pair in parts {
         if let Some((key, value)) = pair.split_once('=') {
@@ -243,10 +248,7 @@ Description=Test
 "#;
         let parsed = parse_file(content).unwrap();
         let unit = &parsed["[Unit]"];
-        assert_eq!(
-            extract_values(unit["DESCRIPTION"].clone()),
-            vec!["Test"]
-        );
+        assert_eq!(extract_values(unit["DESCRIPTION"].clone()), vec!["Test"]);
     }
 
     #[test]
@@ -349,7 +351,10 @@ Description=Second
 "#;
         let result = parse_file(content);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ParseError::DuplicateSection(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::DuplicateSection(_)
+        ));
     }
 
     #[test]
@@ -368,13 +373,22 @@ Description=Test
     #[test]
     fn test_parse_environment() {
         let result = parse_environment("FOO=bar BAZ=qux").unwrap();
-        assert_eq!(result, vec![("FOO".into(), "bar".into()), ("BAZ".into(), "qux".into())]);
+        assert_eq!(
+            result,
+            vec![("FOO".into(), "bar".into()), ("BAZ".into(), "qux".into())]
+        );
     }
 
     #[test]
     fn test_parse_environment_quoted() {
         let result = parse_environment(r#"FOO="bar baz" QUX=test"#).unwrap();
-        assert_eq!(result, vec![("FOO".into(), "bar baz".into()), ("QUX".into(), "test".into())]);
+        assert_eq!(
+            result,
+            vec![
+                ("FOO".into(), "bar baz".into()),
+                ("QUX".into(), "test".into())
+            ]
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Integration tests for the Manager
 
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use sysd::manager::Manager;
 
@@ -24,14 +24,18 @@ fn write_test_service(dir: &PathBuf, name: &str, content: &str) -> PathBuf {
 #[tokio::test]
 async fn test_manager_load_unit() {
     let dir = unique_test_dir();
-    let path = write_test_service(&dir, "test-load.service", r#"
+    let path = write_test_service(
+        &dir,
+        "test-load.service",
+        r#"
 [Unit]
 Description=Test service for loading
 
 [Service]
 Type=simple
 ExecStart=/bin/true
-"#);
+"#,
+    );
 
     let mut manager = Manager::new();
     manager.load_from_path(&path).await.unwrap();
@@ -51,14 +55,18 @@ async fn test_manager_unit_not_found() {
 #[tokio::test]
 async fn test_manager_start_simple_service() {
     let dir = unique_test_dir();
-    let path = write_test_service(&dir, "test-start.service", r#"
+    let path = write_test_service(
+        &dir,
+        "test-start.service",
+        r#"
 [Unit]
 Description=Test service for starting
 
 [Service]
 Type=simple
 ExecStart=/bin/sleep 60
-"#);
+"#,
+    );
 
     let mut manager = Manager::new();
     manager.load_from_path(&path).await.unwrap();
@@ -82,14 +90,18 @@ ExecStart=/bin/sleep 60
 #[tokio::test]
 async fn test_manager_restart_service() {
     let dir = unique_test_dir();
-    let path = write_test_service(&dir, "test-restart.service", r#"
+    let path = write_test_service(
+        &dir,
+        "test-restart.service",
+        r#"
 [Unit]
 Description=Test service for restarting
 
 [Service]
 Type=simple
 ExecStart=/bin/sleep 60
-"#);
+"#,
+    );
 
     let mut manager = Manager::new();
     manager.load_from_path(&path).await.unwrap();
@@ -112,14 +124,18 @@ ExecStart=/bin/sleep 60
 #[tokio::test]
 async fn test_manager_already_active() {
     let dir = unique_test_dir();
-    let path = write_test_service(&dir, "test-active.service", r#"
+    let path = write_test_service(
+        &dir,
+        "test-active.service",
+        r#"
 [Unit]
 Description=Test already active
 
 [Service]
 Type=simple
 ExecStart=/bin/sleep 60
-"#);
+"#,
+    );
 
     let mut manager = Manager::new();
     manager.load_from_path(&path).await.unwrap();
@@ -136,14 +152,18 @@ ExecStart=/bin/sleep 60
 #[tokio::test]
 async fn test_manager_stop_not_active() {
     let dir = unique_test_dir();
-    let path = write_test_service(&dir, "test-stop-inactive.service", r#"
+    let path = write_test_service(
+        &dir,
+        "test-stop-inactive.service",
+        r#"
 [Unit]
 Description=Test stop inactive
 
 [Service]
 Type=simple
 ExecStart=/bin/sleep 60
-"#);
+"#,
+    );
 
     let mut manager = Manager::new();
     manager.load_from_path(&path).await.unwrap();
@@ -156,14 +176,18 @@ ExecStart=/bin/sleep 60
 #[tokio::test]
 async fn test_manager_normalize_name() {
     let dir = unique_test_dir();
-    let path = write_test_service(&dir, "test-normalize.service", r#"
+    let path = write_test_service(
+        &dir,
+        "test-normalize.service",
+        r#"
 [Unit]
 Description=Test name normalization
 
 [Service]
 Type=simple
 ExecStart=/bin/true
-"#);
+"#,
+    );
 
     let mut manager = Manager::new();
     manager.load_from_path(&path).await.unwrap();
@@ -176,24 +200,38 @@ ExecStart=/bin/true
 #[tokio::test]
 async fn test_manager_list_units() {
     let dir = unique_test_dir();
-    write_test_service(&dir, "test-list1.service", r#"
+    write_test_service(
+        &dir,
+        "test-list1.service",
+        r#"
 [Unit]
 Description=Test list 1
 
 [Service]
 ExecStart=/bin/true
-"#);
-    write_test_service(&dir, "test-list2.service", r#"
+"#,
+    );
+    write_test_service(
+        &dir,
+        "test-list2.service",
+        r#"
 [Unit]
 Description=Test list 2
 
 [Service]
 ExecStart=/bin/true
-"#);
+"#,
+    );
 
     let mut manager = Manager::new();
-    manager.load_from_path(&dir.join("test-list1.service")).await.unwrap();
-    manager.load_from_path(&dir.join("test-list2.service")).await.unwrap();
+    manager
+        .load_from_path(&dir.join("test-list1.service"))
+        .await
+        .unwrap();
+    manager
+        .load_from_path(&dir.join("test-list2.service"))
+        .await
+        .unwrap();
 
     let units: Vec<_> = manager.list().collect();
     assert_eq!(units.len(), 2);
@@ -211,13 +249,17 @@ async fn test_manager_get_default_target() {
 #[tokio::test]
 async fn test_manager_service_description() {
     let dir = unique_test_dir();
-    let path = write_test_service(&dir, "test-desc.service", r#"
+    let path = write_test_service(
+        &dir,
+        "test-desc.service",
+        r#"
 [Unit]
 Description=My test service description
 
 [Service]
 ExecStart=/bin/true
-"#);
+"#,
+    );
 
     let mut manager = Manager::new();
     manager.load_from_path(&path).await.unwrap();
@@ -232,7 +274,10 @@ ExecStart=/bin/true
 #[tokio::test]
 async fn test_manager_service_dependencies() {
     let dir = unique_test_dir();
-    let path = write_test_service(&dir, "test-deps.service", r#"
+    let path = write_test_service(
+        &dir,
+        "test-deps.service",
+        r#"
 [Unit]
 Description=Test deps
 After=network.target
@@ -241,7 +286,8 @@ Wants=syslog.service
 
 [Service]
 ExecStart=/bin/true
-"#);
+"#,
+    );
 
     let mut manager = Manager::new();
     manager.load_from_path(&path).await.unwrap();
@@ -257,14 +303,18 @@ ExecStart=/bin/true
 async fn test_manager_type_idle_immediate_when_no_jobs() {
     // Type=idle should start immediately when there are no other jobs
     let dir = unique_test_dir();
-    let path = write_test_service(&dir, "test-idle.service", r#"
+    let path = write_test_service(
+        &dir,
+        "test-idle.service",
+        r#"
 [Unit]
 Description=Test idle service
 
 [Service]
 Type=idle
 ExecStart=/bin/sleep 60
-"#);
+"#,
+    );
 
     let mut manager = Manager::new();
     manager.load_from_path(&path).await.unwrap();
@@ -283,7 +333,10 @@ ExecStart=/bin/sleep 60
 async fn test_manager_type_dbus_waits_for_name() {
     // Type=dbus should stay in starting state waiting for BusName
     let dir = unique_test_dir();
-    let path = write_test_service(&dir, "test-dbus.service", r#"
+    let path = write_test_service(
+        &dir,
+        "test-dbus.service",
+        r#"
 [Unit]
 Description=Test D-Bus service
 
@@ -291,7 +344,8 @@ Description=Test D-Bus service
 Type=dbus
 BusName=org.test.NonExistentService12345
 ExecStart=/bin/sleep 60
-"#);
+"#,
+    );
 
     let mut manager = Manager::new();
     manager.load_from_path(&path).await.unwrap();
@@ -309,14 +363,18 @@ ExecStart=/bin/sleep 60
 async fn test_manager_type_dbus_no_busname_fallback() {
     // Type=dbus without BusName should act like simple (with warning)
     let dir = unique_test_dir();
-    let path = write_test_service(&dir, "test-dbus-nobusname.service", r#"
+    let path = write_test_service(
+        &dir,
+        "test-dbus-nobusname.service",
+        r#"
 [Unit]
 Description=Test D-Bus service without BusName
 
 [Service]
 Type=dbus
 ExecStart=/bin/sleep 60
-"#);
+"#,
+    );
 
     let mut manager = Manager::new();
     manager.load_from_path(&path).await.unwrap();
