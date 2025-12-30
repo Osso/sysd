@@ -404,12 +404,12 @@ libc = "0.2"                  # Low-level syscalls
 - [x] Run as init (kernel cmdline `init=/usr/bin/sysd`)
 
 ### M6: Service Types & Restart
-- [ ] Restart= logic (on-failure, always) with RestartSec=
-- [ ] RemainAfterExit= for oneshot services
+- [x] Restart= logic (on-failure, always) with RestartSec=
+- [x] RemainAfterExit= for oneshot services
+- [x] Type=forking (wait for parent exit, read PIDFile=)
+- [x] KillMode= (control-group/process/mixed/none)
 - [ ] Type=dbus (watch BusName= on D-Bus)
-- [ ] Type=forking (wait for parent exit, read PIDFile=)
 - [ ] Type=idle (wait for job queue empty)
-- [ ] KillMode= (control-group/process/mixed)
 
 ### M7: Extended Features
 - [ ] DefaultDependencies= (146 uses)
