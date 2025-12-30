@@ -44,6 +44,8 @@ pub struct Manager {
     pid_files: HashMap<String, PathBuf>,
     /// Count of active jobs (for Type=idle)
     active_jobs: u32,
+    /// Services waiting for D-Bus name acquisition (bus_name -> service_name)
+    waiting_bus_name: HashMap<String, String>,
 }
 
 impl Manager {
@@ -76,6 +78,7 @@ impl Manager {
             cgroup_paths: HashMap::new(),
             pid_files: HashMap::new(),
             active_jobs: 0,
+            waiting_bus_name: HashMap::new(),
         }
     }
 
@@ -373,12 +376,28 @@ impl Manager {
         self.processes.insert(name.to_string(), child);
 
         let is_forking = service.service.service_type == ServiceType::Forking;
+        let is_dbus = service.service.service_type == ServiceType::Dbus;
         let pid_file = service.service.pid_file.clone();
+        let bus_name = service.service.bus_name.clone();
 
         if is_notify {
             // Type=notify: stay in starting state until READY=1 received
             self.waiting_ready.insert(pid, name.to_string());
             log::info!("Started {} (PID {}), waiting for READY", name, pid);
+        } else if is_dbus {
+            // Type=dbus: wait for BusName to appear on D-Bus
+            if let Some(ref bn) = bus_name {
+                self.waiting_bus_name.insert(bn.clone(), name.to_string());
+                log::info!("Started {} (PID {}), waiting for D-Bus name {}", name, pid, bn);
+            } else {
+                // No BusName specified - treat like simple
+                log::warn!("{} is Type=dbus but has no BusName=, treating as simple", name);
+                if let Some(state) = self.states.get_mut(name) {
+                    state.set_running(pid);
+                }
+                self.active_jobs = self.active_jobs.saturating_sub(1);
+                log::info!("Started {} (PID {})", name, pid);
+            }
         } else if is_forking {
             // Type=forking: wait for parent to exit, then read PIDFile
             log::info!("Started {} (PID {}), waiting for fork", name, pid);
@@ -925,6 +944,56 @@ impl Manager {
                 if let Some(state) = self.states.get_mut(&name) {
                     state.set_failed(format!("Restart failed: {}", e));
                 }
+            }
+        }
+    }
+
+    /// Check if any Type=dbus services have acquired their bus name
+    pub async fn process_dbus_ready(&mut self) {
+        if self.waiting_bus_name.is_empty() {
+            return;
+        }
+
+        // Try to connect to system bus
+        let conn = match zbus::Connection::system().await {
+            Ok(c) => c,
+            Err(e) => {
+                log::debug!("Cannot check D-Bus names (no connection): {}", e);
+                return;
+            }
+        };
+
+        // Check each waited name
+        let mut ready = Vec::new();
+        for (bus_name, service_name) in &self.waiting_bus_name {
+            // Use the fdo DBus interface to check if the name has an owner
+            match conn.call_method(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus"),
+                "GetNameOwner",
+                &(bus_name.as_str(),),
+            ).await {
+                Ok(_) => {
+                    // Name has an owner - service is ready
+                    ready.push((bus_name.clone(), service_name.clone()));
+                }
+                Err(_) => {
+                    // Name not owned yet
+                }
+            }
+        }
+
+        // Mark ready services as running
+        for (bus_name, service_name) in ready {
+            self.waiting_bus_name.remove(&bus_name);
+            if let Some(state) = self.states.get_mut(&service_name) {
+                let pid = self.processes.get(&service_name)
+                    .and_then(|c| c.id())
+                    .unwrap_or(0);
+                state.set_running(pid);
+                self.active_jobs = self.active_jobs.saturating_sub(1);
+                log::info!("{} acquired D-Bus name {}", service_name, bus_name);
             }
         }
     }

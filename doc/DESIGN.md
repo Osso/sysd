@@ -158,10 +158,10 @@ Usage counts from `/usr/lib/systemd/system/*.service` on Arch Linux.
 | Directive | Count | Status | Notes |
 |-----------|-------|--------|-------|
 | ExecStart= | 251 | ✓ done | Command to run |
-| Type= | 213 | partial | simple/forking/notify/oneshot/idle done; dbus TODO |
+| Type= | 213 | ✓ done | simple/forking/notify/dbus/oneshot/idle |
 | RemainAfterExit= | 96 | ✓ done | For oneshot: stay "active" after exit |
 | Restart= | 44 | ✓ done | no/on-failure/always |
-| BusName= | 37 | TODO | Required for Type=dbus |
+| BusName= | 37 | ✓ done | Required for Type=dbus |
 | ExecStop= | 25 | ✓ done | Stop command |
 | TimeoutSec= | 24 | partial | Sets both start and stop timeout |
 | RestartSec= | 23 | ✓ done | Delay before restart |
@@ -403,13 +403,13 @@ libc = "0.2"                  # Low-level syscalls
 - [x] Shutdown sequence (stop services → SIGTERM → SIGKILL → sync → unmount → reboot)
 - [x] Run as init (kernel cmdline `init=/usr/bin/sysd`)
 
-### M6: Service Types & Restart
+### M6: Service Types & Restart ✓
 - [x] Restart= logic (on-failure, always) with RestartSec=
 - [x] RemainAfterExit= for oneshot services
 - [x] Type=forking (wait for parent exit, read PIDFile=)
 - [x] KillMode= (control-group/process/mixed/none)
 - [x] Type=idle (wait for job queue empty)
-- [ ] Type=dbus (watch BusName= on D-Bus)
+- [x] Type=dbus (watch BusName= on D-Bus)
 
 ### M7: Extended Features
 - [ ] DefaultDependencies= (146 uses)

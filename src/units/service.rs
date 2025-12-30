@@ -91,6 +91,9 @@ pub struct ServiceSection {
     // Type=forking
     pub pid_file: Option<PathBuf>,  // PIDFile= for Type=forking
 
+    // Type=dbus
+    pub bus_name: Option<String>,  // BusName= for Type=dbus
+
     // Stop behavior
     pub kill_mode: KillMode,
 
@@ -128,6 +131,7 @@ impl Default for ServiceSection {
             timeout_stop_sec: None,
             remain_after_exit: false,
             pid_file: None,
+            bus_name: None,
             kill_mode: KillMode::default(),
             user: None,
             group: None,

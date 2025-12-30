@@ -103,6 +103,9 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
         if let Some(vals) = service.get("PIDFILE") {
             svc.service.pid_file = vals.first().map(|(_, v)| v.into());
         }
+        if let Some(vals) = service.get("BUSNAME") {
+            svc.service.bus_name = vals.first().map(|(_, v)| v.clone());
+        }
         if let Some(vals) = service.get("KILLMODE") {
             if let Some((_, s)) = vals.first() {
                 svc.service.kill_mode = KillMode::parse(s).unwrap_or_default();
@@ -391,5 +394,26 @@ RestartSec=5s
 
         assert_eq!(svc.service.restart, RestartPolicy::OnFailure);
         assert_eq!(svc.service.restart_sec, std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_parse_dbus_service() {
+        let content = r#"
+[Unit]
+Description=D-Bus Activated Service
+
+[Service]
+Type=dbus
+BusName=org.example.MyService
+ExecStart=/usr/bin/my-dbus-service
+
+[Install]
+WantedBy=multi-user.target
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("my-dbus.service", &parsed).unwrap();
+
+        assert_eq!(svc.service.service_type, ServiceType::Dbus);
+        assert_eq!(svc.service.bus_name, Some("org.example.MyService".into()));
     }
 }
