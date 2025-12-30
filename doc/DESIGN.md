@@ -158,14 +158,14 @@ Usage counts from `/usr/lib/systemd/system/*.service` on Arch Linux.
 | Directive | Count | Status | Notes |
 |-----------|-------|--------|-------|
 | ExecStart= | 251 | ✓ done | Command to run |
-| Type= | 213 | partial | simple/notify/oneshot done; dbus/forking/idle TODO |
-| RemainAfterExit= | 96 | TODO | For oneshot: stay "active" after exit |
-| Restart= | 44 | TODO | no/on-failure/always |
+| Type= | 213 | partial | simple/forking/notify/oneshot/idle done; dbus TODO |
+| RemainAfterExit= | 96 | ✓ done | For oneshot: stay "active" after exit |
+| Restart= | 44 | ✓ done | no/on-failure/always |
 | BusName= | 37 | TODO | Required for Type=dbus |
 | ExecStop= | 25 | ✓ done | Stop command |
 | TimeoutSec= | 24 | partial | Sets both start and stop timeout |
-| RestartSec= | 23 | parsed | Delay before restart |
-| KillMode= | 23 | TODO | control-group/process/mixed/none |
+| RestartSec= | 23 | ✓ done | Delay before restart |
+| KillMode= | 23 | ✓ done | control-group/process/mixed/none |
 | User= | 22 | ✓ done | Run as user |
 | ExecReload= | 16 | ✓ done | Reload command |
 | ExecStartPre= | 10 | ✓ done | Pre-start commands |
@@ -408,8 +408,8 @@ libc = "0.2"                  # Low-level syscalls
 - [x] RemainAfterExit= for oneshot services
 - [x] Type=forking (wait for parent exit, read PIDFile=)
 - [x] KillMode= (control-group/process/mixed/none)
+- [x] Type=idle (wait for job queue empty)
 - [ ] Type=dbus (watch BusName= on D-Bus)
-- [ ] Type=idle (wait for job queue empty)
 
 ### M7: Extended Features
 - [ ] DefaultDependencies= (146 uses)
