@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Spawn background task for processing notify messages, D-Bus readiness, and service reaping
+    // Spawn background task for processing notify messages, D-Bus readiness, watchdog, and service reaping
     let manager_bg = Arc::clone(&manager);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -104,6 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut mgr = manager_bg.write().await;
             mgr.process_notify().await;
             mgr.process_dbus_ready().await;
+            mgr.process_watchdog().await;
             mgr.reap().await;
             mgr.process_restarts().await;
         }

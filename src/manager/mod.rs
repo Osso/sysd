@@ -46,6 +46,8 @@ pub struct Manager {
     active_jobs: u32,
     /// Services waiting for D-Bus name acquisition (bus_name -> service_name)
     waiting_bus_name: HashMap<String, String>,
+    /// Watchdog deadlines for services (service_name -> deadline)
+    watchdog_deadlines: HashMap<String, std::time::Instant>,
 }
 
 impl Manager {
@@ -79,6 +81,7 @@ impl Manager {
             pid_files: HashMap::new(),
             active_jobs: 0,
             waiting_bus_name: HashMap::new(),
+            watchdog_deadlines: HashMap::new(),
         }
     }
 
@@ -139,6 +142,7 @@ impl Manager {
 
     /// Find a unit file in search paths
     fn find_unit(&self, name: &str) -> Result<PathBuf, ManagerError> {
+        // First, try to find exact match
         for base in &self.unit_paths {
             let path = base.join(name);
             if path.exists() {
@@ -153,6 +157,24 @@ impl Manager {
                 }
             }
         }
+
+        // For template instances (foo@bar.service), try the template file (foo@.service)
+        if let Some(template_name) = units::get_template_name(name) {
+            for base in &self.unit_paths {
+                let path = base.join(&template_name);
+                if path.exists() {
+                    return Ok(path);
+                }
+                if path.is_symlink() {
+                    if let Ok(target) = std::fs::read_link(&path) {
+                        if target.exists() {
+                            return Ok(path);
+                        }
+                    }
+                }
+            }
+        }
+
         Err(ManagerError::NotFound(name.to_string()))
     }
 
@@ -295,6 +317,12 @@ impl Manager {
             return Err(ManagerError::IsTarget(name.to_string()));
         }
 
+        // Check conditions before starting
+        if let Some(reason) = self.check_conditions(unit) {
+            log::info!("{}: condition failed: {}", name, reason);
+            return Err(ManagerError::ConditionFailed(name.to_string(), reason));
+        }
+
         let service = unit.as_service()
             .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
 
@@ -325,13 +353,16 @@ impl Manager {
 
         // Prepare spawn options
         let is_notify = service.service.service_type == ServiceType::Notify;
-        let options = if is_notify {
-            SpawnOptions {
-                notify_socket: self.notify_socket_path()
-                    .map(|p| p.to_string_lossy().to_string()),
-            }
-        } else {
-            SpawnOptions::default()
+        let watchdog_usec = service.service.watchdog_sec
+            .map(|d| d.as_micros() as u64);
+        let options = SpawnOptions {
+            notify_socket: if is_notify || watchdog_usec.is_some() {
+                self.notify_socket_path()
+                    .map(|p| p.to_string_lossy().to_string())
+            } else {
+                None
+            },
+            watchdog_usec,
         };
 
         // Spawn the process
@@ -412,6 +443,13 @@ impl Manager {
                 state.set_running(pid);
             }
             self.active_jobs = self.active_jobs.saturating_sub(1);
+            // Set watchdog deadline if configured
+            if let Some(wd) = service.service.watchdog_sec {
+                self.watchdog_deadlines.insert(
+                    name.to_string(),
+                    std::time::Instant::now() + wd,
+                );
+            }
             log::info!("Started {} (PID {})", name, pid);
         }
 
@@ -505,6 +543,9 @@ impl Manager {
             }
         }
 
+        // Clean up watchdog
+        self.watchdog_deadlines.remove(&name);
+
         Ok(())
     }
 
@@ -525,38 +566,81 @@ impl Manager {
 
     /// Enable a unit (create symlinks based on [Install] section)
     pub async fn enable(&mut self, name: &str) -> Result<Vec<PathBuf>, ManagerError> {
-        let name = self.normalize_name(name);
-
-        // Load the unit to get its Install section
-        if !self.units.contains_key(&name) {
-            self.load(&name).await?;
-        }
-
-        let unit = self.units.get(&name)
-            .ok_or_else(|| ManagerError::NotFound(name.clone()))?;
-
-        let install = unit.install_section()
-            .ok_or_else(|| ManagerError::NoInstallSection(name.clone()))?;
-
-        if install.wanted_by.is_empty() && install.required_by.is_empty() {
-            return Err(ManagerError::NoInstallSection(name.clone()));
-        }
-
-        // Find the unit file path
-        let unit_path = self.find_unit(&name)?;
-
         let mut created = Vec::new();
+        let mut to_enable = vec![self.normalize_name(name)];
+        let mut enabled: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        // Create symlinks in .wants directories
-        for target in &install.wanted_by {
-            let link = self.create_wants_link(&name, target, &unit_path)?;
-            created.push(link);
+        while let Some(unit_name) = to_enable.pop() {
+            if enabled.contains(&unit_name) {
+                continue;
+            }
+            enabled.insert(unit_name.clone());
+
+            // Load the unit to get its Install section
+            if !self.units.contains_key(&unit_name) {
+                match self.load(&unit_name).await {
+                    Ok(()) => {}
+                    Err(ManagerError::NotFound(_)) => {
+                        log::warn!("Also= unit {} not found, skipping", unit_name);
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            let unit = self.units.get(&unit_name)
+                .ok_or_else(|| ManagerError::NotFound(unit_name.clone()))?;
+
+            let install = match unit.install_section() {
+                Some(i) => i,
+                None => {
+                    log::debug!("Unit {} has no Install section", unit_name);
+                    continue;
+                }
+            };
+
+            if install.wanted_by.is_empty() && install.required_by.is_empty() && install.alias.is_empty() {
+                log::debug!("Unit {} has empty Install section", unit_name);
+                continue;
+            }
+
+            // Find the unit file path
+            let unit_path = self.find_unit(&unit_name)?;
+
+            // Clone lists to avoid borrow issues
+            let also_units = install.also.clone();
+            let aliases = install.alias.clone();
+            let wanted_by = install.wanted_by.clone();
+            let required_by = install.required_by.clone();
+
+            // Create symlinks in .wants directories
+            for target in &wanted_by {
+                let link = self.create_wants_link(&unit_name, target, &unit_path)?;
+                created.push(link);
+            }
+
+            // Create symlinks in .requires directories
+            for target in &required_by {
+                let link = self.create_requires_link(&unit_name, target, &unit_path)?;
+                created.push(link);
+            }
+
+            // Create alias symlinks
+            for alias in &aliases {
+                let link = self.create_alias_link(alias, &unit_path)?;
+                created.push(link);
+            }
+
+            // Queue Also= units for enabling
+            for also in also_units {
+                if !enabled.contains(&also) {
+                    to_enable.push(also);
+                }
+            }
         }
 
-        // Create symlinks in .requires directories
-        for target in &install.required_by {
-            let link = self.create_requires_link(&name, target, &unit_path)?;
-            created.push(link);
+        if created.is_empty() {
+            return Err(ManagerError::NoInstallSection(self.normalize_name(name)));
         }
 
         Ok(created)
@@ -564,32 +648,71 @@ impl Manager {
 
     /// Disable a unit (remove symlinks)
     pub async fn disable(&mut self, name: &str) -> Result<Vec<PathBuf>, ManagerError> {
-        let name = self.normalize_name(name);
-
-        // Load to get Install section
-        if !self.units.contains_key(&name) {
-            self.load(&name).await?;
-        }
-
-        let unit = self.units.get(&name)
-            .ok_or_else(|| ManagerError::NotFound(name.clone()))?;
-
-        let install = unit.install_section()
-            .ok_or_else(|| ManagerError::NoInstallSection(name.clone()))?;
-
         let mut removed = Vec::new();
+        let mut to_disable = vec![self.normalize_name(name)];
+        let mut disabled: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        // Remove from .wants directories
-        for target in &install.wanted_by {
-            if let Some(link) = self.remove_wants_link(&name, target)? {
-                removed.push(link);
+        while let Some(unit_name) = to_disable.pop() {
+            if disabled.contains(&unit_name) {
+                continue;
             }
-        }
+            disabled.insert(unit_name.clone());
 
-        // Remove from .requires directories
-        for target in &install.required_by {
-            if let Some(link) = self.remove_requires_link(&name, target)? {
-                removed.push(link);
+            // Load to get Install section
+            if !self.units.contains_key(&unit_name) {
+                match self.load(&unit_name).await {
+                    Ok(()) => {}
+                    Err(ManagerError::NotFound(_)) => {
+                        log::debug!("Also= unit {} not found, skipping", unit_name);
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            let unit = self.units.get(&unit_name)
+                .ok_or_else(|| ManagerError::NotFound(unit_name.clone()))?;
+
+            let install = match unit.install_section() {
+                Some(i) => i,
+                None => {
+                    log::debug!("Unit {} has no Install section", unit_name);
+                    continue;
+                }
+            };
+
+            // Clone lists to avoid borrow issues
+            let also_units = install.also.clone();
+            let aliases = install.alias.clone();
+            let wanted_by = install.wanted_by.clone();
+            let required_by = install.required_by.clone();
+
+            // Remove from .wants directories
+            for target in &wanted_by {
+                if let Some(link) = self.remove_wants_link(&unit_name, target)? {
+                    removed.push(link);
+                }
+            }
+
+            // Remove from .requires directories
+            for target in &required_by {
+                if let Some(link) = self.remove_requires_link(&unit_name, target)? {
+                    removed.push(link);
+                }
+            }
+
+            // Remove alias symlinks
+            for alias in &aliases {
+                if let Some(link) = self.remove_alias_link(alias)? {
+                    removed.push(link);
+                }
+            }
+
+            // Queue Also= units for disabling
+            for also in also_units {
+                if !disabled.contains(&also) {
+                    to_disable.push(also);
+                }
             }
         }
 
@@ -662,6 +785,35 @@ impl Manager {
         }
     }
 
+    /// Create an alias symlink (Alias= in [Install])
+    fn create_alias_link(&self, alias: &str, unit_path: &PathBuf) -> Result<PathBuf, ManagerError> {
+        let link_path = PathBuf::from("/etc/systemd/system").join(alias);
+
+        // Remove existing if present
+        if link_path.exists() || link_path.is_symlink() {
+            std::fs::remove_file(&link_path)
+                .map_err(|e| ManagerError::Io(e.to_string()))?;
+        }
+
+        std::os::unix::fs::symlink(unit_path, &link_path)
+            .map_err(|e| ManagerError::Io(e.to_string()))?;
+
+        Ok(link_path)
+    }
+
+    /// Remove an alias symlink
+    fn remove_alias_link(&self, alias: &str) -> Result<Option<PathBuf>, ManagerError> {
+        let link_path = PathBuf::from("/etc/systemd/system").join(alias);
+
+        if link_path.exists() || link_path.is_symlink() {
+            std::fs::remove_file(&link_path)
+                .map_err(|e| ManagerError::Io(e.to_string()))?;
+            Ok(Some(link_path))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Check if a unit is enabled
     pub async fn is_enabled(&mut self, name: &str) -> Result<String, ManagerError> {
         let name = self.normalize_name(name);
@@ -679,7 +831,7 @@ impl Manager {
             return Ok("static".to_string());
         };
 
-        if install.wanted_by.is_empty() && install.required_by.is_empty() {
+        if install.wanted_by.is_empty() && install.required_by.is_empty() && install.alias.is_empty() {
             return Ok("static".to_string());
         }
 
@@ -697,6 +849,14 @@ impl Manager {
             let link_path = PathBuf::from("/etc/systemd/system")
                 .join(format!("{}.requires", target))
                 .join(&name);
+            if link_path.exists() || link_path.is_symlink() {
+                return Ok("enabled".to_string());
+            }
+        }
+
+        // Check alias symlinks
+        for alias in &install.alias {
+            let link_path = PathBuf::from("/etc/systemd/system").join(alias);
             if link_path.exists() || link_path.is_symlink() {
                 return Ok("enabled".to_string());
             }
@@ -728,6 +888,53 @@ impl Manager {
         self.states.iter()
     }
 
+    /// Check if unit conditions are met
+    /// Returns None if all conditions pass, or Some(reason) if a condition fails
+    fn check_conditions(&self, unit: &Unit) -> Option<String> {
+        let section = unit.unit_section();
+
+        // ConditionPathExists - path must exist (or not exist if prefixed with !)
+        for path in &section.condition_path_exists {
+            let (negated, path) = if let Some(p) = path.strip_prefix('!') {
+                (true, p)
+            } else {
+                (false, path.as_str())
+            };
+
+            let exists = std::path::Path::new(path).exists();
+            if negated && exists {
+                return Some(format!("ConditionPathExists=!{} failed (path exists)", path));
+            }
+            if !negated && !exists {
+                return Some(format!("ConditionPathExists={} failed (path missing)", path));
+            }
+        }
+
+        // ConditionDirectoryNotEmpty - directory must exist and have entries
+        for path in &section.condition_directory_not_empty {
+            let (negated, path) = if let Some(p) = path.strip_prefix('!') {
+                (true, p)
+            } else {
+                (false, path.as_str())
+            };
+
+            let dir_path = std::path::Path::new(path);
+            let is_not_empty = dir_path.is_dir()
+                && std::fs::read_dir(dir_path)
+                    .map(|mut d| d.next().is_some())
+                    .unwrap_or(false);
+
+            if negated && is_not_empty {
+                return Some(format!("ConditionDirectoryNotEmpty=!{} failed (not empty)", path));
+            }
+            if !negated && !is_not_empty {
+                return Some(format!("ConditionDirectoryNotEmpty={} failed (empty or missing)", path));
+            }
+        }
+
+        None
+    }
+
     /// Normalize unit name (add .service suffix if no suffix present)
     fn normalize_name(&self, name: &str) -> String {
         if name.ends_with(".service") || name.ends_with(".target") {
@@ -757,7 +964,7 @@ impl Manager {
         Err(ManagerError::NotFound("default.target".to_string()))
     }
 
-    /// Process pending notify messages (READY, STOPPING, etc.)
+    /// Process pending notify messages (READY, STOPPING, WATCHDOG, etc.)
     pub async fn process_notify(&mut self) {
         let Some(rx) = &mut self.notify_rx else {
             return;
@@ -797,6 +1004,38 @@ impl Manager {
                         state.set_running(pid);
                         self.active_jobs = self.active_jobs.saturating_sub(1);
                         log::info!("{} signaled READY", name);
+
+                        // Set watchdog deadline for Type=notify services
+                        if let Some(wd) = self.units.get(&name)
+                            .and_then(|u| u.as_service())
+                            .and_then(|s| s.service.watchdog_sec)
+                        {
+                            self.watchdog_deadlines.insert(
+                                name.clone(),
+                                std::time::Instant::now() + wd,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Handle WATCHDOG=1 ping - reset the deadline
+            if msg.is_watchdog() {
+                // Find service by PID
+                let service_name = self.processes.iter()
+                    .find(|(_, child)| child.id() == Some(msg.pid))
+                    .map(|(name, _)| name.clone());
+
+                if let Some(name) = service_name {
+                    if let Some(wd) = self.units.get(&name)
+                        .and_then(|u| u.as_service())
+                        .and_then(|s| s.service.watchdog_sec)
+                    {
+                        self.watchdog_deadlines.insert(
+                            name.clone(),
+                            std::time::Instant::now() + wd,
+                        );
+                        log::trace!("{} watchdog ping received", name);
                     }
                 }
             }
@@ -857,6 +1096,16 @@ impl Manager {
                                     log::info!("{} forked, main PID {} (from {})",
                                         name, child_pid, pid_file.display());
                                 }
+                                // Set watchdog deadline for Type=forking services
+                                if let Some(wd) = self.units.get(&name)
+                                    .and_then(|u| u.as_service())
+                                    .and_then(|s| s.service.watchdog_sec)
+                                {
+                                    self.watchdog_deadlines.insert(
+                                        name.clone(),
+                                        std::time::Instant::now() + wd,
+                                    );
+                                }
                                 continue; // Don't process as normal exit
                             } else {
                                 log::warn!("{}: invalid PID in {}", name, pid_file.display());
@@ -873,6 +1122,16 @@ impl Manager {
                         state.set_running(0); // Unknown PID
                     }
                     self.active_jobs = self.active_jobs.saturating_sub(1);
+                    // Set watchdog deadline even without PIDFile
+                    if let Some(wd) = self.units.get(&name)
+                        .and_then(|u| u.as_service())
+                        .and_then(|s| s.service.watchdog_sec)
+                    {
+                        self.watchdog_deadlines.insert(
+                            name.clone(),
+                            std::time::Instant::now() + wd,
+                        );
+                    }
                     continue;
                 }
             }
@@ -923,6 +1182,9 @@ impl Manager {
                     }
                 }
             }
+
+            // Clean up watchdog (will be re-set on restart)
+            self.watchdog_deadlines.remove(&name);
         }
     }
 
@@ -994,6 +1256,68 @@ impl Manager {
                 state.set_running(pid);
                 self.active_jobs = self.active_jobs.saturating_sub(1);
                 log::info!("{} acquired D-Bus name {}", service_name, bus_name);
+
+                // Set watchdog deadline for Type=dbus services
+                if let Some(wd) = self.units.get(&service_name)
+                    .and_then(|u| u.as_service())
+                    .and_then(|s| s.service.watchdog_sec)
+                {
+                    self.watchdog_deadlines.insert(
+                        service_name.clone(),
+                        std::time::Instant::now() + wd,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Check for watchdog timeouts and restart services that missed their deadline
+    pub async fn process_watchdog(&mut self) {
+        let now = std::time::Instant::now();
+        let mut timed_out = Vec::new();
+
+        for (name, deadline) in &self.watchdog_deadlines {
+            if now > *deadline {
+                timed_out.push(name.clone());
+            }
+        }
+
+        for name in timed_out {
+            self.watchdog_deadlines.remove(&name);
+            log::warn!("{} watchdog timeout - restarting", name);
+
+            // Kill the service and let restart policy handle it
+            if let Some(mut child) = self.processes.remove(&name) {
+                if let Some(pid) = child.id() {
+                    // Send SIGABRT (standard watchdog signal) then SIGKILL
+                    unsafe { libc::kill(pid as i32, libc::SIGABRT); }
+                    // Give it a moment, then force kill
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let _ = child.kill().await;
+                }
+            }
+
+            // Update state to failed with watchdog reason
+            if let Some(state) = self.states.get_mut(&name) {
+                state.set_failed("Watchdog timeout".to_string());
+            }
+
+            // Schedule restart based on policy
+            let restart_policy = self.units.get(&name)
+                .and_then(|u| u.as_service())
+                .map(|s| s.service.restart.clone())
+                .unwrap_or(RestartPolicy::No);
+
+            if restart_policy == RestartPolicy::Always || restart_policy == RestartPolicy::OnFailure {
+                let restart_sec = self.units.get(&name)
+                    .and_then(|u| u.as_service())
+                    .map(|s| s.service.restart_sec)
+                    .unwrap_or(std::time::Duration::from_millis(100));
+
+                if let Some(state) = self.states.get_mut(&name) {
+                    state.set_auto_restart(restart_sec);
+                    log::info!("{} scheduling watchdog restart in {:?}", name, restart_sec);
+                }
             }
         }
     }
@@ -1027,6 +1351,9 @@ pub enum ManagerError {
 
     #[error("Unit is a target (no process): {0}")]
     IsTarget(String),
+
+    #[error("Condition failed for {0}: {1}")]
+    ConditionFailed(String, String),
 
     #[error("Unit has no [Install] section: {0}")]
     NoInstallSection(String),

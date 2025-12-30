@@ -28,6 +28,11 @@ impl NotifyMessage {
         self.fields.get("STOPPING").map(|v| v == "1").unwrap_or(false)
     }
 
+    /// Check if this is a WATCHDOG=1 ping
+    pub fn is_watchdog(&self) -> bool {
+        self.fields.get("WATCHDOG").map(|v| v == "1").unwrap_or(false)
+    }
+
     /// Get STATUS message if present
     pub fn status(&self) -> Option<&str> {
         self.fields.get("STATUS").map(|s| s.as_str())

@@ -57,8 +57,30 @@ pub enum StdOutput {
     Null,
 }
 
+/// Input source
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum StdInput {
+    #[default]
+    Null,
+    Tty,       // StandardInput=tty
+    TtyForce,  // StandardInput=tty-force
+    TtyFail,   // StandardInput=tty-fail
+}
+
+impl StdInput {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "null" | "/dev/null" => Some(Self::Null),
+            "tty" => Some(Self::Tty),
+            "tty-force" => Some(Self::TtyForce),
+            "tty-fail" => Some(Self::TtyFail),
+            _ => None,
+        }
+    }
+}
+
 /// [Unit] section
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct UnitSection {
     pub description: Option<String>,
     pub after: Vec<String>,
@@ -67,6 +89,25 @@ pub struct UnitSection {
     pub wants: Vec<String>,
     pub conflicts: Vec<String>,
     pub condition_path_exists: Vec<String>,
+    pub condition_directory_not_empty: Vec<String>,
+    /// If true (default), add implicit deps on basic.target, shutdown.target
+    pub default_dependencies: bool,
+}
+
+impl Default for UnitSection {
+    fn default() -> Self {
+        Self {
+            description: None,
+            after: Vec::new(),
+            before: Vec::new(),
+            requires: Vec::new(),
+            wants: Vec::new(),
+            conflicts: Vec::new(),
+            condition_path_exists: Vec::new(),
+            condition_directory_not_empty: Vec::new(),
+            default_dependencies: true, // systemd default
+        }
+    }
 }
 
 /// [Service] section
@@ -87,6 +128,9 @@ pub struct ServiceSection {
     pub timeout_start_sec: Option<Duration>,
     pub timeout_stop_sec: Option<Duration>,
     pub remain_after_exit: bool,  // For Type=oneshot: stay active after exit
+
+    // Watchdog
+    pub watchdog_sec: Option<Duration>,  // Watchdog timeout (service must ping)
 
     // Type=forking
     pub pid_file: Option<PathBuf>,  // PIDFile= for Type=forking
@@ -109,11 +153,22 @@ pub struct ServiceSection {
     // I/O
     pub standard_output: StdOutput,
     pub standard_error: StdOutput,
+    pub standard_input: StdInput,
+
+    // TTY handling (for getty and similar)
+    pub tty_path: Option<PathBuf>,
+    pub tty_reset: bool,
 
     // Resource limits (cgroup v2)
     pub memory_max: Option<u64>,      // bytes
     pub cpu_quota: Option<u32>,       // percentage (100 = 1 core)
     pub tasks_max: Option<u32>,
+
+    // Process limits (setrlimit)
+    pub limit_nofile: Option<u64>,    // LimitNOFILE= (max open files)
+
+    // OOM killer
+    pub oom_score_adjust: Option<i32>, // OOMScoreAdjust= (-1000 to 1000)
 }
 
 impl Default for ServiceSection {
@@ -130,6 +185,7 @@ impl Default for ServiceSection {
             timeout_start_sec: None,
             timeout_stop_sec: None,
             remain_after_exit: false,
+            watchdog_sec: None,
             pid_file: None,
             bus_name: None,
             kill_mode: KillMode::default(),
@@ -140,9 +196,14 @@ impl Default for ServiceSection {
             environment_file: Vec::new(),
             standard_output: StdOutput::default(),
             standard_error: StdOutput::default(),
+            standard_input: StdInput::default(),
+            tty_path: None,
+            tty_reset: false,
             memory_max: None,
             cpu_quota: None,
             tasks_max: None,
+            limit_nofile: None,
+            oom_score_adjust: None,
         }
     }
 }
@@ -152,12 +213,18 @@ impl Default for ServiceSection {
 pub struct InstallSection {
     pub wanted_by: Vec<String>,
     pub required_by: Vec<String>,
+    /// Additional units to enable/disable together with this unit
+    pub also: Vec<String>,
+    /// Symlink aliases for this unit
+    pub alias: Vec<String>,
 }
 
 /// Complete parsed service unit
 #[derive(Debug, Clone)]
 pub struct Service {
     pub name: String,
+    /// Instance name for template units (the part after @ in foo@bar.service)
+    pub instance: Option<String>,
     pub unit: UnitSection,
     pub service: ServiceSection,
     pub install: InstallSection,
@@ -165,13 +232,41 @@ pub struct Service {
 
 impl Service {
     pub fn new(name: String) -> Self {
+        let instance = extract_instance(&name);
         Self {
             name,
+            instance,
             unit: UnitSection::default(),
             service: ServiceSection::default(),
             install: InstallSection::default(),
         }
     }
+}
+
+/// Extract instance name from a unit name (e.g., "foo@bar.service" -> Some("bar"))
+pub fn extract_instance(name: &str) -> Option<String> {
+    // Find @ in the name (before any suffix like .service)
+    let at_pos = name.find('@')?;
+
+    // Find where the instance ends (at the suffix or end)
+    let suffix_start = name.rfind('.').unwrap_or(name.len());
+
+    // Instance is between @ and the suffix
+    if at_pos + 1 < suffix_start {
+        Some(name[at_pos + 1..suffix_start].to_string())
+    } else {
+        None // Template file (foo@.service) has no instance
+    }
+}
+
+/// Get the template name from an instantiated unit name
+/// e.g., "foo@bar.service" -> "foo@.service"
+pub fn get_template_name(name: &str) -> Option<String> {
+    let at_pos = name.find('@')?;
+    let suffix_start = name.rfind('.')?;
+
+    // Template is everything before @ plus @ plus the suffix
+    Some(format!("{}@{}", &name[..at_pos], &name[suffix_start..]))
 }
 
 // Parsing helpers
@@ -377,5 +472,33 @@ mod tests {
         assert!(svc.unit.description.is_none());
         assert!(svc.unit.after.is_empty());
         assert!(svc.install.wanted_by.is_empty());
+    }
+
+    // Template unit tests
+    #[test]
+    fn test_extract_instance() {
+        assert_eq!(extract_instance("foo@bar.service"), Some("bar".to_string()));
+        assert_eq!(extract_instance("getty@tty1.service"), Some("tty1".to_string()));
+        assert_eq!(extract_instance("foo@.service"), None); // Template file
+        assert_eq!(extract_instance("foo.service"), None); // Not a template
+        assert_eq!(extract_instance("foo@bar"), Some("bar".to_string()));
+    }
+
+    #[test]
+    fn test_get_template_name() {
+        assert_eq!(get_template_name("foo@bar.service"), Some("foo@.service".to_string()));
+        assert_eq!(get_template_name("getty@tty1.service"), Some("getty@.service".to_string()));
+        assert_eq!(get_template_name("foo@.service"), Some("foo@.service".to_string()));
+        assert_eq!(get_template_name("foo.service"), None); // Not a template
+    }
+
+    #[test]
+    fn test_service_new_with_instance() {
+        let svc = Service::new("getty@tty1.service".to_string());
+        assert_eq!(svc.name, "getty@tty1.service");
+        assert_eq!(svc.instance, Some("tty1".to_string()));
+
+        let svc2 = Service::new("foo.service".to_string());
+        assert_eq!(svc2.instance, None);
     }
 }

@@ -411,14 +411,14 @@ libc = "0.2"                  # Low-level syscalls
 - [x] Type=idle (wait for job queue empty)
 - [x] Type=dbus (watch BusName= on D-Bus)
 
-### M7: Extended Features
-- [ ] DefaultDependencies= (146 uses)
-- [ ] WatchdogSec= (29 uses)
-- [ ] Also= in [Install] (25 uses)
-- [ ] Alias= in [Install] (12 uses)
-- [ ] Template units (foo@.service) with %i/%I specifiers
-- [ ] Drop-in directories (.d/*.conf)
-- [ ] ConditionDirectoryNotEmpty=
+### M7: Extended Features ✓
+- [x] DefaultDependencies= (146 uses)
+- [x] WatchdogSec= (29 uses)
+- [x] Also= in [Install] (25 uses)
+- [x] Alias= in [Install] (12 uses)
+- [x] Template units (foo@.service) with %i/%I specifiers
+- [x] Drop-in directories (.d/*.conf)
+- [x] ConditionDirectoryNotEmpty=
 
 ### M8: Resource Limits
 - [ ] LimitNOFILE= (file descriptors)

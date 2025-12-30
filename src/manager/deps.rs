@@ -58,6 +58,21 @@ impl DepGraph {
 
         let section = unit.unit_section();
 
+        // DefaultDependencies=yes (default) adds implicit dependencies for services
+        // - After=basic.target (service waits for basic system to be up)
+        // - Before=shutdown.target (service stops before shutdown)
+        // - Conflicts=shutdown.target (stop service when shutdown starts)
+        if section.default_dependencies && !unit.is_target() {
+            // After=basic.target - we depend on basic.target
+            self.add_edge(name, "basic.target");
+
+            // Before=shutdown.target - shutdown.target depends on us
+            self.nodes.insert("shutdown.target".to_string());
+            self.edges.entry("shutdown.target".to_string())
+                .or_default()
+                .insert(name.to_string());
+        }
+
         // After=X means X must start before us
         for dep in &section.after {
             self.add_edge(name, dep);
