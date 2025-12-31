@@ -1,7 +1,7 @@
 //! Process spawning and management
 
 use std::collections::HashMap;
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
 use std::process::Stdio;
 use tokio::process::{Child, Command};
@@ -15,6 +15,8 @@ pub struct SpawnOptions {
     pub notify_socket: Option<String>,
     /// Watchdog timeout in microseconds (for WatchdogSec services)
     pub watchdog_usec: Option<u64>,
+    /// Socket file descriptors for socket activation (LISTEN_FDS)
+    pub socket_fds: Vec<RawFd>,
 }
 
 /// Spawn a process for a service (convenience wrapper)
@@ -71,6 +73,13 @@ pub fn spawn_service_with_options(
         cmd.env("WATCHDOG_USEC", usec.to_string());
     }
 
+    // Set LISTEN_FDS for socket activation
+    let socket_fds = options.socket_fds.clone();
+    if !socket_fds.is_empty() {
+        cmd.env("LISTEN_FDS", socket_fds.len().to_string());
+        // LISTEN_PID is set in pre_exec after fork
+    }
+
     // Collect pre_exec settings
     let uid = service.service.user.as_ref().and_then(|u| resolve_user(u));
     let limit_nofile = service.service.limit_nofile;
@@ -84,6 +93,37 @@ pub fn spawn_service_with_options(
     #[cfg(unix)]
     unsafe {
         cmd.pre_exec(move || {
+            // Socket activation: duplicate FDs to positions 3, 4, 5, ...
+            // and set LISTEN_PID to our PID
+            if !socket_fds.is_empty() {
+                // Set LISTEN_PID (can only be done after fork)
+                std::env::set_var("LISTEN_PID", std::process::id().to_string());
+
+                // SD_LISTEN_FDS_START is 3 (after stdin/stdout/stderr)
+                const SD_LISTEN_FDS_START: RawFd = 3;
+
+                for (i, &fd) in socket_fds.iter().enumerate() {
+                    let target_fd = SD_LISTEN_FDS_START + i as RawFd;
+
+                    if fd != target_fd {
+                        // Duplicate to correct position
+                        if libc::dup2(fd, target_fd) < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        // Close original if it's not in the target range
+                        if fd >= SD_LISTEN_FDS_START + socket_fds.len() as RawFd || fd < SD_LISTEN_FDS_START {
+                            libc::close(fd);
+                        }
+                    }
+
+                    // Clear FD_CLOEXEC so the FD survives exec
+                    let flags = libc::fcntl(target_fd, libc::F_GETFD);
+                    if flags >= 0 {
+                        libc::fcntl(target_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                    }
+                }
+            }
+
             // Set resource limits (LimitNOFILE=)
             if let Some(nofile) = limit_nofile {
                 let rlim = libc::rlimit {

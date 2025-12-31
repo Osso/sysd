@@ -455,12 +455,12 @@ libc = "0.2"                  # Low-level syscalls
 - [x] ReadWritePaths=/ReadOnlyPaths= (15 uses) - filesystem access control
 - [x] SystemCallFilter= (59 uses) - seccomp filtering (parsed, not enforced)
 
-### M10: Socket Activation
+### M10: Socket Activation ✓
 Critical for boot - dbus.socket must work for most services.
-- [ ] Parse .socket unit files (54 units; ListenStream= 45, ListenDatagram= 4, Accept= 15)
-- [ ] Create listening sockets before starting services
-- [ ] Pass socket file descriptors via LISTEN_FDS/LISTEN_PID environment
-- [ ] Support socket-based service activation (start service on connection)
+- [x] Parse .socket unit files (54 units; ListenStream= 45, ListenDatagram= 4, Accept= 15)
+- [x] Create listening sockets (Unix stream/dgram, TCP, UDP, FIFO)
+- [x] Pass socket file descriptors via LISTEN_FDS/LISTEN_PID environment
+- [x] Socket activation trigger (async poll, start service on connection)
 - StartTransientUnit for socket units - not implementing (only used by systemd-run for testing; no boot services need it)
 
 ### M11: Additional Unit Types

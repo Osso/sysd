@@ -1,14 +1,15 @@
-//! Common unit type that wraps Service, Target, Mount, and Slice
+//! Common unit type that wraps Service, Target, Mount, Slice, and Socket
 
-use super::{InstallSection, Mount, Service, Slice, Target, UnitSection};
+use super::{InstallSection, Mount, Service, Slice, Socket, Target, UnitSection};
 
-/// A unit can be a Service, Target, Mount, or Slice
+/// A unit can be a Service, Target, Mount, Slice, or Socket
 #[derive(Debug, Clone)]
 pub enum Unit {
     Service(Service),
     Target(Target),
     Mount(Mount),
     Slice(Slice),
+    Socket(Socket),
 }
 
 impl Unit {
@@ -19,6 +20,7 @@ impl Unit {
             Unit::Target(t) => &t.name,
             Unit::Mount(m) => &m.name,
             Unit::Slice(s) => &s.name,
+            Unit::Socket(s) => &s.name,
         }
     }
 
@@ -29,6 +31,7 @@ impl Unit {
             Unit::Target(t) => &t.unit,
             Unit::Mount(m) => &m.unit,
             Unit::Slice(s) => &s.unit,
+            Unit::Socket(s) => &s.unit,
         }
     }
 
@@ -36,8 +39,9 @@ impl Unit {
     pub fn install_section(&self) -> Option<&InstallSection> {
         match self {
             Unit::Service(s) => Some(&s.install),
-            Unit::Target(_) | Unit::Slice(_) => None, // Targets and slices don't have install sections
+            Unit::Target(_) | Unit::Slice(_) => None,
             Unit::Mount(m) => Some(&m.install),
+            Unit::Socket(s) => Some(&s.install),
         }
     }
 
@@ -59,6 +63,11 @@ impl Unit {
     /// Check if this is a slice
     pub fn is_slice(&self) -> bool {
         matches!(self, Unit::Slice(_))
+    }
+
+    /// Check if this is a socket
+    pub fn is_socket(&self) -> bool {
+        matches!(self, Unit::Socket(_))
     }
 
     /// Get as service if it is one
@@ -93,6 +102,14 @@ impl Unit {
         }
     }
 
+    /// Get as socket if it is one
+    pub fn as_socket(&self) -> Option<&Socket> {
+        match self {
+            Unit::Socket(s) => Some(s),
+            _ => None,
+        }
+    }
+
     /// Get all units this depends on (After + Requires + Wants)
     pub fn dependencies(&self) -> Vec<&String> {
         let unit = self.unit_section();
@@ -107,7 +124,7 @@ impl Unit {
     pub fn wants_dir(&self) -> &[String] {
         match self {
             Unit::Target(t) => &t.wants_dir,
-            Unit::Service(_) | Unit::Mount(_) | Unit::Slice(_) => &[],
+            Unit::Service(_) | Unit::Mount(_) | Unit::Slice(_) | Unit::Socket(_) => &[],
         }
     }
 }

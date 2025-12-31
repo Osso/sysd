@@ -6,6 +6,7 @@ mod mount;
 mod parser;
 mod service;
 mod slice;
+mod socket;
 mod target;
 mod unit;
 
@@ -13,6 +14,7 @@ pub use mount::Mount;
 pub use parser::{parse_file, parse_unit_file, ParseError, ParsedFile};
 pub use service::*;
 pub use slice::Slice;
+pub use socket::{ListenType, Listener, Socket, SocketSection};
 pub use target::Target;
 pub use unit::Unit;
 
@@ -690,6 +692,208 @@ pub async fn load_mount(path: &Path) -> Result<Mount, ParseError> {
     parse_mount(name, &parsed)
 }
 
+/// Convert parsed INI data into a typed Socket
+pub fn parse_socket(name: &str, parsed: &ParsedFile) -> Result<Socket, ParseError> {
+    let mut sock = Socket::new(name.to_string());
+
+    // [Unit] section
+    if let Some(unit) = parsed.get("[Unit]") {
+        if let Some(vals) = unit.get("DESCRIPTION") {
+            sock.unit.description = vals.first().map(|(_, v)| v.clone());
+        }
+        if let Some(vals) = unit.get("AFTER") {
+            sock.unit.after = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("BEFORE") {
+            sock.unit.before = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("REQUIRES") {
+            sock.unit.requires = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("WANTS") {
+            sock.unit.wants = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONFLICTS") {
+            sock.unit.conflicts = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONPATHEXISTS") {
+            sock.unit.condition_path_exists = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONDIRECTORYNOTEMPTY") {
+            sock.unit.condition_directory_not_empty =
+                vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("DEFAULTDEPENDENCIES") {
+            if let Some((_, s)) = vals.first() {
+                sock.unit.default_dependencies =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+    }
+
+    // [Socket] section
+    if let Some(socket) = parsed.get("[Socket]") {
+        // Listeners - can have multiple
+        if let Some(vals) = socket.get("LISTENSTREAM") {
+            for (_, v) in vals {
+                sock.socket.listeners.push(Listener {
+                    address: v.clone(),
+                    listen_type: ListenType::Stream,
+                });
+            }
+        }
+        if let Some(vals) = socket.get("LISTENDATAGRAM") {
+            for (_, v) in vals {
+                sock.socket.listeners.push(Listener {
+                    address: v.clone(),
+                    listen_type: ListenType::Datagram,
+                });
+            }
+        }
+        if let Some(vals) = socket.get("LISTENFIFO") {
+            for (_, v) in vals {
+                sock.socket.listeners.push(Listener {
+                    address: v.clone(),
+                    listen_type: ListenType::Fifo,
+                });
+            }
+        }
+        if let Some(vals) = socket.get("LISTENNETLINK") {
+            for (_, v) in vals {
+                sock.socket.listeners.push(Listener {
+                    address: v.clone(),
+                    listen_type: ListenType::Netlink,
+                });
+            }
+        }
+
+        // Accept mode
+        if let Some(vals) = socket.get("ACCEPT") {
+            if let Some((_, s)) = vals.first() {
+                sock.socket.accept =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+
+        // Service to activate
+        if let Some(vals) = socket.get("SERVICE") {
+            sock.socket.service = vals.first().map(|(_, v)| v.clone());
+        }
+
+        // Socket mode (permissions)
+        if let Some(vals) = socket.get("SOCKETMODE") {
+            if let Some((_, s)) = vals.first() {
+                let s = s.trim_start_matches('0');
+                sock.socket.socket_mode = u32::from_str_radix(s, 8).ok();
+            }
+        }
+
+        // Socket ownership
+        if let Some(vals) = socket.get("SOCKETUSER") {
+            sock.socket.socket_user = vals.first().map(|(_, v)| v.clone());
+        }
+        if let Some(vals) = socket.get("SOCKETGROUP") {
+            sock.socket.socket_group = vals.first().map(|(_, v)| v.clone());
+        }
+
+        // File descriptor name
+        if let Some(vals) = socket.get("FILEDESCRIPTORNAME") {
+            sock.socket.fd_name = vals.first().map(|(_, v)| v.clone());
+        }
+
+        // Remove on stop
+        if let Some(vals) = socket.get("REMOVEONSTOP") {
+            if let Some((_, s)) = vals.first() {
+                sock.socket.remove_on_stop =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+
+        // Max connections per source
+        if let Some(vals) = socket.get("MAXCONNECTIONSPERSOURCE") {
+            if let Some((_, s)) = vals.first() {
+                sock.socket.max_connections_per_source = s.parse().ok();
+            }
+        }
+
+        // Buffer sizes
+        if let Some(vals) = socket.get("RECEIVEBUFFER") {
+            if let Some((_, s)) = vals.first() {
+                sock.socket.receive_buffer = parse_memory(s);
+            }
+        }
+        if let Some(vals) = socket.get("SENDBUFFER") {
+            if let Some((_, s)) = vals.first() {
+                sock.socket.send_buffer = parse_memory(s);
+            }
+        }
+
+        // Pass credentials/security
+        if let Some(vals) = socket.get("PASSCREDENTIALS") {
+            if let Some((_, s)) = vals.first() {
+                sock.socket.pass_credentials =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = socket.get("PASSSECURITY") {
+            if let Some((_, s)) = vals.first() {
+                sock.socket.pass_security =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+
+        // Symlinks
+        if let Some(vals) = socket.get("SYMLINKS") {
+            for (_, v) in vals {
+                sock.socket.symlinks.extend(
+                    v.split_whitespace().map(|s| s.to_string())
+                );
+            }
+        }
+
+        // Defer trigger
+        if let Some(vals) = socket.get("DEFERTRIGGER") {
+            if let Some((_, s)) = vals.first() {
+                sock.socket.defer_trigger =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+    }
+
+    // [Install] section
+    if let Some(install) = parsed.get("[Install]") {
+        if let Some(vals) = install.get("WANTEDBY") {
+            sock.install.wanted_by = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = install.get("REQUIREDBY") {
+            sock.install.required_by = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = install.get("ALSO") {
+            sock.install.also = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = install.get("ALIAS") {
+            sock.install.alias = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+    }
+
+    Ok(sock)
+}
+
+/// Parse a socket file from disk
+pub async fn load_socket(path: &Path) -> Result<Socket, ParseError> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    let mut parsed = parse_unit_file(path).await?;
+
+    // Load and merge drop-in files
+    load_dropins(path, &mut parsed).await;
+
+    parse_socket(name, &parsed)
+}
+
 /// Read unit names from a .wants directory
 fn read_wants_dir(path: &Path) -> Vec<String> {
     let mut units = Vec::new();
@@ -716,7 +920,7 @@ fn read_wants_dir(path: &Path) -> Vec<String> {
     units
 }
 
-/// Load a unit file (service, target, mount, or slice) from disk
+/// Load a unit file (service, target, mount, slice, or socket) from disk
 pub async fn load_unit(path: &Path) -> Result<Unit, ParseError> {
     let ext = path.extension().and_then(|e| e.to_str());
 
@@ -736,6 +940,10 @@ pub async fn load_unit(path: &Path) -> Result<Unit, ParseError> {
         Some("slice") => {
             let slice = load_slice(path).await?;
             Ok(Unit::Slice(slice))
+        }
+        Some("socket") => {
+            let socket = load_socket(path).await?;
+            Ok(Unit::Socket(socket))
         }
         _ => Err(ParseError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -1278,5 +1486,120 @@ DefaultDependencies=no
 
         let slice = Slice::new("system-systemd-cryptsetup.slice".to_string());
         assert_eq!(slice.cgroup_path(), "/sys/fs/cgroup/system.slice/system-systemd-cryptsetup.slice");
+    }
+
+    #[test]
+    fn test_parse_socket_dbus() {
+        let content = r#"
+[Unit]
+Description=D-Bus System Message Bus Socket
+
+[Socket]
+ListenStream=/run/dbus/system_bus_socket
+"#;
+        let parsed = parse_file(content).unwrap();
+        let sock = parse_socket("dbus.socket", &parsed).unwrap();
+
+        assert_eq!(sock.name, "dbus.socket");
+        assert_eq!(sock.unit.description, Some("D-Bus System Message Bus Socket".into()));
+        assert_eq!(sock.socket.listeners.len(), 1);
+        assert_eq!(sock.socket.listeners[0].address, "/run/dbus/system_bus_socket");
+        assert_eq!(sock.socket.listeners[0].listen_type, ListenType::Stream);
+        assert!(!sock.socket.accept);
+        assert_eq!(sock.service_name(), "dbus.service");
+    }
+
+    #[test]
+    fn test_parse_socket_docker() {
+        let content = r#"
+[Unit]
+Description=Docker Socket for the API
+
+[Socket]
+ListenStream=/run/docker.sock
+SocketMode=0660
+SocketUser=root
+SocketGroup=docker
+
+[Install]
+WantedBy=sockets.target
+"#;
+        let parsed = parse_file(content).unwrap();
+        let sock = parse_socket("docker.socket", &parsed).unwrap();
+
+        assert_eq!(sock.socket.listeners[0].address, "/run/docker.sock");
+        assert_eq!(sock.socket.socket_mode, Some(0o660));
+        assert_eq!(sock.socket.socket_user, Some("root".into()));
+        assert_eq!(sock.socket.socket_group, Some("docker".into()));
+        assert!(sock.install.wanted_by.contains(&"sockets.target".into()));
+    }
+
+    #[test]
+    fn test_parse_socket_accept_mode() {
+        let content = r#"
+[Unit]
+Description=Git Daemon Socket
+
+[Socket]
+ListenStream=9418
+Accept=true
+
+[Install]
+WantedBy=sockets.target
+"#;
+        let parsed = parse_file(content).unwrap();
+        let sock = parse_socket("git-daemon.socket", &parsed).unwrap();
+
+        assert_eq!(sock.socket.listeners[0].address, "9418");
+        assert!(sock.socket.accept);
+    }
+
+    #[test]
+    fn test_parse_socket_fifo() {
+        let content = r#"
+[Unit]
+Description=Device-mapper event daemon FIFOs
+
+[Socket]
+ListenFIFO=/run/dmeventd-server
+ListenFIFO=/run/dmeventd-client
+SocketMode=0600
+RemoveOnStop=true
+"#;
+        let parsed = parse_file(content).unwrap();
+        let sock = parse_socket("dm-event.socket", &parsed).unwrap();
+
+        assert_eq!(sock.socket.listeners.len(), 2);
+        assert_eq!(sock.socket.listeners[0].listen_type, ListenType::Fifo);
+        assert_eq!(sock.socket.listeners[0].address, "/run/dmeventd-server");
+        assert_eq!(sock.socket.listeners[1].address, "/run/dmeventd-client");
+        assert!(sock.socket.remove_on_stop);
+    }
+
+    #[test]
+    fn test_parse_socket_with_service() {
+        let content = r#"
+[Socket]
+ListenStream=/run/cups/cups.sock
+Service=cupsd.service
+"#;
+        let parsed = parse_file(content).unwrap();
+        let sock = parse_socket("cups.socket", &parsed).unwrap();
+
+        assert_eq!(sock.socket.service, Some("cupsd.service".into()));
+        assert_eq!(sock.service_name(), "cupsd.service");
+    }
+
+    #[test]
+    fn test_parse_socket_datagram() {
+        let content = r#"
+[Socket]
+ListenDatagram=/run/systemd/journal/syslog
+"#;
+        let parsed = parse_file(content).unwrap();
+        let sock = parse_socket("syslog.socket", &parsed).unwrap();
+
+        assert_eq!(sock.socket.listeners[0].listen_type, ListenType::Datagram);
+        assert_eq!(sock.socket.listeners[0].address, "/run/systemd/journal/syslog");
     }
 }
