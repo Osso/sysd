@@ -16,11 +16,23 @@ A Rust implementation of a minimal init system that:
 ## Non-Goals
 
 - Full systemd compatibility
-- Socket activation (initially)
-- Timers (use cron/fcron)
-- User sessions (systemd --user)
-- Generators
+- Timers (use cron/fcron instead)
+- User sessions (systemd --user) - future M13
+- Generators - future, low priority
 - Separate "jobs" queue (state shown inline on units)
+
+## Boot Requirements
+
+For a minimal graphical boot, the following are critical:
+
+1. **Socket activation (M10)** - dbus.socket is required by most services
+2. **Basic targets** - multi-user.target → graphical.target chain ✓
+3. **Service management** - start/stop/restart ✓
+4. **D-Bus interface** - for logind compatibility ✓
+5. **Cgroups** - process containment ✓
+
+Current blockers for real boot:
+- No socket activation → dbus-broker won't start → most services fail
 
 ## Directory Structure
 
@@ -175,11 +187,11 @@ Usage counts from `/usr/lib/systemd/system/*.service` on Arch Linux.
 
 | Directive | Count | Status | Notes |
 |-----------|-------|--------|-------|
-| StandardInput= | 21 | TODO | null/tty/socket |
+| StandardInput= | 21 | ✓ done | null/tty/socket |
 | StandardOutput= | 19 | ✓ done | journal/inherit/null |
 | StandardError= | 15 | ✓ done | journal/inherit/null |
-| TTYPath= | 9 | TODO | For getty-like services |
-| TTYReset= | 9 | TODO | Reset TTY on start |
+| TTYPath= | 9 | ✓ done | For getty-like services |
+| TTYReset= | 9 | ✓ done | Reset TTY on start |
 
 **[Service] Section - Environment**
 
@@ -197,35 +209,35 @@ Usage counts from `/usr/lib/systemd/system/*.service` on Arch Linux.
 | MemoryMax= | ~10 | ✓ done | Cgroup memory limit |
 | CPUQuota= | ~5 | ✓ done | Cgroup CPU limit |
 | TasksMax= | ~10 | ✓ done | Cgroup process limit |
-| LimitNOFILE= | 15 | TODO | File descriptor limit |
-| OOMScoreAdjust= | 12 | TODO | OOM killer priority |
+| LimitNOFILE= | 15 | ✓ done | File descriptor limit |
+| OOMScoreAdjust= | 12 | ✓ done | OOM killer priority |
 
 **[Service] Section - Watchdog**
 
 | Directive | Count | Status | Notes |
 |-----------|-------|--------|-------|
-| WatchdogSec= | 29 | TODO | sd_notify watchdog timeout |
+| WatchdogSec= | 29 | ✓ done | sd_notify watchdog timeout |
 
-**[Service] Section - Security/Sandboxing** (can ignore initially)
+**[Service] Section - Security/Sandboxing**
 
-| Directive | Count | Notes |
-|-----------|-------|-------|
-| DeviceAllow= | 64 | Cgroup device access |
-| ImportCredential= | 62 | systemd credentials |
-| SystemCallFilter= | 59 | seccomp |
-| ProtectSystem= | 53 | read-only /, /usr |
-| ProtectHome= | 51 | hide /home |
-| NoNewPrivileges= | 47 | no setuid |
-| CapabilityBoundingSet= | 42 | drop capabilities |
-| ProtectKernelModules= | 37 | block module loading |
-| PrivateTmp= | 36 | isolated /tmp |
-| RestrictNamespaces= | 33 | block namespace creation |
-| PrivateDevices= | 27 | isolated /dev |
-| PrivateNetwork= | 20 | no network |
-| ProtectProc= | 19 | /proc visibility |
-| ReadWritePaths= | 15 | filesystem access |
-| AmbientCapabilities= | 9 | grant capabilities |
-| KeyringMode= | 5 | kernel keyring |
+| Directive | Count | Status | Notes |
+|-----------|-------|--------|-------|
+| DeviceAllow= | 64 | TODO | Cgroup device access |
+| ImportCredential= | 62 | ignore | systemd credentials |
+| SystemCallFilter= | 59 | partial | seccomp (parsed, not enforced) |
+| ProtectSystem= | 53 | ✓ done | read-only /, /usr |
+| ProtectHome= | 51 | ✓ done | hide /home |
+| NoNewPrivileges= | 47 | ✓ done | no setuid |
+| CapabilityBoundingSet= | 42 | ✓ done | drop capabilities |
+| ProtectKernelModules= | 37 | ✓ done | block module loading |
+| PrivateTmp= | 36 | ✓ done | isolated /tmp |
+| RestrictNamespaces= | 33 | partial | parsed, not enforced |
+| PrivateDevices= | 27 | ✓ done | isolated /dev |
+| PrivateNetwork= | 20 | ✓ done | no network |
+| ProtectProc= | 19 | ✓ done | /proc visibility |
+| ReadWritePaths= | 15 | ✓ done | filesystem access |
+| AmbientCapabilities= | 9 | ✓ done | grant capabilities |
+| KeyringMode= | 5 | ignore | kernel keyring |
 
 **[Install] Section**
 
@@ -392,7 +404,7 @@ libc = "0.2"                  # Low-level syscalls
 ### M4: Cgroup Management
 - [x] Create/remove cgroup directories
 - [x] Move processes to cgroups
-- [x] Resource limits (MemoryMax, CPUQuota, TasksMax)
+- [x] Resource limits: MemoryMax= (1 use), CPUQuota= (0 uses), TasksMax= (6 uses)
 - [x] Empty cgroup detection
 - [x] Integrated with Manager (auto cgroup setup on start, cleanup on stop)
 
@@ -404,21 +416,21 @@ libc = "0.2"                  # Low-level syscalls
 - [x] Run as init (kernel cmdline `init=/usr/bin/sysd`)
 
 ### M6: Service Types & Restart ✓
-- [x] Restart= logic (on-failure, always) with RestartSec=
-- [x] RemainAfterExit= for oneshot services
-- [x] Type=forking (wait for parent exit, read PIDFile=)
-- [x] KillMode= (control-group/process/mixed/none)
-- [x] Type=idle (wait for job queue empty)
-- [x] Type=dbus (watch BusName= on D-Bus)
+- [x] Restart= logic (on-failure, always) with RestartSec= (44 uses)
+- [x] RemainAfterExit= for oneshot services (96 uses)
+- [x] Type=forking (wait for parent exit, read PIDFile=) (5 uses)
+- [x] KillMode= (control-group/process/mixed/none) (23 uses)
+- [x] Type=idle (wait for job queue empty) (7 uses)
+- [x] Type=dbus (watch BusName= on D-Bus) (16 uses)
 
 ### M7: Extended Features ✓
 - [x] DefaultDependencies= (146 uses)
 - [x] WatchdogSec= (29 uses)
 - [x] Also= in [Install] (25 uses)
 - [x] Alias= in [Install] (12 uses)
-- [x] Template units (foo@.service) with %i/%I specifiers
-- [x] Drop-in directories (.d/*.conf)
-- [x] ConditionDirectoryNotEmpty=
+- [x] Template units (foo@.service) with %i/%I specifiers (52 templates)
+- [x] Drop-in directories (.d/*.conf) (5 dirs)
+- [x] ConditionDirectoryNotEmpty= (37 uses)
 
 ### M8: Resource Limits ✓
 - [x] LimitNOFILE= (file descriptors)
@@ -439,6 +451,44 @@ libc = "0.2"                  # Low-level syscalls
 - [x] ProtectProc= (19 uses) - /proc visibility restrictions
 - [x] ReadWritePaths=/ReadOnlyPaths= (15 uses) - filesystem access control
 - [x] SystemCallFilter= (59 uses) - seccomp filtering (parsed, not enforced)
+
+### M10: Socket Activation
+Critical for boot - dbus.socket must work for most services.
+- [ ] Parse .socket unit files (ListenStream=, ListenDatagram=, Accept=, etc.)
+- [ ] Create listening sockets before starting services
+- [ ] Pass socket file descriptors via LISTEN_FDS/LISTEN_PID environment
+- [ ] Support socket-based service activation (start service on connection)
+- [ ] D-Bus integration: StartTransientUnit for socket units
+
+### M11: Additional Unit Types
+- [x] .mount units - parse and execute mount operations
+- [x] .slice units - cgroup hierarchy organization (ordering for slices.target)
+- .path units - not implementing (inotify-based file watching for lazy activation; only 3 active on typical system, used for boot persistence like CUPS auto-start)
+- .swap units - not implementing (generated by fstab-generator; use /etc/fstab directly)
+- [ ] .timer units - scheduled activation (alternative: rely on cron)
+
+### M12: Additional Conditions
+| Condition | Priority | Notes |
+|-----------|----------|-------|
+| ConditionVirtualization= | high | 12 uses, detect container/VM |
+| ConditionCapability= | high | 14 uses, check process caps |
+| ConditionKernelCommandLine= | medium | 4 uses, check /proc/cmdline |
+| ConditionSecurity= | low | 20 uses, SELinux/AppArmor/etc |
+| ConditionFirstBoot= | low | 2 uses, first boot detection |
+| ConditionNeedsUpdate= | low | 3 uses, /etc update detection |
+
+### M13: User Sessions
+For full desktop support (systemd --user equivalent).
+- [ ] Per-user service manager instances
+- [ ] XDG_RUNTIME_DIR management
+- [ ] User slice (user-1000.slice)
+- [ ] Lingering support
+
+### Future: Generators
+Low priority - can work without for minimal systems.
+- [ ] Run generator binaries from /usr/lib/systemd/system-generators/
+- [ ] fstab-generator (create .mount from /etc/fstab)
+- [ ] getty-generator (create getty instances)
 
 ## Testing Strategy
 

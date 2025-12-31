@@ -94,6 +94,39 @@ const SPACE_SEPARATED_KEYS: &[&str] = &[
     "CONDITIONPATHEXISTS",
 ];
 
+/// Keys that should NOT be split on commas (entire value is single string)
+const SINGLE_VALUE_KEYS: &[&str] = &[
+    "EXECSTART",
+    "EXECSTARTPRE",
+    "EXECSTARTPOST",
+    "EXECSTOP",
+    "EXECSTOPPRE",
+    "EXECSTOPPOST",
+    "EXECRELOAD",
+    "EXECCONDITION",
+    "DESCRIPTION",
+    "DOCUMENTATION",
+    "OPTIONS",        // Mount options (comma-separated inside)
+    "WHAT",           // Mount What=
+    "WHERE",          // Mount Where=
+    "TYPE",           // Mount Type=
+    "WORKINGDIRECTORY",
+    "ROOTDIRECTORY",
+    "PIDFILE",
+    "BUSNAME",
+    "TTYPATH",
+    "ENVIRONMENTFILE",
+    "PASSEDFILE",
+    "CAPABILITYBOUNDINGSET",
+    "AMBIENTCAPABILITIES",
+    "SYSTEMCALLFILTER",
+    "READWRITEPATHS",
+    "READONLYPATHS",
+    "INACCESSIBLEPATHS",
+    "USER",
+    "GROUP",
+];
+
 /// Parse a single section's lines into key-value pairs
 fn parse_section(lines: &[&str]) -> ParsedSection {
     let mut entries: ParsedSection = HashMap::new();
@@ -114,10 +147,13 @@ fn parse_section(lines: &[&str]) -> ParsedSection {
         let value = value.trim_start_matches('=').trim();
         let name = name.trim().to_uppercase();
 
-        // Determine separator: space for dependency keys, comma otherwise
+        // Determine separator: space for dependency keys, single value for paths/commands, comma otherwise
         let values: Vec<String> = if SPACE_SEPARATED_KEYS.contains(&name.as_str()) {
             // Split on whitespace for dependency keys
             value.split_whitespace().map(|s| s.to_string()).collect()
+        } else if SINGLE_VALUE_KEYS.contains(&name.as_str()) {
+            // Keep as single value (don't split)
+            vec![value.to_string()]
         } else {
             // Split on comma for other keys (like Environment=)
             value.split(',').map(|x| x.trim().to_string()).collect()

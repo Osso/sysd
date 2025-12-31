@@ -15,12 +15,13 @@ pub use sandbox::apply_sandbox;
 pub use state::{ActiveState, ServiceState, SubState};
 
 use std::collections::HashMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use crate::cgroups::{CgroupLimits, CgroupManager};
-use crate::units::{self, KillMode, RestartPolicy, Service, ServiceType, Unit};
+use crate::units::{self, KillMode, Mount, RestartPolicy, Service, ServiceType, Unit};
 
 /// Service manager that tracks and controls units (services and targets)
 pub struct Manager {
@@ -329,10 +330,20 @@ impl Manager {
             return Err(ManagerError::IsTarget(name.to_string()));
         }
 
+        // Handle slice units (create cgroup dir and mark active)
+        if let Some(slice) = unit.as_slice().cloned() {
+            return self.start_slice(name, &slice).await;
+        }
+
         // Check conditions before starting
         if let Some(reason) = self.check_conditions(unit) {
             log::info!("{}: condition failed: {}", name, reason);
             return Err(ManagerError::ConditionFailed(name.to_string(), reason));
+        }
+
+        // Handle mount units
+        if let Some(mnt) = unit.as_mount().cloned() {
+            return self.start_mount(name, &mnt).await;
         }
 
         let service = unit
@@ -480,6 +491,16 @@ impl Manager {
     pub async fn stop(&mut self, name: &str) -> Result<(), ManagerError> {
         let name = self.normalize_name(name);
 
+        // Handle mount units
+        if let Some(mount) = self.units.get(&name).and_then(|u| u.as_mount()).cloned() {
+            return self.stop_mount(&name, &mount).await;
+        }
+
+        // Handle slice units
+        if let Some(slice) = self.units.get(&name).and_then(|u| u.as_slice()).cloned() {
+            return self.stop_slice(&name, &slice).await;
+        }
+
         let state = self
             .states
             .get_mut(&name)
@@ -578,6 +599,254 @@ impl Manager {
         // Clean up watchdog
         self.watchdog_deadlines.remove(&name);
 
+        Ok(())
+    }
+
+    /// Start a mount unit (execute mount operation)
+    async fn start_mount(&mut self, name: &str, mnt: &Mount) -> Result<(), ManagerError> {
+        let state = self
+            .states
+            .get_mut(name)
+            .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
+
+        // Check if already mounted
+        if state.is_active() {
+            return Err(ManagerError::AlreadyActive(name.to_string()));
+        }
+
+        state.set_starting();
+
+        let mount_point = &mnt.mount.r#where;
+        let what = &mnt.mount.what;
+        let fs_type = mnt.mount.fs_type.as_deref().unwrap_or("auto");
+        let options = mnt.mount.options.as_deref().unwrap_or("defaults");
+
+        // Create mount point directory if needed
+        if let Some(mode) = mnt.mount.directory_mode {
+            if !std::path::Path::new(mount_point).exists() {
+                if let Err(e) = std::fs::create_dir_all(mount_point) {
+                    log::warn!("Failed to create mount point {}: {}", mount_point, e);
+                } else if let Err(e) =
+                    std::fs::set_permissions(mount_point, std::fs::Permissions::from_mode(mode))
+                {
+                    log::warn!("Failed to set permissions on {}: {}", mount_point, e);
+                }
+            }
+        }
+
+        // Check if already mounted (via /proc/mounts)
+        if is_mounted(mount_point) {
+            log::info!("{} already mounted at {}", name, mount_point);
+            if let Some(state) = self.states.get_mut(name) {
+                state.set_running(0);
+            }
+            return Ok(());
+        }
+
+        // Execute mount
+        log::info!(
+            "Mounting {} ({}) at {} with options {}",
+            name,
+            what,
+            mount_point,
+            options
+        );
+
+        use nix::mount::{mount, MsFlags};
+
+        // Parse options into MsFlags
+        let mut flags = MsFlags::empty();
+        let mut data_options = Vec::new();
+
+        for opt in options.split(',') {
+            match opt.trim() {
+                "ro" | "read-only" => flags |= MsFlags::MS_RDONLY,
+                "rw" => {} // default
+                "nosuid" => flags |= MsFlags::MS_NOSUID,
+                "nodev" => flags |= MsFlags::MS_NODEV,
+                "noexec" => flags |= MsFlags::MS_NOEXEC,
+                "noatime" => flags |= MsFlags::MS_NOATIME,
+                "nodiratime" => flags |= MsFlags::MS_NODIRATIME,
+                "relatime" => flags |= MsFlags::MS_RELATIME,
+                "strictatime" => flags |= MsFlags::MS_STRICTATIME,
+                "sync" => flags |= MsFlags::MS_SYNCHRONOUS,
+                "dirsync" => flags |= MsFlags::MS_DIRSYNC,
+                "silent" => flags |= MsFlags::MS_SILENT,
+                "bind" => flags |= MsFlags::MS_BIND,
+                "move" => flags |= MsFlags::MS_MOVE,
+                "remount" => flags |= MsFlags::MS_REMOUNT,
+                "defaults" => {} // no special flags
+                other => {
+                    // Pass as data option to filesystem
+                    data_options.push(other);
+                }
+            }
+        }
+
+        let data = if data_options.is_empty() {
+            None
+        } else {
+            Some(data_options.join(","))
+        };
+
+        let result = mount(
+            Some(what.as_str()),
+            mount_point.as_str(),
+            Some(fs_type),
+            flags,
+            data.as_deref(),
+        );
+
+        match result {
+            Ok(()) => {
+                log::info!("{} mounted successfully", name);
+                if let Some(state) = self.states.get_mut(name) {
+                    state.set_running(0);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let msg = format!("mount failed: {}", e);
+                log::error!("{}: {}", name, msg);
+                if let Some(state) = self.states.get_mut(name) {
+                    state.set_failed(msg.clone());
+                }
+                Err(ManagerError::Io(msg))
+            }
+        }
+    }
+
+    /// Stop a mount unit (execute umount operation)
+    async fn stop_mount(&mut self, name: &str, mnt: &Mount) -> Result<(), ManagerError> {
+        let state = self
+            .states
+            .get_mut(name)
+            .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
+
+        if !state.is_active() {
+            return Err(ManagerError::NotActive(name.to_string()));
+        }
+
+        state.set_stopping();
+
+        let mount_point = &mnt.mount.r#where;
+
+        // Check if actually mounted
+        if !is_mounted(mount_point) {
+            log::debug!("{} not mounted, marking inactive", name);
+            if let Some(state) = self.states.get_mut(name) {
+                state.set_stopped(0);
+            }
+            return Ok(());
+        }
+
+        log::info!("Unmounting {}", mount_point);
+
+        use nix::mount::{umount2, MntFlags};
+
+        let mut flags = MntFlags::empty();
+        if mnt.mount.lazy_unmount {
+            flags |= MntFlags::MNT_DETACH;
+        }
+        if mnt.mount.force_unmount {
+            flags |= MntFlags::MNT_FORCE;
+        }
+
+        let result = umount2(mount_point.as_str(), flags);
+
+        match result {
+            Ok(()) => {
+                log::info!("{} unmounted successfully", name);
+                if let Some(state) = self.states.get_mut(name) {
+                    state.set_stopped(0);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let msg = format!("umount failed: {}", e);
+                log::error!("{}: {}", name, msg);
+                if let Some(state) = self.states.get_mut(name) {
+                    state.set_failed(msg.clone());
+                }
+                Err(ManagerError::Io(msg))
+            }
+        }
+    }
+
+    /// Start a slice unit (create cgroup directory and mark active)
+    async fn start_slice(
+        &mut self,
+        name: &str,
+        slice: &crate::units::Slice,
+    ) -> Result<(), ManagerError> {
+        let state = self
+            .states
+            .get_mut(name)
+            .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
+
+        // Check if already active
+        if state.is_active() {
+            return Err(ManagerError::AlreadyActive(name.to_string()));
+        }
+
+        state.set_starting();
+
+        // Create cgroup directory for the slice
+        let cgroup_path = slice.cgroup_path();
+        log::info!("Starting slice {} (cgroup: {})", name, cgroup_path);
+
+        if let Some(ref cgroup_mgr) = self.cgroup_manager {
+            // Create the cgroup directory
+            let path = std::path::Path::new(&cgroup_path);
+            if !path.exists() {
+                if let Err(e) = std::fs::create_dir_all(path) {
+                    log::warn!("Failed to create cgroup dir {}: {}", cgroup_path, e);
+                } else {
+                    log::debug!("Created cgroup directory {}", cgroup_path);
+                }
+            }
+            // Note: We don't need to move any processes - slices just organize the hierarchy
+            let _ = cgroup_mgr; // silence unused warning
+        }
+
+        // Mark as active immediately (slices have no process)
+        if let Some(state) = self.states.get_mut(name) {
+            state.set_running(0);
+        }
+
+        log::info!("{} reached", name);
+        Ok(())
+    }
+
+    /// Stop a slice unit (mark inactive, optionally clean up cgroup)
+    async fn stop_slice(
+        &mut self,
+        name: &str,
+        slice: &crate::units::Slice,
+    ) -> Result<(), ManagerError> {
+        let state = self
+            .states
+            .get_mut(name)
+            .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
+
+        if !state.is_active() {
+            return Err(ManagerError::NotActive(name.to_string()));
+        }
+
+        state.set_stopping();
+
+        let cgroup_path = slice.cgroup_path();
+        log::info!("Stopping slice {} (cgroup: {})", name, cgroup_path);
+
+        // Note: We don't remove cgroup directories on slice stop
+        // The cgroup may still contain running services
+        // Cleanup happens when the cgroup becomes empty
+
+        if let Some(state) = self.states.get_mut(name) {
+            state.set_stopped(0);
+        }
+
+        log::info!("{} stopped", name);
         Ok(())
     }
 
@@ -1004,7 +1273,13 @@ impl Manager {
 
     /// Normalize unit name (add .service suffix if no suffix present)
     fn normalize_name(&self, name: &str) -> String {
-        if name.ends_with(".service") || name.ends_with(".target") {
+        if name.ends_with(".service")
+            || name.ends_with(".target")
+            || name.ends_with(".mount")
+            || name.ends_with(".socket")
+            || name.ends_with(".path")
+            || name.ends_with(".slice")
+        {
             name.to_string()
         } else {
             format!("{}.service", name)
@@ -1425,6 +1700,45 @@ impl Manager {
             }
         }
     }
+}
+
+/// Check if a path is currently mounted (by reading /proc/mounts)
+fn is_mounted(path: &str) -> bool {
+    let Ok(content) = std::fs::read_to_string("/proc/mounts") else {
+        return false;
+    };
+
+    // Normalize path (remove trailing slashes except for root)
+    let normalized = if path == "/" {
+        path.to_string()
+    } else {
+        path.trim_end_matches('/').to_string()
+    };
+
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let mount_point = parts[1];
+            // Handle escaped characters in mount points
+            let mount_point = mount_point
+                .replace("\\040", " ")
+                .replace("\\011", "\t")
+                .replace("\\012", "\n")
+                .replace("\\134", "\\");
+
+            let mount_normalized = if mount_point == "/" {
+                mount_point
+            } else {
+                mount_point.trim_end_matches('/').to_string()
+            };
+
+            if mount_normalized == normalized {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 impl Default for Manager {

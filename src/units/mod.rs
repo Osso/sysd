@@ -1,14 +1,18 @@
 //! Unit file parsing and type definitions
 //!
-//! Parses systemd .service and .target files into typed Rust structures.
+//! Parses systemd .service, .target, and .mount files into typed Rust structures.
 
+mod mount;
 mod parser;
 mod service;
+mod slice;
 mod target;
 mod unit;
 
+pub use mount::Mount;
 pub use parser::{parse_file, parse_unit_file, ParseError, ParsedFile};
 pub use service::*;
+pub use slice::Slice;
 pub use target::Target;
 pub use unit::Unit;
 
@@ -501,6 +505,191 @@ pub async fn load_target(path: &Path) -> Result<Target, ParseError> {
     Ok(target)
 }
 
+/// Convert parsed INI data into a typed Slice
+pub fn parse_slice(name: &str, parsed: &ParsedFile) -> Result<Slice, ParseError> {
+    let mut slice = Slice::new(name.to_string());
+
+    // [Unit] section - same as Target
+    if let Some(unit) = parsed.get("[Unit]") {
+        if let Some(vals) = unit.get("DESCRIPTION") {
+            slice.unit.description = vals.first().map(|(_, v)| v.clone());
+        }
+        if let Some(vals) = unit.get("AFTER") {
+            slice.unit.after = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("BEFORE") {
+            slice.unit.before = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("REQUIRES") {
+            slice.unit.requires = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("WANTS") {
+            slice.unit.wants = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONFLICTS") {
+            slice.unit.conflicts = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONPATHEXISTS") {
+            slice.unit.condition_path_exists = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONDIRECTORYNOTEMPTY") {
+            slice.unit.condition_directory_not_empty =
+                vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("DEFAULTDEPENDENCIES") {
+            if let Some((_, s)) = vals.first() {
+                slice.unit.default_dependencies =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+    }
+
+    Ok(slice)
+}
+
+/// Parse a slice file from disk
+pub async fn load_slice(path: &Path) -> Result<Slice, ParseError> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    let mut parsed = parse_unit_file(path).await?;
+
+    // Load and merge drop-in files
+    load_dropins(path, &mut parsed).await;
+
+    parse_slice(name, &parsed)
+}
+
+/// Convert parsed INI data into a typed Mount
+pub fn parse_mount(name: &str, parsed: &ParsedFile) -> Result<Mount, ParseError> {
+    let mut mnt = Mount::new(name.to_string());
+
+    // [Unit] section - same as Service/Target
+    if let Some(unit) = parsed.get("[Unit]") {
+        if let Some(vals) = unit.get("DESCRIPTION") {
+            mnt.unit.description = vals.first().map(|(_, v)| v.clone());
+        }
+        if let Some(vals) = unit.get("AFTER") {
+            mnt.unit.after = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("BEFORE") {
+            mnt.unit.before = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("REQUIRES") {
+            mnt.unit.requires = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("WANTS") {
+            mnt.unit.wants = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONFLICTS") {
+            mnt.unit.conflicts = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONPATHEXISTS") {
+            mnt.unit.condition_path_exists = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONDIRECTORYNOTEMPTY") {
+            mnt.unit.condition_directory_not_empty =
+                vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("DEFAULTDEPENDENCIES") {
+            if let Some((_, s)) = vals.first() {
+                mnt.unit.default_dependencies =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+    }
+
+    // [Mount] section
+    if let Some(mount) = parsed.get("[Mount]") {
+        if let Some(vals) = mount.get("WHAT") {
+            if let Some((_, v)) = vals.first() {
+                mnt.mount.what = v.clone();
+            }
+        }
+        if let Some(vals) = mount.get("WHERE") {
+            if let Some((_, v)) = vals.first() {
+                mnt.mount.r#where = v.clone();
+            }
+        }
+        if let Some(vals) = mount.get("TYPE") {
+            mnt.mount.fs_type = vals.first().map(|(_, v)| v.clone());
+        }
+        if let Some(vals) = mount.get("OPTIONS") {
+            mnt.mount.options = vals.first().map(|(_, v)| v.clone());
+        }
+        if let Some(vals) = mount.get("SLOPPYOPTIONS") {
+            if let Some((_, s)) = vals.first() {
+                mnt.mount.sloppy_options =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = mount.get("LAZYUNMOUNT") {
+            if let Some((_, s)) = vals.first() {
+                mnt.mount.lazy_unmount =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = mount.get("FORCEUNMOUNT") {
+            if let Some((_, s)) = vals.first() {
+                mnt.mount.force_unmount =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = mount.get("READWRITEONLY") {
+            if let Some((_, s)) = vals.first() {
+                mnt.mount.read_write_only =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = mount.get("DIRECTORYMODE") {
+            if let Some((_, s)) = vals.first() {
+                // Parse octal mode (e.g., "0755" or "755")
+                let s = s.trim_start_matches('0');
+                mnt.mount.directory_mode = u32::from_str_radix(s, 8).ok();
+            }
+        }
+        if let Some(vals) = mount.get("TIMEOUTSEC") {
+            if let Some((_, s)) = vals.first() {
+                mnt.mount.timeout_sec = parse_duration(s);
+            }
+        }
+    }
+
+    // If Where= is not specified, derive from unit name
+    if mnt.mount.r#where.is_empty() {
+        mnt.mount.r#where = Mount::mount_point_from_name(name);
+    }
+
+    // [Install] section
+    if let Some(install) = parsed.get("[Install]") {
+        if let Some(vals) = install.get("WANTEDBY") {
+            mnt.install.wanted_by = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = install.get("REQUIREDBY") {
+            mnt.install.required_by = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+    }
+
+    Ok(mnt)
+}
+
+/// Parse a mount file from disk
+pub async fn load_mount(path: &Path) -> Result<Mount, ParseError> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    let mut parsed = parse_unit_file(path).await?;
+
+    // Load and merge drop-in files
+    load_dropins(path, &mut parsed).await;
+
+    parse_mount(name, &parsed)
+}
+
 /// Read unit names from a .wants directory
 fn read_wants_dir(path: &Path) -> Vec<String> {
     let mut units = Vec::new();
@@ -516,6 +705,7 @@ fn read_wants_dir(path: &Path) -> Vec<String> {
                     || name.ends_with(".path")
                     || name.ends_with(".socket")
                     || name.ends_with(".mount")
+                    || name.ends_with(".slice")
                 {
                     units.push(name.to_string());
                 }
@@ -526,7 +716,7 @@ fn read_wants_dir(path: &Path) -> Vec<String> {
     units
 }
 
-/// Load a unit file (service or target) from disk
+/// Load a unit file (service, target, mount, or slice) from disk
 pub async fn load_unit(path: &Path) -> Result<Unit, ParseError> {
     let ext = path.extension().and_then(|e| e.to_str());
 
@@ -538,6 +728,14 @@ pub async fn load_unit(path: &Path) -> Result<Unit, ParseError> {
         Some("target") => {
             let target = load_target(path).await?;
             Ok(Unit::Target(target))
+        }
+        Some("mount") => {
+            let mount = load_mount(path).await?;
+            Ok(Unit::Mount(mount))
+        }
+        Some("slice") => {
+            let slice = load_slice(path).await?;
+            Ok(Unit::Slice(slice))
         }
         _ => Err(ParseError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -952,5 +1150,133 @@ SystemCallFilter=@system-service ~@privileged
         assert_eq!(svc.service.inaccessible_paths, vec![PathBuf::from("/home")]);
 
         assert_eq!(svc.service.system_call_filter, vec!["@system-service", "~@privileged"]);
+    }
+
+    #[test]
+    fn test_parse_mount_unit() {
+        let content = r#"
+[Unit]
+Description=Temporary Directory /tmp
+DefaultDependencies=no
+Conflicts=umount.target
+Before=local-fs.target umount.target
+After=swap.target
+
+[Mount]
+What=tmpfs
+Where=/tmp
+Type=tmpfs
+Options=mode=1777,strictatime,nosuid,nodev,size=50%
+"#;
+        let parsed = parse_file(content).unwrap();
+        let mnt = parse_mount("tmp.mount", &parsed).unwrap();
+
+        assert_eq!(mnt.unit.description, Some("Temporary Directory /tmp".into()));
+        assert!(!mnt.unit.default_dependencies);
+        assert!(mnt.unit.conflicts.contains(&"umount.target".into()));
+        assert!(mnt.unit.before.contains(&"local-fs.target".into()));
+        assert!(mnt.unit.after.contains(&"swap.target".into()));
+
+        assert_eq!(mnt.mount.what, "tmpfs");
+        assert_eq!(mnt.mount.r#where, "/tmp");
+        assert_eq!(mnt.mount.fs_type, Some("tmpfs".into()));
+        assert_eq!(mnt.mount.options, Some("mode=1777,strictatime,nosuid,nodev,size=50%".into()));
+    }
+
+    #[test]
+    fn test_parse_mount_hugepages() {
+        let content = r#"
+[Unit]
+Description=Huge Pages File System
+DefaultDependencies=no
+Before=sysinit.target
+ConditionPathExists=/sys/kernel/mm/hugepages
+
+[Mount]
+What=hugetlbfs
+Where=/dev/hugepages
+Type=hugetlbfs
+Options=nosuid,nodev
+"#;
+        let parsed = parse_file(content).unwrap();
+        let mnt = parse_mount("dev-hugepages.mount", &parsed).unwrap();
+
+        assert_eq!(mnt.mount.what, "hugetlbfs");
+        assert_eq!(mnt.mount.r#where, "/dev/hugepages");
+        assert_eq!(mnt.mount.fs_type, Some("hugetlbfs".into()));
+        assert!(mnt.unit.condition_path_exists.contains(&"/sys/kernel/mm/hugepages".into()));
+    }
+
+    #[test]
+    fn test_mount_where_from_name() {
+        // When Where= is not specified, derive from unit name
+        let content = r#"
+[Mount]
+What=tmpfs
+Type=tmpfs
+"#;
+        let parsed = parse_file(content).unwrap();
+        let mnt = parse_mount("var-lib-docker.mount", &parsed).unwrap();
+
+        // Where should be derived from the unit name
+        assert_eq!(mnt.mount.r#where, "/var/lib/docker");
+    }
+
+    #[test]
+    fn test_mount_default_values() {
+        let mnt = Mount::new("test.mount".to_string());
+        assert_eq!(mnt.mount.directory_mode, Some(0o755));
+        assert!(!mnt.mount.sloppy_options);
+        assert!(!mnt.mount.lazy_unmount);
+        assert!(!mnt.mount.force_unmount);
+    }
+
+    #[test]
+    fn test_parse_slice_unit() {
+        let content = r#"
+[Unit]
+Description=User and Session Slice
+Documentation=man:systemd.special(7)
+Before=slices.target
+"#;
+        let parsed = parse_file(content).unwrap();
+        let slice = parse_slice("user.slice", &parsed).unwrap();
+
+        assert_eq!(slice.name, "user.slice");
+        assert_eq!(slice.unit.description, Some("User and Session Slice".into()));
+        assert!(slice.unit.before.contains(&"slices.target".into()));
+    }
+
+    #[test]
+    fn test_parse_slice_no_default_deps() {
+        let content = r#"
+[Unit]
+Description=Encrypted Volume Units Service Slice
+DefaultDependencies=no
+"#;
+        let parsed = parse_file(content).unwrap();
+        let slice = parse_slice("system-systemd-cryptsetup.slice", &parsed).unwrap();
+
+        assert!(!slice.unit.default_dependencies);
+    }
+
+    #[test]
+    fn test_slice_cgroup_path() {
+        // Top-level slices
+        let slice = Slice::new("system.slice".to_string());
+        assert_eq!(slice.cgroup_path(), "/sys/fs/cgroup/system.slice");
+
+        let slice = Slice::new("user.slice".to_string());
+        assert_eq!(slice.cgroup_path(), "/sys/fs/cgroup/user.slice");
+
+        let slice = Slice::new("machine.slice".to_string());
+        assert_eq!(slice.cgroup_path(), "/sys/fs/cgroup/machine.slice");
+
+        // Nested slices
+        let slice = Slice::new("user-1000.slice".to_string());
+        assert_eq!(slice.cgroup_path(), "/sys/fs/cgroup/user.slice/user-1000.slice");
+
+        let slice = Slice::new("system-systemd-cryptsetup.slice".to_string());
+        assert_eq!(slice.cgroup_path(), "/sys/fs/cgroup/system.slice/system-systemd-cryptsetup.slice");
     }
 }

@@ -1,12 +1,14 @@
-//! Common unit type that wraps both Service and Target
+//! Common unit type that wraps Service, Target, Mount, and Slice
 
-use super::{InstallSection, Service, Target, UnitSection};
+use super::{InstallSection, Mount, Service, Slice, Target, UnitSection};
 
-/// A unit can be either a Service or a Target
+/// A unit can be a Service, Target, Mount, or Slice
 #[derive(Debug, Clone)]
 pub enum Unit {
     Service(Service),
     Target(Target),
+    Mount(Mount),
+    Slice(Slice),
 }
 
 impl Unit {
@@ -15,14 +17,18 @@ impl Unit {
         match self {
             Unit::Service(s) => &s.name,
             Unit::Target(t) => &t.name,
+            Unit::Mount(m) => &m.name,
+            Unit::Slice(s) => &s.name,
         }
     }
 
-    /// Get the [Unit] section (common to both types)
+    /// Get the [Unit] section (common to all types)
     pub fn unit_section(&self) -> &UnitSection {
         match self {
             Unit::Service(s) => &s.unit,
             Unit::Target(t) => &t.unit,
+            Unit::Mount(m) => &m.unit,
+            Unit::Slice(s) => &s.unit,
         }
     }
 
@@ -30,7 +36,8 @@ impl Unit {
     pub fn install_section(&self) -> Option<&InstallSection> {
         match self {
             Unit::Service(s) => Some(&s.install),
-            Unit::Target(_) => None, // Targets don't have install sections
+            Unit::Target(_) | Unit::Slice(_) => None, // Targets and slices don't have install sections
+            Unit::Mount(m) => Some(&m.install),
         }
     }
 
@@ -42,6 +49,16 @@ impl Unit {
     /// Check if this is a target
     pub fn is_target(&self) -> bool {
         matches!(self, Unit::Target(_))
+    }
+
+    /// Check if this is a mount
+    pub fn is_mount(&self) -> bool {
+        matches!(self, Unit::Mount(_))
+    }
+
+    /// Check if this is a slice
+    pub fn is_slice(&self) -> bool {
+        matches!(self, Unit::Slice(_))
     }
 
     /// Get as service if it is one
@@ -60,6 +77,22 @@ impl Unit {
         }
     }
 
+    /// Get as mount if it is one
+    pub fn as_mount(&self) -> Option<&Mount> {
+        match self {
+            Unit::Mount(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Get as slice if it is one
+    pub fn as_slice(&self) -> Option<&Slice> {
+        match self {
+            Unit::Slice(s) => Some(s),
+            _ => None,
+        }
+    }
+
     /// Get all units this depends on (After + Requires + Wants)
     pub fn dependencies(&self) -> Vec<&String> {
         let unit = self.unit_section();
@@ -74,7 +107,7 @@ impl Unit {
     pub fn wants_dir(&self) -> &[String] {
         match self {
             Unit::Target(t) => &t.wants_dir,
-            Unit::Service(_) => &[],
+            Unit::Service(_) | Unit::Mount(_) | Unit::Slice(_) => &[],
         }
     }
 }
