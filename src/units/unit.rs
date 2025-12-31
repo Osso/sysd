@@ -1,8 +1,8 @@
-//! Common unit type that wraps Service, Target, Mount, Slice, and Socket
+//! Common unit type that wraps Service, Target, Mount, Slice, Socket, and Timer
 
-use super::{InstallSection, Mount, Service, Slice, Socket, Target, UnitSection};
+use super::{InstallSection, Mount, Service, Slice, Socket, Target, Timer, UnitSection};
 
-/// A unit can be a Service, Target, Mount, Slice, or Socket
+/// A unit can be a Service, Target, Mount, Slice, Socket, or Timer
 #[derive(Debug, Clone)]
 pub enum Unit {
     Service(Service),
@@ -10,6 +10,7 @@ pub enum Unit {
     Mount(Mount),
     Slice(Slice),
     Socket(Socket),
+    Timer(Timer),
 }
 
 impl Unit {
@@ -21,6 +22,7 @@ impl Unit {
             Unit::Mount(m) => &m.name,
             Unit::Slice(s) => &s.name,
             Unit::Socket(s) => &s.name,
+            Unit::Timer(t) => &t.name,
         }
     }
 
@@ -32,6 +34,7 @@ impl Unit {
             Unit::Mount(m) => &m.unit,
             Unit::Slice(s) => &s.unit,
             Unit::Socket(s) => &s.unit,
+            Unit::Timer(t) => &t.unit,
         }
     }
 
@@ -42,6 +45,7 @@ impl Unit {
             Unit::Target(_) | Unit::Slice(_) => None,
             Unit::Mount(m) => Some(&m.install),
             Unit::Socket(s) => Some(&s.install),
+            Unit::Timer(t) => Some(&t.install),
         }
     }
 
@@ -70,7 +74,12 @@ impl Unit {
         matches!(self, Unit::Socket(_))
     }
 
-    /// Get the unit type as a string (service, target, mount, slice, socket)
+    /// Check if this is a timer
+    pub fn is_timer(&self) -> bool {
+        matches!(self, Unit::Timer(_))
+    }
+
+    /// Get the unit type as a string (service, target, mount, slice, socket, timer)
     pub fn unit_type(&self) -> &'static str {
         match self {
             Unit::Service(_) => "service",
@@ -78,6 +87,7 @@ impl Unit {
             Unit::Mount(_) => "mount",
             Unit::Slice(_) => "slice",
             Unit::Socket(_) => "socket",
+            Unit::Timer(_) => "timer",
         }
     }
 
@@ -121,6 +131,14 @@ impl Unit {
         }
     }
 
+    /// Get as timer if it is one
+    pub fn as_timer(&self) -> Option<&Timer> {
+        match self {
+            Unit::Timer(t) => Some(t),
+            _ => None,
+        }
+    }
+
     /// Get all units this depends on (After + Requires + Wants)
     pub fn dependencies(&self) -> Vec<&String> {
         let unit = self.unit_section();
@@ -135,7 +153,7 @@ impl Unit {
     pub fn wants_dir(&self) -> &[String] {
         match self {
             Unit::Target(t) => &t.wants_dir,
-            Unit::Service(_) | Unit::Mount(_) | Unit::Slice(_) | Unit::Socket(_) => &[],
+            Unit::Service(_) | Unit::Mount(_) | Unit::Slice(_) | Unit::Socket(_) | Unit::Timer(_) => &[],
         }
     }
 }

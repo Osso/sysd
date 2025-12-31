@@ -8,6 +8,7 @@ mod process;
 pub mod sandbox;
 mod socket_watcher;
 mod state;
+mod timer_scheduler;
 
 pub use deps::{CycleError, DepGraph};
 pub use notify::{AsyncNotifyListener, NotifyMessage, NOTIFY_SOCKET_PATH};
@@ -15,6 +16,7 @@ pub use process::{SpawnError, SpawnOptions};
 pub use sandbox::apply_sandbox;
 pub use socket_watcher::SocketActivation;
 pub use state::{ActiveState, ServiceState, SubState};
+pub use timer_scheduler::TimerFired;
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
@@ -24,7 +26,7 @@ use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use crate::cgroups::{CgroupLimits, CgroupManager};
-use crate::units::{self, KillMode, ListenType, Mount, RestartPolicy, Service, ServiceType, Socket, Unit};
+use crate::units::{self, KillMode, ListenType, Mount, RestartPolicy, Service, ServiceType, Socket, Timer, Unit};
 
 /// Service manager that tracks and controls units (services and targets)
 pub struct Manager {
@@ -60,6 +62,12 @@ pub struct Manager {
     socket_activation_tx: mpsc::Sender<socket_watcher::SocketActivation>,
     /// Receiver for socket activation messages
     socket_activation_rx: Option<mpsc::Receiver<socket_watcher::SocketActivation>>,
+    /// Channel for timer fired messages
+    timer_tx: mpsc::Sender<timer_scheduler::TimerFired>,
+    /// Receiver for timer fired messages
+    timer_rx: Option<mpsc::Receiver<timer_scheduler::TimerFired>>,
+    /// Boot time for monotonic timer calculations
+    boot_time: std::time::Instant,
 }
 
 impl Manager {
@@ -83,6 +91,9 @@ impl Manager {
         // Create socket activation channel
         let (socket_activation_tx, socket_activation_rx) = mpsc::channel(32);
 
+        // Create timer fired channel
+        let (timer_tx, timer_rx) = mpsc::channel(32);
+
         Self {
             units: HashMap::new(),
             states: HashMap::new(),
@@ -103,6 +114,9 @@ impl Manager {
             socket_fds: HashMap::new(),
             socket_activation_tx,
             socket_activation_rx: Some(socket_activation_rx),
+            timer_tx,
+            timer_rx: Some(timer_rx),
+            boot_time: std::time::Instant::now(),
         }
     }
 
@@ -355,6 +369,11 @@ impl Manager {
             return self.start_socket(name, &socket).await;
         }
 
+        // Handle timer units (schedule service activation)
+        if let Some(timer) = unit.as_timer().cloned() {
+            return self.start_timer(name, &timer).await;
+        }
+
         // Check conditions before starting
         if let Some(reason) = self.check_conditions(unit) {
             log::info!("{}: condition failed: {}", name, reason);
@@ -526,6 +545,11 @@ impl Manager {
         // Handle socket units
         if let Some(socket) = self.units.get(&name).and_then(|u| u.as_socket()).cloned() {
             return self.stop_socket(&name, &socket).await;
+        }
+
+        // Handle timer units
+        if self.units.get(&name).is_some_and(|u| u.is_timer()) {
+            return self.stop_timer(&name).await;
         }
 
         let state = self
@@ -1237,6 +1261,137 @@ impl Manager {
 
         // Start the service
         self.start(&activation.service_name).await
+    }
+
+    /// Start a timer unit (schedule service activation)
+    async fn start_timer(&mut self, name: &str, timer: &Timer) -> Result<(), ManagerError> {
+        let state = self
+            .states
+            .get_mut(name)
+            .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
+
+        if state.is_active() {
+            return Err(ManagerError::AlreadyActive(name.to_string()));
+        }
+
+        state.set_starting();
+
+        log::info!("Starting timer {}", name);
+
+        // Calculate next trigger time
+        let next_trigger = timer_scheduler::calculate_next_trigger(timer, self.boot_time);
+
+        if let Some(delay) = next_trigger {
+            let service_name = timer.service_name();
+            let timer_name = name.to_string();
+            let tx = self.timer_tx.clone();
+
+            log::debug!("{}: scheduling to fire in {:?}", name, delay);
+
+            // Spawn timer watcher task
+            tokio::spawn(async move {
+                timer_scheduler::watch_timer(timer_name, service_name, delay, tx).await;
+            });
+        } else {
+            log::debug!("{}: no trigger configured, timer idle", name);
+        }
+
+        // Mark as active
+        if let Some(state) = self.states.get_mut(name) {
+            state.set_running(0);
+        }
+
+        log::info!("{} active", name);
+        Ok(())
+    }
+
+    /// Stop a timer unit
+    async fn stop_timer(&mut self, name: &str) -> Result<(), ManagerError> {
+        let state = self
+            .states
+            .get_mut(name)
+            .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
+
+        if !state.is_active() {
+            return Err(ManagerError::NotActive(name.to_string()));
+        }
+
+        state.set_stopping();
+
+        log::info!("Stopping timer {}", name);
+
+        // Timer tasks will complete naturally or on next fire
+        // For now, we just mark the timer as stopped
+
+        if let Some(state) = self.states.get_mut(name) {
+            state.set_stopped(0);
+        }
+
+        log::info!("{} stopped", name);
+        Ok(())
+    }
+
+    /// Take the timer fired receiver (for use in event loops)
+    pub fn take_timer_rx(&mut self) -> Option<mpsc::Receiver<timer_scheduler::TimerFired>> {
+        self.timer_rx.take()
+    }
+
+    /// Process a timer fired message (start the associated service)
+    pub async fn handle_timer_fired(
+        &mut self,
+        fired: timer_scheduler::TimerFired,
+    ) -> Result<(), ManagerError> {
+        log::info!(
+            "Timer fired: {} triggered by {}",
+            fired.service_name,
+            fired.timer_name
+        );
+
+        // Check if service is already running
+        if let Some(state) = self.states.get(&fired.service_name) {
+            if state.is_active() {
+                log::debug!(
+                    "{} already running, skipping timer activation",
+                    fired.service_name
+                );
+                // Reschedule the timer for next trigger
+                self.reschedule_timer(&fired.timer_name).await;
+                return Ok(());
+            }
+        }
+
+        // Start the service
+        let result = self.start(&fired.service_name).await;
+
+        // Reschedule the timer for next trigger (for repeating timers)
+        self.reschedule_timer(&fired.timer_name).await;
+
+        result
+    }
+
+    /// Reschedule a timer after it fires
+    async fn reschedule_timer(&mut self, timer_name: &str) {
+        if let Some(unit) = self.units.get(timer_name).cloned() {
+            if let Some(timer) = unit.as_timer() {
+                // Check for repeating timer conditions (OnUnitActiveSec, OnCalendar)
+                let should_repeat = timer.timer.on_unit_active_sec.is_some()
+                    || !timer.timer.on_calendar.is_empty();
+
+                if should_repeat {
+                    if let Some(delay) = timer_scheduler::calculate_next_trigger(timer, self.boot_time) {
+                        let service_name = timer.service_name();
+                        let timer_name = timer_name.to_string();
+                        let tx = self.timer_tx.clone();
+
+                        log::debug!("{}: rescheduling to fire in {:?}", timer_name, delay);
+
+                        tokio::spawn(async move {
+                            timer_scheduler::watch_timer(timer_name, service_name, delay, tx).await;
+                        });
+                    }
+                }
+            }
+        }
     }
 
     /// Restart a service (stop then start)

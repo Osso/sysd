@@ -414,19 +414,27 @@ impl StdOutput {
     }
 }
 
-/// Parse duration from systemd format (e.g., "5s", "100ms", "1min")
+/// Parse duration from systemd format (e.g., "5s", "100ms", "1min", "1d", "1w")
 pub fn parse_duration(s: &str) -> Option<Duration> {
     let s = s.trim();
 
-    // Try common suffixes
+    // Try common suffixes (order matters: check longer suffixes first)
     if let Some(n) = s.strip_suffix("ms") {
         n.parse().ok().map(Duration::from_millis)
-    } else if let Some(n) = s.strip_suffix("s") {
-        n.parse().ok().map(Duration::from_secs)
     } else if let Some(n) = s.strip_suffix("min") {
         n.parse::<u64>().ok().map(|m| Duration::from_secs(m * 60))
-    } else if let Some(n) = s.strip_suffix("h") {
+    } else if let Some(n) = s.strip_suffix("sec") {
+        n.parse().ok().map(Duration::from_secs)
+    } else if let Some(n) = s.strip_suffix("week") {
+        n.parse::<u64>().ok().map(|w| Duration::from_secs(w * 7 * 86400))
+    } else if let Some(n) = s.strip_suffix('s') {
+        n.parse().ok().map(Duration::from_secs)
+    } else if let Some(n) = s.strip_suffix('h') {
         n.parse::<u64>().ok().map(|h| Duration::from_secs(h * 3600))
+    } else if let Some(n) = s.strip_suffix('d') {
+        n.parse::<u64>().ok().map(|d| Duration::from_secs(d * 86400))
+    } else if let Some(n) = s.strip_suffix('w') {
+        n.parse::<u64>().ok().map(|w| Duration::from_secs(w * 7 * 86400))
     } else {
         // Bare number = seconds
         s.parse().ok().map(Duration::from_secs)

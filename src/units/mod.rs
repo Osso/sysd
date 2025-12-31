@@ -8,6 +8,7 @@ mod service;
 mod slice;
 mod socket;
 mod target;
+mod timer;
 mod unit;
 
 pub use mount::Mount;
@@ -16,6 +17,7 @@ pub use service::*;
 pub use slice::Slice;
 pub use socket::{ListenType, Listener, Socket, SocketSection};
 pub use target::Target;
+pub use timer::{CalendarSpec, Timer, TimerSection};
 pub use unit::Unit;
 
 use std::path::{Path, PathBuf};
@@ -894,6 +896,165 @@ pub async fn load_socket(path: &Path) -> Result<Socket, ParseError> {
     parse_socket(name, &parsed)
 }
 
+/// Convert parsed INI data into a typed Timer
+pub fn parse_timer(name: &str, parsed: &ParsedFile) -> Result<Timer, ParseError> {
+    let mut tmr = Timer::new(name.to_string());
+
+    // [Unit] section
+    if let Some(unit) = parsed.get("[Unit]") {
+        if let Some(vals) = unit.get("DESCRIPTION") {
+            tmr.unit.description = vals.first().map(|(_, v)| v.clone());
+        }
+        if let Some(vals) = unit.get("AFTER") {
+            tmr.unit.after = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("BEFORE") {
+            tmr.unit.before = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("REQUIRES") {
+            tmr.unit.requires = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("WANTS") {
+            tmr.unit.wants = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONFLICTS") {
+            tmr.unit.conflicts = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONPATHEXISTS") {
+            tmr.unit.condition_path_exists = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONDIRECTORYNOTEMPTY") {
+            tmr.unit.condition_directory_not_empty =
+                vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("DEFAULTDEPENDENCIES") {
+            if let Some((_, s)) = vals.first() {
+                tmr.unit.default_dependencies =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+    }
+
+    // [Timer] section
+    if let Some(timer) = parsed.get("[Timer]") {
+        // Calendar-based triggers
+        if let Some(vals) = timer.get("ONCALENDAR") {
+            for (_, v) in vals {
+                tmr.timer.on_calendar.push(CalendarSpec::parse(v));
+            }
+        }
+
+        // Monotonic timers
+        if let Some(vals) = timer.get("ONBOOTSEC") {
+            if let Some((_, s)) = vals.first() {
+                tmr.timer.on_boot_sec = parse_duration(s);
+            }
+        }
+        if let Some(vals) = timer.get("ONSTARTUPSEC") {
+            if let Some((_, s)) = vals.first() {
+                tmr.timer.on_startup_sec = parse_duration(s);
+            }
+        }
+        if let Some(vals) = timer.get("ONACTIVESEC") {
+            if let Some((_, s)) = vals.first() {
+                tmr.timer.on_active_sec = parse_duration(s);
+            }
+        }
+        if let Some(vals) = timer.get("ONUNITACTIVESEC") {
+            if let Some((_, s)) = vals.first() {
+                tmr.timer.on_unit_active_sec = parse_duration(s);
+            }
+        }
+        if let Some(vals) = timer.get("ONUNITINACTIVESEC") {
+            if let Some((_, s)) = vals.first() {
+                tmr.timer.on_unit_inactive_sec = parse_duration(s);
+            }
+        }
+
+        // Accuracy/delay settings
+        if let Some(vals) = timer.get("ACCURACYSEC") {
+            if let Some((_, s)) = vals.first() {
+                if let Some(d) = parse_duration(s) {
+                    tmr.timer.accuracy_sec = d;
+                }
+            }
+        }
+        if let Some(vals) = timer.get("RANDOMIZEDDELAYSEC") {
+            if let Some((_, s)) = vals.first() {
+                tmr.timer.randomized_delay_sec = parse_duration(s);
+            }
+        }
+
+        // Persistent
+        if let Some(vals) = timer.get("PERSISTENT") {
+            if let Some((_, s)) = vals.first() {
+                tmr.timer.persistent =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+
+        // Wake system
+        if let Some(vals) = timer.get("WAKESYSTEM") {
+            if let Some((_, s)) = vals.first() {
+                tmr.timer.wake_system =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+
+        // Clock/timezone change triggers
+        if let Some(vals) = timer.get("ONCLOCKCHANGE") {
+            if let Some((_, s)) = vals.first() {
+                tmr.timer.on_clock_change =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = timer.get("ONTIMEZONECHANGE") {
+            if let Some((_, s)) = vals.first() {
+                tmr.timer.on_timezone_change =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+
+        // Unit to activate
+        if let Some(vals) = timer.get("UNIT") {
+            tmr.timer.unit = vals.first().map(|(_, v)| v.clone());
+        }
+    }
+
+    // [Install] section
+    if let Some(install) = parsed.get("[Install]") {
+        if let Some(vals) = install.get("WANTEDBY") {
+            tmr.install.wanted_by = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = install.get("REQUIREDBY") {
+            tmr.install.required_by = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = install.get("ALSO") {
+            tmr.install.also = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = install.get("ALIAS") {
+            tmr.install.alias = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+    }
+
+    Ok(tmr)
+}
+
+/// Parse a timer file from disk
+pub async fn load_timer(path: &Path) -> Result<Timer, ParseError> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    let mut parsed = parse_unit_file(path).await?;
+
+    // Load and merge drop-in files
+    load_dropins(path, &mut parsed).await;
+
+    parse_timer(name, &parsed)
+}
+
 /// Read unit names from a .wants directory
 fn read_wants_dir(path: &Path) -> Vec<String> {
     let mut units = Vec::new();
@@ -910,6 +1071,7 @@ fn read_wants_dir(path: &Path) -> Vec<String> {
                     || name.ends_with(".socket")
                     || name.ends_with(".mount")
                     || name.ends_with(".slice")
+                    || name.ends_with(".timer")
                 {
                     units.push(name.to_string());
                 }
@@ -944,6 +1106,10 @@ pub async fn load_unit(path: &Path) -> Result<Unit, ParseError> {
         Some("socket") => {
             let socket = load_socket(path).await?;
             Ok(Unit::Socket(socket))
+        }
+        Some("timer") => {
+            let timer = load_timer(path).await?;
+            Ok(Unit::Timer(timer))
         }
         _ => Err(ParseError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -1601,5 +1767,150 @@ ListenDatagram=/run/systemd/journal/syslog
 
         assert_eq!(sock.socket.listeners[0].listen_type, ListenType::Datagram);
         assert_eq!(sock.socket.listeners[0].address, "/run/systemd/journal/syslog");
+    }
+
+    #[test]
+    fn test_parse_timer_tmpfiles_clean() {
+        let content = r#"
+[Unit]
+Description=Daily Cleanup of Temporary Directories
+ConditionPathExists=!/etc/initrd-release
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1d
+"#;
+        let parsed = parse_file(content).unwrap();
+        let tmr = parse_timer("systemd-tmpfiles-clean.timer", &parsed).unwrap();
+
+        assert_eq!(tmr.name, "systemd-tmpfiles-clean.timer");
+        assert_eq!(tmr.unit.description, Some("Daily Cleanup of Temporary Directories".into()));
+        assert_eq!(tmr.timer.on_boot_sec, Some(std::time::Duration::from_secs(15 * 60)));
+        assert_eq!(tmr.timer.on_unit_active_sec, Some(std::time::Duration::from_secs(86400)));
+        assert_eq!(tmr.service_name(), "systemd-tmpfiles-clean.service");
+    }
+
+    #[test]
+    fn test_parse_timer_weekly() {
+        let content = r#"
+[Unit]
+Description=Discard unused filesystem blocks once a week
+
+[Timer]
+OnCalendar=weekly
+AccuracySec=1h
+Persistent=true
+RandomizedDelaySec=100min
+
+[Install]
+WantedBy=timers.target
+"#;
+        let parsed = parse_file(content).unwrap();
+        let tmr = parse_timer("fstrim.timer", &parsed).unwrap();
+
+        assert_eq!(tmr.timer.on_calendar.len(), 1);
+        assert!(tmr.timer.on_calendar[0].is_weekly());
+        assert_eq!(tmr.timer.accuracy_sec, std::time::Duration::from_secs(3600));
+        assert!(tmr.timer.persistent);
+        assert_eq!(tmr.timer.randomized_delay_sec, Some(std::time::Duration::from_secs(6000)));
+        assert!(tmr.install.wanted_by.contains(&"timers.target".into()));
+    }
+
+    #[test]
+    fn test_parse_timer_daily() {
+        let content = r#"
+[Unit]
+Description=Daily verification of password and group files
+
+[Timer]
+OnCalendar=daily
+AccuracySec=12h
+Persistent=true
+"#;
+        let parsed = parse_file(content).unwrap();
+        let tmr = parse_timer("shadow.timer", &parsed).unwrap();
+
+        assert!(tmr.timer.on_calendar[0].is_daily());
+        assert_eq!(tmr.timer.accuracy_sec, std::time::Duration::from_secs(12 * 3600));
+        assert!(tmr.timer.persistent);
+    }
+
+    #[test]
+    fn test_parse_timer_hourly() {
+        let content = r#"
+[Timer]
+OnCalendar=*-*-* *:00:00
+RandomizedDelaySec=1h
+Persistent=true
+"#;
+        let parsed = parse_file(content).unwrap();
+        let tmr = parse_timer("fwupd-refresh.timer", &parsed).unwrap();
+
+        assert_eq!(tmr.timer.on_calendar.len(), 1);
+        match &tmr.timer.on_calendar[0] {
+            CalendarSpec::Full(s) => assert_eq!(s, "*-*-* *:00:00"),
+            _ => panic!("Expected Full calendar spec"),
+        }
+        assert!(tmr.timer.persistent);
+    }
+
+    #[test]
+    fn test_parse_timer_with_unit() {
+        let content = r#"
+[Timer]
+OnCalendar=weekly
+Unit=my-special.service
+"#;
+        let parsed = parse_file(content).unwrap();
+        let tmr = parse_timer("my-timer.timer", &parsed).unwrap();
+
+        assert_eq!(tmr.timer.unit, Some("my-special.service".into()));
+        assert_eq!(tmr.service_name(), "my-special.service");
+    }
+
+    #[test]
+    fn test_calendar_spec_parse() {
+        // Named shortcuts
+        assert!(matches!(CalendarSpec::parse("daily"), CalendarSpec::Named(s) if s == "daily"));
+        assert!(matches!(CalendarSpec::parse("weekly"), CalendarSpec::Named(s) if s == "weekly"));
+        assert!(matches!(CalendarSpec::parse("monthly"), CalendarSpec::Named(s) if s == "monthly"));
+
+        // Day of week
+        assert!(matches!(CalendarSpec::parse("Sat"), CalendarSpec::DayOfWeek(_)));
+        assert!(matches!(CalendarSpec::parse("Sun"), CalendarSpec::DayOfWeek(_)));
+
+        // Time only
+        match CalendarSpec::parse("4:10") {
+            CalendarSpec::Time { hour, minute, second } => {
+                assert_eq!(hour, 4);
+                assert_eq!(minute, 10);
+                assert_eq!(second, 0);
+            }
+            _ => panic!("Expected Time spec"),
+        }
+
+        // Full expression
+        assert!(matches!(CalendarSpec::parse("*-*-* *:00:00"), CalendarSpec::Full(_)));
+    }
+
+    #[test]
+    fn test_timer_is_monotonic() {
+        let content = r#"
+[Timer]
+OnBootSec=15min
+"#;
+        let parsed = parse_file(content).unwrap();
+        let tmr = parse_timer("boot.timer", &parsed).unwrap();
+        assert!(tmr.is_monotonic());
+        assert!(!tmr.is_realtime());
+
+        let content = r#"
+[Timer]
+OnCalendar=daily
+"#;
+        let parsed = parse_file(content).unwrap();
+        let tmr = parse_timer("daily.timer", &parsed).unwrap();
+        assert!(!tmr.is_monotonic());
+        assert!(tmr.is_realtime());
     }
 }

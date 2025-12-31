@@ -37,6 +37,9 @@ libc = "0.2"
 clap = { version = "4.5", features = ["derive"] }
 dirs = "6.0"
 
+# Time
+chrono = "0.4"
+
 # IPC
 peercred-ipc = { git = "https://github.com/Osso/peercred-ipc" }
 rmp-serde = "1"
