@@ -153,20 +153,35 @@ pub struct Manager {
 }
 
 impl Manager {
-    /// Create a new service manager
+    /// Create a new service manager for system mode
     pub fn new() -> Self {
+        Self::with_mode(false)
+    }
+
+    /// Create a new service manager for user mode
+    pub fn new_user() -> Self {
+        Self::with_mode(true)
+    }
+
+    /// Create a service manager with explicit mode
+    fn with_mode(user_mode: bool) -> Self {
         // Try to initialize cgroup manager (may fail if not root or cgroups unavailable)
-        let cgroup_manager = match CgroupManager::new() {
-            Ok(mgr) => {
-                log::debug!("Cgroup manager initialized");
-                Some(mgr)
-            }
-            Err(e) => {
-                log::debug!(
-                    "Cgroup manager unavailable: {} (running without cgroups)",
-                    e
-                );
-                None
+        let cgroup_manager = if user_mode {
+            // User mode doesn't typically have cgroup write access
+            None
+        } else {
+            match CgroupManager::new() {
+                Ok(mgr) => {
+                    log::debug!("Cgroup manager initialized");
+                    Some(mgr)
+                }
+                Err(e) => {
+                    log::debug!(
+                        "Cgroup manager unavailable: {} (running without cgroups)",
+                        e
+                    );
+                    None
+                }
             }
         };
 
@@ -176,14 +191,21 @@ impl Manager {
         // Create timer fired channel
         let (timer_tx, timer_rx) = mpsc::channel(32);
 
+        // Set unit paths based on mode
+        let unit_paths = if user_mode {
+            Self::user_unit_paths()
+        } else {
+            vec![
+                PathBuf::from("/etc/systemd/system"),
+                PathBuf::from("/usr/lib/systemd/system"),
+            ]
+        };
+
         Self {
             units: HashMap::new(),
             states: HashMap::new(),
             processes: HashMap::new(),
-            unit_paths: vec![
-                PathBuf::from("/etc/systemd/system"),
-                PathBuf::from("/usr/lib/systemd/system"),
-            ],
+            unit_paths,
             notify_listener: None,
             notify_rx: None,
             waiting_ready: HashMap::new(),
@@ -200,6 +222,74 @@ impl Manager {
             timer_rx: Some(timer_rx),
             boot_time: std::time::Instant::now(),
         }
+    }
+
+    /// Get unit search paths for user mode
+    fn user_unit_paths() -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+
+        // User-specific config directory (highest priority)
+        if let Some(config_dir) = dirs::config_dir() {
+            paths.push(config_dir.join("systemd/user"));
+        }
+        // Also check XDG_CONFIG_HOME or fallback to ~/.config
+        if let Ok(home) = std::env::var("HOME") {
+            let user_config = PathBuf::from(&home).join(".config/systemd/user");
+            if !paths.contains(&user_config) {
+                paths.push(user_config);
+            }
+        }
+
+        // System-wide user unit directories
+        paths.push(PathBuf::from("/etc/systemd/user"));
+        paths.push(PathBuf::from("/usr/lib/systemd/user"));
+
+        // XDG data directories for user units
+        if let Some(data_dir) = dirs::data_dir() {
+            paths.push(data_dir.join("systemd/user"));
+        }
+
+        paths
+    }
+
+    /// Check if user has lingering enabled
+    pub fn is_lingering(username: &str) -> bool {
+        std::path::Path::new(&format!("/var/lib/systemd/linger/{}", username)).exists()
+    }
+
+    /// Get the current user's runtime directory
+    pub fn user_runtime_dir() -> Option<PathBuf> {
+        std::env::var("XDG_RUNTIME_DIR")
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| {
+                let uid = unsafe { libc::getuid() };
+                let path = PathBuf::from(format!("/run/user/{}", uid));
+                if path.exists() {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// Ensure XDG_RUNTIME_DIR exists and has correct permissions
+    pub fn ensure_runtime_dir() -> std::io::Result<PathBuf> {
+        let uid = unsafe { libc::getuid() };
+        let runtime_dir = PathBuf::from(format!("/run/user/{}", uid));
+
+        if !runtime_dir.exists() {
+            std::fs::create_dir_all(&runtime_dir)?;
+            // Set permissions to 0700 (owner only)
+            std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+
+        // Set environment variable if not already set
+        if std::env::var("XDG_RUNTIME_DIR").is_err() {
+            std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
+        }
+
+        Ok(runtime_dir)
     }
 
     /// Check if cgroup management is available

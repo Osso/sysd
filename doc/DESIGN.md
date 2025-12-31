@@ -479,12 +479,14 @@ Critical for boot - dbus.socket must work for most services.
 | ConditionFirstBoot= | low | ✓ done | 2 uses, first boot detection (/run/systemd/first-boot or machine-id) |
 | ConditionNeedsUpdate= | low | ✓ done | 6 uses, /etc or /var mtime vs /var/lib/systemd/update-done.d/ flag |
 
-### M13: User Sessions
+### M13: User Sessions ✓
 For full desktop support (systemd --user equivalent).
-- [ ] Per-user service manager instances
-- [ ] XDG_RUNTIME_DIR management
-- [ ] User slice (user-1000.slice)
-- [ ] Lingering support
+- [x] Per-user service manager instances (`sysd --user`)
+- [x] User unit search paths (~/.config/systemd/user, /etc/systemd/user, /usr/lib/systemd/user)
+- [x] XDG_RUNTIME_DIR management (ensure /run/user/<uid> exists)
+- [x] User socket path (/run/user/<uid>/sysd.sock)
+- [x] Lingering support check (Manager::is_lingering)
+- [x] sysdctl --user support
 
 ### M14: Logind Scope Support
 Complete StartTransientUnit for logind session scopes.

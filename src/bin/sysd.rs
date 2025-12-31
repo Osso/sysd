@@ -7,6 +7,11 @@
 //! - Mounts essential filesystems
 //! - Reaps zombie processes
 //! - Handles signals for shutdown
+//!
+//! User mode (--user):
+//! - Runs per-user service manager
+//! - Uses ~/.config/systemd/user and /usr/lib/systemd/user
+//! - Socket at /run/user/<uid>/sysd.sock
 
 use clap::Parser;
 use log::info;
@@ -17,7 +22,7 @@ use peercred_ipc::{CallerInfo, Connection, Server};
 use sysd::dbus::DbusServer;
 use sysd::manager::Manager;
 use sysd::pid1::{self, ShutdownType, SignalHandler, SysdSignal, ZombieReaper};
-use sysd::protocol::{Request, Response, UnitInfo, SOCKET_PATH};
+use sysd::protocol::{socket_path, Request, Response, UnitInfo};
 
 #[derive(Parser)]
 #[command(name = "sysd")]
@@ -30,6 +35,10 @@ struct Args {
     /// Run in foreground (don't daemonize)
     #[arg(long, short = 'f')]
     foreground: bool,
+
+    /// Run as user service manager (like systemd --user)
+    #[arg(long)]
+    user: bool,
 }
 
 /// Shared manager state accessible from IPC and D-Bus
@@ -37,11 +46,18 @@ type SharedManager = Arc<RwLock<Manager>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _args = Args::parse();
+    let args = Args::parse();
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let is_pid1 = pid1::is_pid1();
+    let user_mode = args.user;
+
+    // User mode validation
+    if user_mode && is_pid1 {
+        log::error!("Cannot run in --user mode as PID 1");
+        std::process::exit(1);
+    }
 
     // PID 1: Initialize essential filesystems and environment
     if is_pid1 {
@@ -51,7 +67,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let mut manager = Manager::new();
+    // User mode: Ensure runtime directory exists
+    if user_mode {
+        if let Err(e) = Manager::ensure_runtime_dir() {
+            log::warn!("Failed to ensure runtime directory: {}", e);
+        }
+    }
+
+    // Create manager in appropriate mode
+    let mut manager = if user_mode {
+        info!("Starting user service manager");
+        Manager::new_user()
+    } else {
+        Manager::new()
+    };
 
     // Initialize notify socket for Type=notify services
     if let Err(e) = manager.init_notify_socket() {
@@ -64,18 +93,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manager: SharedManager = Arc::new(RwLock::new(manager));
 
     // Start D-Bus server (shares manager with IPC)
-    let _dbus_server = match DbusServer::new(Arc::clone(&manager)).await {
-        Ok(server) => {
-            info!("D-Bus interface available at org.freedesktop.systemd1");
-            Some(server)
+    // User mode uses session bus, system mode uses system bus
+    let _dbus_server = if !user_mode {
+        match DbusServer::new(Arc::clone(&manager)).await {
+            Ok(server) => {
+                info!("D-Bus interface available at org.freedesktop.systemd1");
+                Some(server)
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to start D-Bus server: {} (logind integration unavailable)",
+                    e
+                );
+                None
+            }
         }
-        Err(e) => {
-            log::warn!(
-                "Failed to start D-Bus server: {} (logind integration unavailable)",
-                e
-            );
-            None
-        }
+    } else {
+        // TODO: User mode D-Bus on session bus
+        log::debug!("D-Bus not enabled in user mode (not yet implemented)");
+        None
     };
 
     // PID 1: Set up signal handler for shutdown/reboot
@@ -153,8 +189,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let server = Server::bind(SOCKET_PATH)?;
-    info!("sysd listening on {}", SOCKET_PATH);
+    // Determine socket path based on mode
+    let sock_path = socket_path(user_mode);
+    let server = Server::bind(&sock_path)?;
+    info!("sysd{} listening on {}", if user_mode { " (user)" } else { "" }, sock_path);
 
     loop {
         match server.accept().await {

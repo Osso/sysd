@@ -1,16 +1,21 @@
 //! sysdctl - CLI for sysd
 //!
 //! Communicates with the sysd daemon over /run/sysd.sock.
+//! Use --user to communicate with the user service manager.
 
 use clap::{Parser, Subcommand};
 use peercred_ipc::Client;
 use std::path::PathBuf;
-use sysd::protocol::{Request, Response, SOCKET_PATH};
+use sysd::protocol::{socket_path, Request, Response};
 
 #[derive(Parser)]
 #[command(name = "sysdctl")]
 #[command(about = "Control the sysd init system")]
 struct Args {
+    /// Connect to user service manager instead of system
+    #[arg(long, global = true)]
+    user: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -96,6 +101,7 @@ enum Command {
 
 fn main() {
     let args = Args::parse();
+    let user_mode = args.user;
 
     // Parse is local-only
     if let Command::Parse { path } = args.command {
@@ -104,7 +110,7 @@ fn main() {
     }
 
     let request = match args.command {
-        Command::List { user, unit_type } => Request::List { user, unit_type },
+        Command::List { user: list_user, unit_type } => Request::List { user: list_user || user_mode, unit_type },
         Command::Start { name } => Request::Start { name },
         Command::Stop { name } => Request::Stop { name },
         Command::Restart { name } => Request::Restart { name },
@@ -120,12 +126,20 @@ fn main() {
         Command::Parse { .. } => unreachable!(),
     };
 
-    match Client::call(SOCKET_PATH, &request) {
+    // Use appropriate socket path based on --user flag
+    let sock_path = socket_path(user_mode);
+
+    match Client::call(&sock_path, &request) {
         Ok(response) => print_response(response),
         Err(e) => {
             if e.to_string().contains("connect") || e.to_string().contains("No such file") {
-                eprintln!("sysdctl: daemon not running");
-                eprintln!("  start with: sudo sysd");
+                if user_mode {
+                    eprintln!("sysdctl: user daemon not running");
+                    eprintln!("  start with: sysd --user");
+                } else {
+                    eprintln!("sysdctl: daemon not running");
+                    eprintln!("  start with: sudo sysd");
+                }
             } else {
                 eprintln!("sysdctl: {}", e);
             }

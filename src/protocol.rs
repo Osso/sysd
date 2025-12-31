@@ -4,7 +4,24 @@
 
 use serde::{Deserialize, Serialize};
 
+/// System socket path (requires root)
 pub const SOCKET_PATH: &str = "/run/sysd.sock";
+
+/// Get socket path for user mode
+/// Returns /run/user/<uid>/sysd.sock for non-root users
+pub fn user_socket_path() -> String {
+    let uid = unsafe { libc::getuid() };
+    format!("/run/user/{}/sysd.sock", uid)
+}
+
+/// Get socket path based on mode
+pub fn socket_path(user_mode: bool) -> String {
+    if user_mode {
+        user_socket_path()
+    } else {
+        SOCKET_PATH.to_string()
+    }
+}
 
 /// Request from CLI to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +116,24 @@ mod tests {
             let decoded: Request = rmp_serde::from_slice(&encoded).unwrap();
             assert_eq!(format!("{:?}", req), format!("{:?}", decoded));
         }
+    }
+
+    #[test]
+    fn test_socket_path() {
+        // System mode uses constant path
+        assert_eq!(socket_path(false), SOCKET_PATH);
+
+        // User mode uses /run/user/<uid>/sysd.sock
+        let user_path = socket_path(true);
+        assert!(user_path.starts_with("/run/user/"));
+        assert!(user_path.ends_with("/sysd.sock"));
+    }
+
+    #[test]
+    fn test_user_socket_path() {
+        let path = user_socket_path();
+        let uid = unsafe { libc::getuid() };
+        assert_eq!(path, format!("/run/user/{}/sysd.sock", uid));
     }
 
     #[test]
