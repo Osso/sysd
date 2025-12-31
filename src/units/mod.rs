@@ -58,6 +58,27 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
                     matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
             }
         }
+        if let Some(vals) = unit.get("CONDITIONVIRTUALIZATION") {
+            svc.unit.condition_virtualization = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONCAPABILITY") {
+            svc.unit.condition_capability = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONKERNELCOMMANDLINE") {
+            svc.unit.condition_kernel_command_line = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONSECURITY") {
+            svc.unit.condition_security = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONFIRSTBOOT") {
+            if let Some((_, s)) = vals.first() {
+                svc.unit.condition_first_boot =
+                    Some(matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on"));
+            }
+        }
+        if let Some(vals) = unit.get("CONDITIONNEEDSUPDATE") {
+            svc.unit.condition_needs_update = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
     }
 
     // [Service] section
@@ -475,6 +496,27 @@ pub fn parse_target(name: &str, parsed: &ParsedFile) -> Result<Target, ParseErro
                     matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
             }
         }
+        if let Some(vals) = unit.get("CONDITIONVIRTUALIZATION") {
+            target.unit.condition_virtualization = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONCAPABILITY") {
+            target.unit.condition_capability = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONKERNELCOMMANDLINE") {
+            target.unit.condition_kernel_command_line = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONSECURITY") {
+            target.unit.condition_security = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONFIRSTBOOT") {
+            if let Some((_, s)) = vals.first() {
+                target.unit.condition_first_boot =
+                    Some(matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on"));
+            }
+        }
+        if let Some(vals) = unit.get("CONDITIONNEEDSUPDATE") {
+            target.unit.condition_needs_update = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
     }
 
     Ok(target)
@@ -546,6 +588,27 @@ pub fn parse_slice(name: &str, parsed: &ParsedFile) -> Result<Slice, ParseError>
                     matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
             }
         }
+        if let Some(vals) = unit.get("CONDITIONVIRTUALIZATION") {
+            slice.unit.condition_virtualization = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONCAPABILITY") {
+            slice.unit.condition_capability = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONKERNELCOMMANDLINE") {
+            slice.unit.condition_kernel_command_line = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONSECURITY") {
+            slice.unit.condition_security = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONFIRSTBOOT") {
+            if let Some((_, s)) = vals.first() {
+                slice.unit.condition_first_boot =
+                    Some(matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on"));
+            }
+        }
+        if let Some(vals) = unit.get("CONDITIONNEEDSUPDATE") {
+            slice.unit.condition_needs_update = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
     }
 
     Ok(slice)
@@ -602,6 +665,27 @@ pub fn parse_mount(name: &str, parsed: &ParsedFile) -> Result<Mount, ParseError>
                 mnt.unit.default_dependencies =
                     matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
             }
+        }
+        if let Some(vals) = unit.get("CONDITIONVIRTUALIZATION") {
+            mnt.unit.condition_virtualization = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONCAPABILITY") {
+            mnt.unit.condition_capability = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONKERNELCOMMANDLINE") {
+            mnt.unit.condition_kernel_command_line = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONSECURITY") {
+            mnt.unit.condition_security = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONFIRSTBOOT") {
+            if let Some((_, s)) = vals.first() {
+                mnt.unit.condition_first_boot =
+                    Some(matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on"));
+            }
+        }
+        if let Some(vals) = unit.get("CONDITIONNEEDSUPDATE") {
+            mnt.unit.condition_needs_update = vals.iter().map(|(_, v)| v.clone()).collect();
         }
     }
 
@@ -730,6 +814,27 @@ pub fn parse_socket(name: &str, parsed: &ParsedFile) -> Result<Socket, ParseErro
                 sock.unit.default_dependencies =
                     matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
             }
+        }
+        if let Some(vals) = unit.get("CONDITIONVIRTUALIZATION") {
+            sock.unit.condition_virtualization = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONCAPABILITY") {
+            sock.unit.condition_capability = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONKERNELCOMMANDLINE") {
+            sock.unit.condition_kernel_command_line = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONSECURITY") {
+            sock.unit.condition_security = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONFIRSTBOOT") {
+            if let Some((_, s)) = vals.first() {
+                sock.unit.condition_first_boot =
+                    Some(matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on"));
+            }
+        }
+        if let Some(vals) = unit.get("CONDITIONNEEDSUPDATE") {
+            sock.unit.condition_needs_update = vals.iter().map(|(_, v)| v.clone()).collect();
         }
     }
 
@@ -932,6 +1037,27 @@ pub fn parse_timer(name: &str, parsed: &ParsedFile) -> Result<Timer, ParseError>
                 tmr.unit.default_dependencies =
                     matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
             }
+        }
+        if let Some(vals) = unit.get("CONDITIONVIRTUALIZATION") {
+            tmr.unit.condition_virtualization = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONCAPABILITY") {
+            tmr.unit.condition_capability = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONKERNELCOMMANDLINE") {
+            tmr.unit.condition_kernel_command_line = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONSECURITY") {
+            tmr.unit.condition_security = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONDITIONFIRSTBOOT") {
+            if let Some((_, s)) = vals.first() {
+                tmr.unit.condition_first_boot =
+                    Some(matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on"));
+            }
+        }
+        if let Some(vals) = unit.get("CONDITIONNEEDSUPDATE") {
+            tmr.unit.condition_needs_update = vals.iter().map(|(_, v)| v.clone()).collect();
         }
     }
 
@@ -1912,5 +2038,175 @@ OnCalendar=daily
         let tmr = parse_timer("daily.timer", &parsed).unwrap();
         assert!(!tmr.is_monotonic());
         assert!(tmr.is_realtime());
+    }
+
+    #[test]
+    fn test_parse_condition_virtualization() {
+        let content = r#"
+[Unit]
+Description=Service for VMs only
+ConditionVirtualization=vm
+
+[Service]
+ExecStart=/bin/true
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("vm-only.service", &parsed).unwrap();
+
+        assert_eq!(svc.unit.condition_virtualization, vec!["vm"]);
+    }
+
+    #[test]
+    fn test_parse_condition_virtualization_negated() {
+        let content = r#"
+[Unit]
+Description=Not for containers
+ConditionVirtualization=!container
+
+[Service]
+ExecStart=/bin/true
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("no-container.service", &parsed).unwrap();
+
+        assert_eq!(svc.unit.condition_virtualization, vec!["!container"]);
+    }
+
+    #[test]
+    fn test_parse_condition_capability() {
+        let content = r#"
+[Unit]
+Description=Needs CAP_SYS_ADMIN
+ConditionCapability=CAP_SYS_ADMIN
+
+[Service]
+ExecStart=/bin/true
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("admin-cap.service", &parsed).unwrap();
+
+        assert_eq!(svc.unit.condition_capability, vec!["CAP_SYS_ADMIN"]);
+    }
+
+    #[test]
+    fn test_parse_condition_kernel_command_line() {
+        let content = r#"
+[Unit]
+Description=Debug mode service
+ConditionKernelCommandLine=debug
+ConditionKernelCommandLine=!quiet
+
+[Service]
+ExecStart=/bin/true
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("debug.service", &parsed).unwrap();
+
+        assert_eq!(svc.unit.condition_kernel_command_line, vec!["debug", "!quiet"]);
+    }
+
+    #[test]
+    fn test_parse_condition_security() {
+        let content = r#"
+[Unit]
+Description=SELinux service
+ConditionSecurity=selinux
+
+[Service]
+ExecStart=/bin/true
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("selinux.service", &parsed).unwrap();
+
+        assert_eq!(svc.unit.condition_security, vec!["selinux"]);
+    }
+
+    #[test]
+    fn test_parse_condition_first_boot() {
+        let content = r#"
+[Unit]
+Description=First boot setup
+ConditionFirstBoot=yes
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("first-boot.service", &parsed).unwrap();
+
+        assert_eq!(svc.unit.condition_first_boot, Some(true));
+
+        // Test with false value
+        let content2 = r#"
+[Unit]
+Description=Not on first boot
+ConditionFirstBoot=no
+
+[Service]
+ExecStart=/bin/true
+"#;
+        let parsed2 = parse_file(content2).unwrap();
+        let svc2 = parse_service("not-first-boot.service", &parsed2).unwrap();
+
+        assert_eq!(svc2.unit.condition_first_boot, Some(false));
+    }
+
+    #[test]
+    fn test_parse_multiple_conditions() {
+        let content = r#"
+[Unit]
+Description=Complex conditions
+ConditionVirtualization=!container
+ConditionCapability=CAP_NET_ADMIN
+ConditionSecurity=!selinux
+ConditionKernelCommandLine=systemd.unified_cgroup_hierarchy
+
+[Service]
+ExecStart=/bin/true
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("multi-condition.service", &parsed).unwrap();
+
+        assert_eq!(svc.unit.condition_virtualization, vec!["!container"]);
+        assert_eq!(svc.unit.condition_capability, vec!["CAP_NET_ADMIN"]);
+        assert_eq!(svc.unit.condition_security, vec!["!selinux"]);
+        assert_eq!(
+            svc.unit.condition_kernel_command_line,
+            vec!["systemd.unified_cgroup_hierarchy"]
+        );
+    }
+
+    #[test]
+    fn test_parse_condition_needs_update() {
+        let content = r#"
+[Unit]
+Description=Update hwdb
+ConditionNeedsUpdate=/etc
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("hwdb-update.service", &parsed).unwrap();
+
+        assert_eq!(svc.unit.condition_needs_update, vec!["/etc"]);
+
+        // Test with trigger prefix
+        let content2 = r#"
+[Unit]
+Description=Update done
+ConditionNeedsUpdate=|/etc
+ConditionNeedsUpdate=|/var
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+"#;
+        let parsed2 = parse_file(content2).unwrap();
+        let svc2 = parse_service("update-done.service", &parsed2).unwrap();
+
+        assert_eq!(svc2.unit.condition_needs_update, vec!["|/etc", "|/var"]);
     }
 }

@@ -156,6 +156,18 @@ pub struct UnitSection {
     pub conflicts: Vec<String>,
     pub condition_path_exists: Vec<String>,
     pub condition_directory_not_empty: Vec<String>,
+    /// ConditionVirtualization= - check for VM/container environment
+    pub condition_virtualization: Vec<String>,
+    /// ConditionCapability= - check for process capabilities
+    pub condition_capability: Vec<String>,
+    /// ConditionKernelCommandLine= - check /proc/cmdline
+    pub condition_kernel_command_line: Vec<String>,
+    /// ConditionSecurity= - check security framework (selinux, apparmor, etc)
+    pub condition_security: Vec<String>,
+    /// ConditionFirstBoot= - check if first boot
+    pub condition_first_boot: Option<bool>,
+    /// ConditionNeedsUpdate= - check if /etc or /var needs updates
+    pub condition_needs_update: Vec<String>,
     /// If true (default), add implicit deps on basic.target, shutdown.target
     pub default_dependencies: bool,
 }
@@ -171,6 +183,12 @@ impl Default for UnitSection {
             conflicts: Vec::new(),
             condition_path_exists: Vec::new(),
             condition_directory_not_empty: Vec::new(),
+            condition_virtualization: Vec::new(),
+            condition_capability: Vec::new(),
+            condition_kernel_command_line: Vec::new(),
+            condition_security: Vec::new(),
+            condition_first_boot: None,
+            condition_needs_update: Vec::new(),
             default_dependencies: true, // systemd default
         }
     }
