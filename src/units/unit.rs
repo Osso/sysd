@@ -70,6 +70,17 @@ impl Unit {
         matches!(self, Unit::Socket(_))
     }
 
+    /// Get the unit type as a string (service, target, mount, slice, socket)
+    pub fn unit_type(&self) -> &'static str {
+        match self {
+            Unit::Service(_) => "service",
+            Unit::Target(_) => "target",
+            Unit::Mount(_) => "mount",
+            Unit::Slice(_) => "slice",
+            Unit::Socket(_) => "socket",
+        }
+    }
+
     /// Get as service if it is one
     pub fn as_service(&self) -> Option<&Service> {
         match self {

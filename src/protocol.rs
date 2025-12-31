@@ -9,8 +9,11 @@ pub const SOCKET_PATH: &str = "/run/sysd.sock";
 /// Request from CLI to daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
-    /// List all units
-    List { user: bool },
+    /// List all units (optionally filtered by type)
+    List {
+        user: bool,
+        unit_type: Option<String>,
+    },
     /// Start a unit
     Start { name: String },
     /// Stop a unit
@@ -78,7 +81,10 @@ mod tests {
     #[test]
     fn request_roundtrip() {
         let requests = vec![
-            Request::List { user: false },
+            Request::List {
+                user: false,
+                unit_type: None,
+            },
             Request::Start {
                 name: "docker.service".into(),
             },

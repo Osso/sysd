@@ -213,15 +213,23 @@ async fn handle_request(request: Request, manager: &SharedManager) -> Response {
     match request {
         Request::Ping => Response::Pong,
 
-        Request::List { user: _ } => {
+        Request::List { user: _, unit_type } => {
             let mgr = manager.read().await;
             let units: Vec<UnitInfo> = mgr
-                .list()
-                .map(|(name, svc_state)| UnitInfo {
+                .list_units()
+                .into_iter()
+                .filter(|(_, unit, _)| {
+                    unit_type
+                        .as_ref()
+                        .map_or(true, |t| unit.unit_type() == t.as_str())
+                })
+                .map(|(name, unit, state)| UnitInfo {
                     name: name.clone(),
-                    unit_type: "service".into(), // TODO: detect type
-                    state: format!("{:?}", svc_state.active),
-                    description: None, // TODO: get from unit
+                    unit_type: unit.unit_type().into(),
+                    state: state
+                        .map(|s| format!("{:?}", s.active))
+                        .unwrap_or_else(|| "inactive".into()),
+                    description: unit.unit_section().description.clone(),
                 })
                 .collect();
             Response::Units(units)

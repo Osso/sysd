@@ -1601,6 +1601,14 @@ impl Manager {
         self.states.iter()
     }
 
+    /// List all loaded units with their types and states
+    pub fn list_units(&self) -> Vec<(&String, &Unit, Option<&ServiceState>)> {
+        self.units
+            .iter()
+            .map(|(name, unit)| (name, unit, self.states.get(name)))
+            .collect()
+    }
+
     /// Check if unit conditions are met
     /// Returns None if all conditions pass, or Some(reason) if a condition fails
     fn check_conditions(&self, unit: &Unit) -> Option<String> {

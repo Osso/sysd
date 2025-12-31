@@ -22,6 +22,9 @@ enum Command {
         /// Show user units instead of system units
         #[arg(long)]
         user: bool,
+        /// Filter by unit type (service, socket, mount, slice, target)
+        #[arg(short = 't', long = "type")]
+        unit_type: Option<String>,
     },
 
     /// Start a unit
@@ -101,7 +104,7 @@ fn main() {
     }
 
     let request = match args.command {
-        Command::List { user } => Request::List { user },
+        Command::List { user, unit_type } => Request::List { user, unit_type },
         Command::Start { name } => Request::Start { name },
         Command::Stop { name } => Request::Stop { name },
         Command::Restart { name } => Request::Restart { name },
