@@ -84,10 +84,16 @@ enum Command {
     GetBootTarget,
 
     /// Reload unit files from disk
-    ReloadUnitFiles,
+    Reload,
 
     /// Sync units (reload + restart changed)
-    SyncUnits,
+    Sync,
+
+    /// Switch to a target (stop unrelated units)
+    SwitchTarget {
+        /// Target name (e.g., "multi-user.target")
+        target: String,
+    },
 
     /// Parse a unit file locally (doesn't require daemon)
     Parse {
@@ -120,8 +126,9 @@ fn main() {
         Command::Status { name } => Request::Status { name },
         Command::Deps { name } => Request::Deps { name },
         Command::GetBootTarget => Request::GetBootTarget,
-        Command::ReloadUnitFiles => Request::ReloadUnitFiles,
-        Command::SyncUnits => Request::SyncUnits,
+        Command::Reload => Request::ReloadUnitFiles,
+        Command::Sync => Request::SyncUnits,
+        Command::SwitchTarget { target } => Request::SwitchTarget { target },
         Command::Ping => Request::Ping,
         Command::Parse { .. } => unreachable!(),
     };

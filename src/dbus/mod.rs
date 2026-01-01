@@ -8,8 +8,8 @@
 //! - Scope: Abandon method
 
 mod manager;
-mod scope;
-mod unit;
+pub mod scope;
+pub mod unit;
 
 pub use manager::ManagerInterface;
 pub use scope::ScopeInterface;
@@ -36,6 +36,12 @@ impl DbusServer {
             .serve_at("/org/freedesktop/systemd1", manager_iface)?
             .build()
             .await?;
+
+        // Set the D-Bus connection on the Manager for scope registration
+        {
+            let mut mgr = manager.write().await;
+            mgr.set_dbus_connection(connection.clone());
+        }
 
         Ok(Self { connection })
     }

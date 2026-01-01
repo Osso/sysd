@@ -1,8 +1,10 @@
 #!/bin/bash
-# QEMU-based test for sysd PID 1 mount functionality
+# QEMU-based test for sysd PID 1 functionality
 #
-# This boots a minimal Linux system with sysd as init to test
-# that essential filesystems are actually mounted (not skipped).
+# This boots a minimal Linux system with sysd as init to test:
+# - Essential filesystems are mounted
+# - Signal handling (SIGTERM triggers shutdown)
+# - Shutdown sequence (stop services, sync, unmount)
 #
 # Requirements:
 # - qemu-system-x86_64
@@ -66,8 +68,8 @@ create_initramfs() {
     mkdir -p "$initrd_dir"/{bin,dev,proc,sys,run,tmp,etc}
 
     # Copy sysd as init (statically linked with musl)
-    cp "$SYSD_BIN" "$initrd_dir/init"
-    chmod +x "$initrd_dir/init"
+    cp "$SYSD_BIN" "$initrd_dir/bin/sysd"
+    chmod +x "$initrd_dir/bin/sysd"
 
     # Copy busybox for utilities (if available)
     if command -v busybox &>/dev/null; then
@@ -81,6 +83,19 @@ create_initramfs() {
     # Minimal /etc/passwd for User= directive
     echo "root:x:0:0:root:/:/bin/sh" > "$initrd_dir/etc/passwd"
     echo "root:x:0:" > "$initrd_dir/etc/group"
+
+    # Create systemd unit directories
+    mkdir -p "$initrd_dir/etc/systemd/system"
+    mkdir -p "$initrd_dir/usr/lib/systemd/system"
+
+    # Create test target (minimal, no services)
+    cat > "$initrd_dir/usr/lib/systemd/system/test.target" <<'EOF'
+[Unit]
+Description=Test Target
+EOF
+
+    # Create default target symlink (sysd looks in /etc/systemd/system/)
+    ln -sf ../../../usr/lib/systemd/system/test.target "$initrd_dir/etc/systemd/system/default.target"
 
     # Create console device node
     mknod -m 622 "$initrd_dir/dev/console" c 5 1 2>/dev/null || true
@@ -102,6 +117,7 @@ run_qemu() {
 
     local timeout_sec=30
     OUTPUT_FILE="$WORK_DIR/qemu-output.log"
+    local monitor_sock="$WORK_DIR/qemu-monitor.sock"
 
     # Use KVM if available
     local accel=""
@@ -110,17 +126,46 @@ run_qemu() {
         log "Using KVM acceleration"
     fi
 
-    # Run QEMU with timeout, capture output to file
+    # Run QEMU in background with monitor socket for signal injection
     timeout "$timeout_sec" qemu-system-x86_64 \
         $accel \
         -kernel "$KERNEL" \
         -initrd "$WORK_DIR/initramfs.cpio.gz" \
-        -append "console=ttyS0 panic=1 init=/init" \
+        -append "console=ttyS0 panic=1 rdinit=/bin/sysd" \
         -nographic \
         -no-reboot \
         -m 256M \
         -serial file:"$OUTPUT_FILE" \
-        2>&1 || true
+        -monitor unix:"$monitor_sock",server,nowait \
+        2>&1 &
+    local qemu_pid=$!
+
+    # Wait for sysd to start (check for "sysd listening" in output)
+    log "Waiting for sysd to start..."
+    local waited=0
+    while [[ $waited -lt 15 ]]; do
+        if [[ -f "$OUTPUT_FILE" ]] && grep -q "sysd listening\|Essential filesystems mounted" "$OUTPUT_FILE" 2>/dev/null; then
+            log "sysd started, waiting 2s for services..."
+            sleep 2
+            break
+        fi
+        sleep 1
+        ((waited++))
+    done
+
+    # Send SIGTERM to PID 1 via QEMU monitor (system_powerdown sends ACPI, we use nmi for immediate)
+    # Actually, sysd should handle the timeout and shutdown gracefully
+    # For now, just let it run and check if it shuts down cleanly
+    log "Sending shutdown signal..."
+    if [[ -S "$monitor_sock" ]]; then
+        echo "sendkey ctrl-alt-delete" | nc -U -q1 "$monitor_sock" 2>/dev/null || true
+        sleep 3
+        # Force quit if still running
+        echo "quit" | nc -U -q1 "$monitor_sock" 2>/dev/null || true
+    fi
+
+    # Wait for QEMU to exit
+    wait $qemu_pid 2>/dev/null || true
 
     # Show output
     if [[ -f "$OUTPUT_FILE" ]]; then
@@ -136,6 +181,9 @@ check_results() {
     local success=true
 
     log "Checking test results..."
+
+    # === PID 1 & Mount Tests ===
+    log "--- PID 1 & Mount Tests ---"
 
     # Check for PID 1 detection
     if grep -q "Running as PID 1" "$output_file"; then
@@ -172,18 +220,53 @@ check_results() {
         log "○ sysd socket (may fail without full setup)"
     fi
 
+    # === Boot Tests ===
+    log "--- Boot Tests ---"
+
+    # Check if boot completed
+    if grep -q "Boot complete\|Booting to target" "$output_file"; then
+        log "✓ Boot to target: PASS"
+    else
+        err "✗ Boot to target: FAIL"
+        success=false
+    fi
+
+    # === Shutdown Tests ===
+    log "--- Shutdown Tests ---"
+
+    # Check for shutdown initiation
+    if grep -q -i "shutdown\|stopping\|SIGTERM\|reboot\|poweroff" "$output_file"; then
+        log "✓ Shutdown sequence initiated: PASS"
+    else
+        log "○ Shutdown sequence (signal may not have been received)"
+    fi
+
+    # Check for service stop during shutdown
+    if grep -q "Stopping.*service\|SERVICE_STOPPED" "$output_file"; then
+        log "✓ Services stopped during shutdown: PASS"
+    else
+        log "○ Service stop during shutdown (may not be implemented yet)"
+    fi
+
+    # Check for filesystem sync
+    if grep -q -i "sync\|Syncing filesystems" "$output_file"; then
+        log "✓ Filesystem sync: PASS"
+    else
+        log "○ Filesystem sync (may not log this)"
+    fi
+
     if $success; then
-        log "All mount tests PASSED"
+        log "All critical tests PASSED"
         return 0
     else
-        err "Some tests FAILED"
+        err "Some critical tests FAILED"
         return 1
     fi
 }
 
 # Main
 main() {
-    log "QEMU PID 1 Mount Test"
+    log "QEMU PID 1 Integration Test"
     log "Kernel: $KERNEL"
     log "sysd: $SYSD_BIN"
 

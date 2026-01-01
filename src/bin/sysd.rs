@@ -39,6 +39,19 @@ struct Args {
     /// Run as user service manager (like systemd --user)
     #[arg(long)]
     user: bool,
+
+    /// Don't boot to default target (only when running as PID 1)
+    #[arg(long)]
+    no_boot: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Start daemon and boot to default target
+    Boot,
 }
 
 /// Shared manager state accessible from IPC and D-Bus
@@ -52,6 +65,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let is_pid1 = pid1::is_pid1();
     let user_mode = args.user;
+    // Boot when: explicit `boot` subcommand, OR running as PID 1 (unless --no-boot)
+    let should_boot = matches!(args.command, Some(Command::Boot)) || (is_pid1 && !args.no_boot);
 
     // User mode validation
     if user_mode && is_pid1 {
@@ -88,6 +103,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Failed to create notify socket: {} (Type=notify services won't work)",
             e
         );
+    }
+
+    // Load mount units from /etc/fstab (replaces fstab-generator)
+    // Only in system mode (not user mode)
+    if !user_mode {
+        match manager.load_fstab() {
+            Ok(count) if count > 0 => {
+                info!("Loaded {} mount units from /etc/fstab", count);
+            }
+            Ok(_) => {
+                log::debug!("No mount units loaded from fstab");
+            }
+            Err(e) => {
+                log::warn!("Failed to load fstab: {}", e);
+            }
+        }
+
+        // Load getty units from /proc/cmdline (replaces getty-generator)
+        match manager.load_gettys() {
+            Ok(count) if count > 0 => {
+                info!("Loaded {} getty units from kernel cmdline", count);
+            }
+            Ok(_) => {
+                log::debug!("No getty units loaded");
+            }
+            Err(e) => {
+                log::warn!("Failed to load gettys: {}", e);
+            }
+        }
     }
 
     let manager: SharedManager = Arc::new(RwLock::new(manager));
@@ -175,7 +219,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     SysdSignal::Hup => {
                         info!("Received SIGHUP, reloading unit files");
-                        // TODO: reload unit files
+                        let mut mgr = manager_sig.write().await;
+                        match mgr.reload_units().await {
+                            Ok(count) => info!("Reloaded {} unit files", count),
+                            Err(e) => log::error!("Failed to reload units: {}", e),
+                        }
                     }
                     SysdSignal::Usr1 => {
                         info!("Received SIGUSR1, dumping state");
@@ -193,6 +241,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sock_path = socket_path(user_mode);
     let server = Server::bind(&sock_path)?;
     info!("sysd{} listening on {}", if user_mode { " (user)" } else { "" }, sock_path);
+
+    // Boot to default target if requested
+    if should_boot {
+        let manager_boot = Arc::clone(&manager);
+        tokio::spawn(async move {
+            let mut mgr = manager_boot.write().await;
+            match mgr.get_default_target() {
+                Ok(target) => {
+                    info!("Booting to target: {}", target);
+                    match mgr.get_boot_plan(&target).await {
+                        Ok(plan) => {
+                            info!("Boot plan: {} units", plan.len());
+                            for unit_name in plan {
+                                if let Err(e) = mgr.start(&unit_name).await {
+                                    log::warn!("Failed to start {}: {}", unit_name, e);
+                                }
+                            }
+                            info!("Boot complete");
+                        }
+                        Err(e) => log::error!("Failed to get boot plan: {}", e),
+                    }
+                }
+                Err(e) => log::error!("No default target found: {}", e),
+            }
+        });
+    }
 
     loop {
         match server.accept().await {
@@ -366,9 +440,12 @@ async fn handle_request(request: Request, manager: &SharedManager) -> Response {
 
         Request::Boot { dry_run } => {
             if dry_run {
-                let mgr = manager.read().await;
+                let mut mgr = manager.write().await;
                 match mgr.get_default_target() {
-                    Ok(target) => Response::BootPlan(vec![target]), // TODO: expand deps
+                    Ok(target) => match mgr.get_boot_plan(&target).await {
+                        Ok(plan) => Response::BootPlan(plan),
+                        Err(e) => Response::Error(e.to_string()),
+                    },
                     Err(e) => Response::Error(e.to_string()),
                 }
             } else {
@@ -384,13 +461,40 @@ async fn handle_request(request: Request, manager: &SharedManager) -> Response {
         }
 
         Request::ReloadUnitFiles => {
-            // TODO: implement reload
-            Response::Ok
+            let mut mgr = manager.write().await;
+            match mgr.reload_units().await {
+                Ok(count) => {
+                    info!("Reloaded {} unit files", count);
+                    Response::Ok
+                }
+                Err(e) => Response::Error(e.to_string()),
+            }
         }
 
         Request::SyncUnits => {
-            // TODO: implement sync
-            Response::Ok
+            let mut mgr = manager.write().await;
+            match mgr.sync_units().await {
+                Ok(restarted) => {
+                    if restarted.is_empty() {
+                        info!("All units in sync");
+                    } else {
+                        info!("Restarted {} changed units: {:?}", restarted.len(), restarted);
+                    }
+                    Response::BootPlan(restarted) // Reuse BootPlan for list of unit names
+                }
+                Err(e) => Response::Error(e.to_string()),
+            }
+        }
+
+        Request::SwitchTarget { target } => {
+            let mut mgr = manager.write().await;
+            match mgr.switch_target(&target).await {
+                Ok(stopped) => {
+                    info!("Switched to {}, stopped {} units", target, stopped.len());
+                    Response::BootPlan(stopped) // List of stopped units
+                }
+                Err(e) => Response::Error(e.to_string()),
+            }
         }
     }
 }

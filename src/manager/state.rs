@@ -87,8 +87,10 @@ pub struct ServiceState {
     pub error: Option<String>,
     /// When to restart (if auto-restart pending)
     pub restart_at: Option<Instant>,
-    /// Number of restarts since last successful run
+    /// Number of restarts in current interval
     pub restart_count: u32,
+    /// When the current restart interval started
+    pub restart_interval_start: Option<Instant>,
 }
 
 impl Default for ServiceState {
@@ -102,6 +104,7 @@ impl Default for ServiceState {
             error: None,
             restart_at: None,
             restart_count: 0,
+            restart_interval_start: None,
         }
     }
 }
@@ -109,6 +112,21 @@ impl Default for ServiceState {
 impl ServiceState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a state for an active scope (no main PID, scopes contain multiple processes)
+    pub fn running_scope() -> Self {
+        Self {
+            active: ActiveState::Active,
+            sub: SubState::Running,
+            main_pid: None,
+            state_change_time: Instant::now(),
+            exit_code: None,
+            error: None,
+            restart_at: None,
+            restart_count: 0,
+            restart_interval_start: None,
+        }
     }
 
     pub fn set_starting(&mut self) {
@@ -146,13 +164,50 @@ impl ServiceState {
     }
 
     /// Schedule an automatic restart after a delay
-    pub fn set_auto_restart(&mut self, delay: std::time::Duration) {
+    /// Returns the new restart count
+    pub fn set_auto_restart(&mut self, delay: std::time::Duration) -> u32 {
         self.active = ActiveState::Activating;
         self.sub = SubState::AutoRestart;
         self.main_pid = None;
         self.restart_at = Some(Instant::now() + delay);
+
+        // Track restart interval - start new interval on first restart
+        if self.restart_interval_start.is_none() {
+            self.restart_interval_start = Some(Instant::now());
+        }
         self.restart_count += 1;
         self.state_change_time = Instant::now();
+        self.restart_count
+    }
+
+    /// Check if we've exceeded the restart rate limit
+    /// Returns true if we should NOT restart (rate limit exceeded)
+    pub fn is_restart_rate_limited(
+        &mut self,
+        burst: Option<u32>,
+        interval: Option<std::time::Duration>,
+    ) -> bool {
+        let burst = match burst {
+            Some(b) => b,
+            None => return false, // No rate limiting configured
+        };
+
+        // Default interval is 10 seconds (systemd default)
+        let interval = interval.unwrap_or(std::time::Duration::from_secs(10));
+
+        // Check if we're still in the current interval
+        if let Some(start) = self.restart_interval_start {
+            if Instant::now().duration_since(start) > interval {
+                // Interval expired, reset counter
+                self.restart_count = 0;
+                self.restart_interval_start = None;
+                return false;
+            }
+        }
+
+        // Check if we've exceeded the burst limit
+        // Note: restart_count hasn't been incremented yet for this restart
+        self.restart_count >= burst
     }
 
     /// Check if restart is due
@@ -171,6 +226,7 @@ impl ServiceState {
     /// Reset restart count (after successful long run)
     pub fn reset_restart_count(&mut self) {
         self.restart_count = 0;
+        self.restart_interval_start = None;
     }
 
     pub fn set_failed(&mut self, error: String) {
@@ -278,5 +334,14 @@ mod tests {
         assert_eq!(SubState::Stopping.as_str(), "stop");
         assert_eq!(SubState::Failed.as_str(), "failed");
         assert_eq!(SubState::Exited.as_str(), "exited");
+    }
+
+    #[test]
+    fn test_running_scope() {
+        let state = ServiceState::running_scope();
+        assert_eq!(state.active, ActiveState::Active);
+        assert_eq!(state.sub, SubState::Running);
+        assert!(state.main_pid.is_none()); // Scopes don't have a main PID
+        assert!(state.is_active());
     }
 }

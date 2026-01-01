@@ -58,20 +58,21 @@ This allows:
 Split architecture: `sysd` is the daemon, `sysdctl` is the CLI.
 
 ```
-sysdctl list [--user]        # List units with state/PID
-sysdctl status <service>     # Show service details
-sysdctl start <service>      # Start a service
-sysdctl stop <service>       # Stop a service
-sysdctl restart <service>    # Restart a service
-sysdctl enable <service>     # Enable service at boot
-sysdctl disable <service>    # Disable service at boot
-sysdctl is-enabled <service> # Check if enabled
-sysdctl deps <service>       # Show dependencies
-sysdctl get-boot-target      # Show default target
-sysdctl reload-unit-files    # Reload unit files from disk
-sysdctl sync-units           # Reload + restart changed
-sysdctl parse <file>         # Debug: parse unit file (local)
-sysdctl ping                 # Check daemon is running
+sysdctl list [--user]           # List units with state/PID
+sysdctl status <service>        # Show service details
+sysdctl start <service>         # Start a service
+sysdctl stop <service>          # Stop a service
+sysdctl restart <service>       # Restart a service
+sysdctl enable <service>        # Enable service at boot
+sysdctl disable <service>       # Disable service at boot
+sysdctl is-enabled <service>    # Check if enabled
+sysdctl deps <service>          # Show dependencies
+sysdctl get-boot-target         # Show default target
+sysdctl reload                  # Reload unit files from disk
+sysdctl sync                    # Reload + restart changed services
+sysdctl switch-target <target>  # Switch to target, stop unrelated units
+sysdctl parse <file>            # Debug: parse unit file (local)
+sysdctl ping                    # Check daemon is running
 ```
 
 Output example:
@@ -125,7 +126,7 @@ When running as PID 1 (detected via `getpid() == 1`), sysd handles:
 **Signal handling**:
 - SIGTERM → orderly poweroff
 - SIGINT → orderly reboot
-- SIGHUP → reload unit files (stub)
+- SIGHUP → reload unit files
 - SIGUSR1 → dump state to log
 - SIGCHLD → triggers reap cycle
 
@@ -157,12 +158,12 @@ Usage counts from `/usr/lib/systemd/system/*.service` on Arch Linux.
 | Documentation= | 255 | ignore | URLs for man pages |
 | After= | 205 | ✓ done | Ordering dependency |
 | Before= | 197 | ✓ done | Reverse ordering |
-| DefaultDependencies= | 146 | TODO | Usually `no` for early-boot units |
+| DefaultDependencies= | 146 | ✓ done | Usually `no` for early-boot units |
 | Conflicts= | 126 | ✓ done | Stop these when starting |
 | ConditionPathExists= | 82 | ✓ done | Skip if path missing |
 | Wants= | 67 | ✓ done | Soft dependency |
 | Requires= | 42 | ✓ done | Hard dependency |
-| ConditionDirectoryNotEmpty= | 37 | TODO | Skip if dir empty |
+| ConditionDirectoryNotEmpty= | 37 | ✓ done | Skip if dir empty |
 
 **[Service] Section - Core**
 
@@ -180,7 +181,7 @@ Usage counts from `/usr/lib/systemd/system/*.service` on Arch Linux.
 | User= | 22 | ✓ done | Run as user |
 | ExecReload= | 16 | ✓ done | Reload command |
 | ExecStartPre= | 10 | ✓ done | Pre-start commands |
-| NotifyAccess= | 10 | TODO | Who can send sd_notify |
+| NotifyAccess= | 10 | DONE | M19: validate_notify_access() |
 
 **[Service] Section - I/O**
 
@@ -198,7 +199,7 @@ Usage counts from `/usr/lib/systemd/system/*.service` on Arch Linux.
 |-----------|-------|--------|-------|
 | Environment= | 28 | ✓ done | KEY=value |
 | EnvironmentFile= | 7 | ✓ done | Load from file |
-| UnsetEnvironment= | 7 | TODO | Remove vars |
+| UnsetEnvironment= | 7 | ✓ done | Remove vars via env_remove() |
 | WorkingDirectory= | ~20 | ✓ done | Chdir before exec |
 
 **[Service] Section - Resource Limits**
@@ -221,7 +222,8 @@ Usage counts from `/usr/lib/systemd/system/*.service` on Arch Linux.
 
 | Directive | Count | Status | Notes |
 |-----------|-------|--------|-------|
-| DeviceAllow= | 64 | TODO | Cgroup device access |
+| DevicePolicy= | 64 | ✓ done | Mount namespace device isolation |
+| DeviceAllow= | 64 | ✓ done | Bind mount devices with r/rw perms |
 | ImportCredential= | 62 | ignore | systemd credentials |
 | SystemCallFilter= | 59 | partial | seccomp (parsed, not enforced) |
 | ProtectSystem= | 53 | ✓ done | read-only /, /usr |
@@ -243,9 +245,9 @@ Usage counts from `/usr/lib/systemd/system/*.service` on Arch Linux.
 | Directive | Count | Status | Notes |
 |-----------|-------|--------|-------|
 | WantedBy= | 94 | ✓ done | Pulled by target |
-| Also= | 25 | TODO | Enable related units |
-| Alias= | 12 | TODO | Symlink name |
-| DefaultInstance= | 2 | TODO | For templates |
+| Also= | 25 | ✓ done | Enable related units |
+| Alias= | 12 | ✓ done | Symlink name |
+| DefaultInstance= | 2 | DONE | M19: Template loading |
 | RequiredBy= | 1 | ✓ done | Required by target |
 
 ### 3. Dependency Resolver
@@ -399,7 +401,7 @@ libc = "0.2"                  # Low-level syscalls
 - [x] StartUnit (logind: start user@.service on first login)
 - [x] StopUnit (logind: stop user service on last logout)
 - [x] KillUnit (logind: kill session scope on logout)
-- [x] StartTransientUnit (stub - see M14; logind: create session-N.scope)
+- [x] StartTransientUnit (M14; logind: create session-N.scope with cgroups)
 - [x] Subscribe (logind: watch for signals)
 - [x] Signals: JobRemoved (logind: confirm scope/service started), UnitRemoved
 
@@ -465,8 +467,10 @@ Critical for boot - dbus.socket must work for most services.
 ### M11: Additional Unit Types
 - [x] .mount units (9 units) - parse and execute mount operations
 - [x] .slice units (7 units) - cgroup hierarchy organization (ordering for slices.target)
-- .path units - not implementing (inotify-based file watching for lazy activation; only 3 active on typical system, used for boot persistence like CUPS auto-start)
+- .path units - not implementing (inotify-based file watching; only 3 units, low value)
+- .automount units - not implementing (autofs lazy mounting; only 1 unit for binfmt_misc)
 - .swap units - not implementing (generated by fstab-generator; use /etc/fstab directly)
+- implicit slices (-.slice, system.slice) - not implementing (cgroups created directly, no unit needed)
 - [x] .timer units (11 units) - scheduled activation (OnCalendar, OnBootSec, OnUnitActiveSec)
 
 ### M12: Additional Conditions ✓
@@ -488,21 +492,155 @@ For full desktop support (systemd --user equivalent).
 - [x] Lingering support check (Manager::is_lingering)
 - [x] sysdctl --user support
 
-### M14: Logind Scope Support
+### M14: Logind Scope Support (5 uses)
 Complete StartTransientUnit for logind session scopes.
-- [ ] Create cgroup: /sys/fs/cgroup/{slice}/{name}/
-- [ ] Move PIDs into scope cgroup
-- [ ] Parse scope properties: Description, Slice, PIDs
-- [ ] Register D-Bus object for scope unit (org.freedesktop.systemd1.Scope)
-- [ ] Scope.Abandon() method
+- [x] Create cgroup: /sys/fs/cgroup/{slice}/{name}/ via ScopeManager
+- [x] Move PIDs into scope cgroup (CgroupManager::add_pids)
+- [x] Parse scope properties: Description, Slice, PIDs (parse_scope_properties)
+- [x] Register D-Bus object for scope unit (org.freedesktop.systemd1.Scope)
+- [x] Scope.Abandon() method (ScopeInterface::abandon)
+- [x] Track scope state in Manager for status/list queries
 
 Logind creates scopes like `session-1.scope` under `user-1000.slice` for login sessions.
 
-### Future: Generators
-Low priority - can work without for minimal systems.
-- [ ] Run generator binaries from /usr/lib/systemd/system-generators/
-- [ ] fstab-generator (create .mount from /etc/fstab)
-- [ ] getty-generator (create getty instances)
+### Fstab Support (built-in, replaces fstab-generator)
+- [x] Parse /etc/fstab at startup
+- [x] Generate Mount units from fstab entries
+- [x] Skip swap entries and noauto mounts
+- [x] Handle network mounts (nfs, cifs) with network-online.target dependency
+- [x] Handle bind mounts with source dependency
+- [x] Load in Manager::load_fstab() at startup
+
+### Getty Support (built-in, replaces getty-generator)
+- [x] Parse /proc/cmdline for console= parameters
+- [x] Create serial-getty@ttyS0.service for serial consoles
+- [x] Create getty@tty1.service for virtual consoles
+- [x] Support baud rate parsing (e.g., console=ttyS0,115200)
+- [x] Default to tty1-tty6 if no console= parameters
+- [x] Load in Manager::load_gettys() at startup
+
+### M15: Remaining Directives ✓
+Counts in parentheses are from enabled units on target system.
+- [x] DevicePolicy= + DeviceAllow= (7 uses) - mount namespace device isolation with r/rw bind mounts
+- [x] SystemCallFilter= enforcement (4 uses) - seccomp BPF filter applied
+- [x] RestrictNamespaces= enforcement (4 uses) - seccomp blocks unshare/clone with namespace flags
+- [x] NotifyAccess= (10 uses) - SO_PEERCRED validation in validate_notify_access()
+- [x] UnsetEnvironment= (1 use) - cmd.env_remove() for specified variables
+- [x] DefaultInstance= (1 use) - applied when loading bare template units
+- [x] TimeoutStartSec=/TimeoutStopSec= (2 uses each) - separate start/stop timeouts (already implemented)
+
+### M16: Extended Security Hardening (DONE)
+Additional security directives used in enabled units.
+| Directive | Uses | Status | Notes |
+|-----------|------|--------|-------|
+| RestrictRealtime= | 5 | DONE | Block realtime scheduling (seccomp) |
+| ProtectControlGroups= | 5 | DONE | Read-only /sys/fs/cgroup (bind mount) |
+| MemoryDenyWriteExecute= | 5 | DONE | Block W+X memory (PR_SET_MDWE) |
+| SystemCallErrorNumber= | 4 | DONE | Error code for blocked syscalls |
+| SystemCallArchitectures= | 4 | DONE | Restrict syscall ABIs (native logged) |
+| RestrictAddressFamilies= | 4 | DONE | Restrict socket types (seccomp deny list) |
+| LockPersonality= | 4 | DONE | Lock execution domain (seccomp) |
+| RestrictSUIDSGID= | 3 | DONE | Block setuid/setgid file creation (seccomp) |
+| ProtectKernelTunables= | 3 | DONE | Read-only /proc/sys, /sys (bind mount) |
+| ProtectKernelLogs= | 3 | DONE | Block /dev/kmsg, /proc/kmsg (inaccessible) |
+| ProtectClock= | 2 | DONE | Block clock_settime, adjtimex (seccomp) |
+| ProtectHostname= | 1 | DONE | Block sethostname, setdomainname (seccomp) |
+| IgnoreSIGPIPE= | 2 | DONE | Set SIG_IGN for SIGPIPE |
+
+### M17: Runtime Directories & Resource Limits ✓
+Auto-created directories and resource constraints.
+| Directive | Uses | Status | Notes |
+|-----------|------|--------|-------|
+| StateDirectory= | 6 | DONE | Auto-create /var/lib/<name> with chown |
+| RuntimeDirectory= | 4 | DONE | Auto-create /run/<name> with chown |
+| LimitNPROC= | 3 | DONE | Max processes via setrlimit(RLIMIT_NPROC) |
+| ConfigurationDirectory= | 2 | DONE | Auto-create /etc/<name> with chown |
+| RuntimeDirectoryPreserve= | 2 | DONE | no/yes/restart cleanup modes |
+| LogsDirectory= | 1 | DONE | Auto-create /var/log/<name> with chown |
+| CacheDirectory= | 1 | DONE | Auto-create /var/cache/<name> with chown |
+| LimitCORE= | 1 | DONE | Core dump size via setrlimit(RLIMIT_CORE) |
+| Group= | 1 | DONE | setgid() before setuid() |
+| DynamicUser= | 1 | DONE | M19: DynamicUserManager allocates 61184-65519 range |
+
+### M18: Process Control & Dependencies ✓
+Restart behavior, signals, and unit relationships.
+| Directive | Uses | Status | Notes |
+|-----------|------|--------|-------|
+| StartLimitBurst= | 2 | DONE | Restart rate limit burst count |
+| StartLimitIntervalSec= | 1 | DONE | Restart rate limit window (default 10s) |
+| Sockets= | 2 | DONE | Explicit socket association for multi-socket services |
+| SendSIGHUP= | 2 | DONE | Send SIGHUP before SIGTERM |
+| Slice= | 1 | DONE | Explicit cgroup slice placement |
+| Delegate= | 1 | DONE | M19: enable_delegation() for cgroup subtree |
+| DevicePolicy= | 1 | DONE | Device access via mount namespace isolation |
+| BindsTo= | 1 | DONE | M19: propagate_binds_to_stop() |
+| ExecStopPost= | 1 | DONE | Run commands after service stops |
+| FileDescriptorStoreMax= | 1 | DONE | M19: FD store via FDSTORE=1 + SCM_RIGHTS |
+| IgnoreOnIsolate= | 1 | WONTFIX | Unit overriding admin intent; can stop manually |
+| RestartPreventExitStatus= | 1 | DONE | Skip restart for specific exit codes |
+
+### M19: Remaining Stubs & Polish ✓
+Complete remaining stubs and minor features from earlier milestones.
+
+**Easy:**
+| Directive | Uses | Status | Notes |
+|-----------|------|--------|-------|
+| DefaultInstance= | 2 | DONE | Template loading uses DefaultInstance when no instance specified |
+
+**Moderate:**
+| Directive | Uses | Status | Notes |
+|-----------|------|--------|-------|
+| NotifyAccess= | 10 | DONE | SO_PEERCRED validation in validate_notify_access() |
+| BindsTo= | 1 | DONE | propagate_binds_to_stop() stops dependent units |
+
+**Complex:**
+| Directive | Uses | Status | Notes |
+|-----------|------|--------|-------|
+| DynamicUser= | 1 | DONE | DynamicUserManager allocates from 61184-65519 range |
+| Delegate= | 1 | DONE | enable_delegation() writes to cgroup.subtree_control |
+| FileDescriptorStoreMax= | 1 | DONE | FD store via SCM_RIGHTS, restored on restart |
+
+### M20: Deferred & Polish ✓
+Low-priority items deferred from earlier milestones.
+
+**Commands:**
+| Command | Status | Notes |
+|---------|--------|-------|
+| sysdctl reload | DONE | Manager::reload_units() re-parses all unit files |
+| sysdctl switch-target | DONE | Manager::switch_target() stops unrelated units |
+| sysdctl sync | DONE | Manager::sync_units() reloads + restarts changed |
+
+**Features:**
+| Feature | Status | Notes |
+|---------|--------|-------|
+| User mode D-Bus | WONTFIX | D-Bus is for logind; logind is system-level only |
+| BootPlan expansion | DONE | get_boot_plan() resolves dependencies for --dry-run |
+| Restart tracking | WONTFIX | RuntimeDirectoryPreserve=restart has 0 real-world uses |
+
+### Generators
+Not needed - sysd has built-in fstab and getty generators.
+- [x] systemd-fstab-generator → Built-in `fstab.rs`
+- [x] systemd-getty-generator → Built-in `getty.rs`
+- External generators not supported (not needed for minimal systems)
+
+**System generators (Arch Linux):**
+| Generator | Purpose | Sysd Status |
+|-----------|---------|-------------|
+| systemd-fstab-generator | /etc/fstab → .mount units | Built-in |
+| systemd-getty-generator | console= → getty services | Built-in |
+| systemd-cryptsetup-generator | /etc/crypttab → LUKS units | Not needed |
+| systemd-gpt-auto-generator | GPT partition discovery | Not needed |
+| systemd-hibernate-resume-generator | Resume from hibernation | Not needed |
+| systemd-bless-boot-generator | Boot counting/A-B updates | Not needed |
+| systemd-debug-generator | systemd.debug_shell param | Not needed |
+| systemd-run-generator | systemd.run= param | Not needed |
+| systemd-ssh-generator | SSH socket activation | Not needed |
+| systemd-system-update-generator | Offline updates | Not needed |
+| systemd-tpm2-generator | TPM2 credentials | Not needed |
+| systemd-veritysetup-generator | dm-verity setup | Not needed |
+| systemd-integritysetup-generator | dm-integrity setup | Not needed |
+| systemd-import-generator | Import images | Not needed |
+| systemd-factory-reset-generator | Factory reset | Not needed |
 
 ## Testing Strategy
 

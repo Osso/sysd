@@ -79,6 +79,78 @@ impl StdInput {
     }
 }
 
+/// NotifyAccess= controls who can send sd_notify messages
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum NotifyAccess {
+    /// Reject all notifications
+    None,
+    /// Only accept from main process (default for Type=notify, otherwise none)
+    #[default]
+    Main,
+    /// Accept from main process and any exec commands (ExecStart, ExecStop, etc.)
+    Exec,
+    /// Accept from any process in the service cgroup
+    All,
+}
+
+impl NotifyAccess {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "main" => Some(Self::Main),
+            "exec" => Some(Self::Exec),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+}
+
+/// DevicePolicy= controls device access restrictions
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum DevicePolicy {
+    /// No device restrictions (default)
+    #[default]
+    Auto,
+    /// Only pseudo devices (null, zero, random, urandom, tty, etc.)
+    Closed,
+    /// No devices at all by default
+    Strict,
+}
+
+impl DevicePolicy {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "closed" => Some(Self::Closed),
+            "strict" => Some(Self::Strict),
+            _ => None,
+        }
+    }
+}
+
+/// RuntimeDirectoryPreserve= controls /run directory cleanup
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum RuntimeDirectoryPreserve {
+    /// Remove on service stop (default)
+    #[default]
+    No,
+    /// Keep after service stop
+    Yes,
+    /// Keep only on restart, remove on stop
+    Restart,
+}
+
+impl RuntimeDirectoryPreserve {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "no" | "false" | "0" => Some(Self::No),
+            "yes" | "true" | "1" => Some(Self::Yes),
+            "restart" => Some(Self::Restart),
+            _ => None,
+        }
+    }
+}
+
 /// ProtectSystem= settings
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum ProtectSystem {
@@ -154,6 +226,8 @@ pub struct UnitSection {
     pub requires: Vec<String>,
     pub wants: Vec<String>,
     pub conflicts: Vec<String>,
+    /// BindsTo= - Hard dependency, stop this unit when bound unit stops
+    pub binds_to: Vec<String>,
     pub condition_path_exists: Vec<String>,
     pub condition_directory_not_empty: Vec<String>,
     /// ConditionVirtualization= - check for VM/container environment
@@ -170,6 +244,8 @@ pub struct UnitSection {
     pub condition_needs_update: Vec<String>,
     /// If true (default), add implicit deps on basic.target, shutdown.target
     pub default_dependencies: bool,
+    /// IgnoreOnIsolate= - Don't stop this unit during isolate operations
+    pub ignore_on_isolate: bool,
 }
 
 impl Default for UnitSection {
@@ -181,6 +257,7 @@ impl Default for UnitSection {
             requires: Vec::new(),
             wants: Vec::new(),
             conflicts: Vec::new(),
+            binds_to: Vec::new(),
             condition_path_exists: Vec::new(),
             condition_directory_not_empty: Vec::new(),
             condition_virtualization: Vec::new(),
@@ -190,6 +267,7 @@ impl Default for UnitSection {
             condition_first_boot: None,
             condition_needs_update: Vec::new(),
             default_dependencies: true, // systemd default
+            ignore_on_isolate: false,
         }
     }
 }
@@ -216,6 +294,9 @@ pub struct ServiceSection {
     // Watchdog
     pub watchdog_sec: Option<Duration>, // Watchdog timeout (service must ping)
 
+    // Notification
+    pub notify_access: NotifyAccess, // Who can send sd_notify messages
+
     // Type=forking
     pub pid_file: Option<PathBuf>, // PIDFile= for Type=forking
 
@@ -233,6 +314,7 @@ pub struct ServiceSection {
     // Environment
     pub environment: Vec<(String, String)>,
     pub environment_file: Vec<PathBuf>,
+    pub unset_environment: Vec<String>, // UnsetEnvironment=
 
     // I/O
     pub standard_output: StdOutput,
@@ -250,6 +332,17 @@ pub struct ServiceSection {
 
     // Process limits (setrlimit)
     pub limit_nofile: Option<u64>, // LimitNOFILE= (max open files)
+    pub limit_nproc: Option<u64>,  // LimitNPROC= (max processes)
+    pub limit_core: Option<u64>,   // LimitCORE= (core dump size, 0=disabled)
+
+    // M17: Auto-created directories
+    pub state_directory: Vec<String>,         // StateDirectory= (/var/lib/<name>)
+    pub runtime_directory: Vec<String>,       // RuntimeDirectory= (/run/<name>)
+    pub configuration_directory: Vec<String>, // ConfigurationDirectory= (/etc/<name>)
+    pub logs_directory: Vec<String>,          // LogsDirectory= (/var/log/<name>)
+    pub cache_directory: Vec<String>,         // CacheDirectory= (/var/cache/<name>)
+    pub runtime_directory_preserve: RuntimeDirectoryPreserve, // RuntimeDirectoryPreserve=
+    pub dynamic_user: bool,                   // DynamicUser= (allocate ephemeral UID/GID)
 
     // OOM killer
     pub oom_score_adjust: Option<i32>, // OOMScoreAdjust= (-1000 to 1000)
@@ -277,7 +370,37 @@ pub struct ServiceSection {
     pub inaccessible_paths: Vec<PathBuf>, // InaccessiblePaths=
 
     // Seccomp
-    pub system_call_filter: Vec<String>, // SystemCallFilter=
+    pub system_call_filter: Vec<String>,          // SystemCallFilter=
+    pub system_call_error_number: Option<i32>,    // SystemCallErrorNumber= (errno for blocked calls)
+    pub system_call_architectures: Vec<String>,   // SystemCallArchitectures= (native, x86, etc.)
+
+    // Device access control (mount namespace isolation)
+    pub device_policy: DevicePolicy, // DevicePolicy= (auto, closed, strict)
+    pub device_allow: Vec<String>,   // DeviceAllow= (format: "/dev/null rw" or "char-pts r")
+
+    // M16: Extended security hardening
+    pub restrict_realtime: bool,           // RestrictRealtime= - block realtime scheduling
+    pub protect_control_groups: bool,      // ProtectControlGroups= - /sys/fs/cgroup read-only
+    pub memory_deny_write_execute: bool,   // MemoryDenyWriteExecute= - block W+X memory
+    pub lock_personality: bool,            // LockPersonality= - lock execution domain
+    pub protect_kernel_tunables: bool,     // ProtectKernelTunables= - /proc/sys, /sys read-only
+    pub protect_kernel_logs: bool,         // ProtectKernelLogs= - block /dev/kmsg
+    pub protect_clock: bool,               // ProtectClock= - block clock_settime, etc.
+    pub protect_hostname: bool,            // ProtectHostname= - block sethostname
+    pub ignore_sigpipe: bool,              // IgnoreSIGPIPE= - set SIG_IGN for SIGPIPE
+    pub restrict_suid_sgid: bool,          // RestrictSUIDSGID= - block setuid/setgid files
+    pub restrict_address_families: Option<Vec<String>>, // RestrictAddressFamilies=
+
+    // M18: Process control & dependencies
+    pub start_limit_burst: Option<u32>,       // StartLimitBurst= - max restarts in interval
+    pub start_limit_interval_sec: Option<Duration>, // StartLimitIntervalSec= - rate limit window
+    pub sockets: Vec<String>,                 // Sockets= - associated socket units
+    pub send_sighup: bool,                    // SendSIGHUP= - send SIGHUP before SIGTERM
+    pub slice: Option<String>,                // Slice= - explicit cgroup slice
+    pub delegate: bool,                       // Delegate= - allow service to manage own cgroup
+    pub exec_stop_post: Vec<String>,          // ExecStopPost= - post-stop commands
+    pub file_descriptor_store_max: Option<u32>, // FileDescriptorStoreMax= - FD store size
+    pub restart_prevent_exit_status: Vec<i32>, // RestartPreventExitStatus= - don't restart on these
 }
 
 impl Default for ServiceSection {
@@ -295,6 +418,7 @@ impl Default for ServiceSection {
             timeout_stop_sec: None,
             remain_after_exit: false,
             watchdog_sec: None,
+            notify_access: NotifyAccess::default(),
             pid_file: None,
             bus_name: None,
             kill_mode: KillMode::default(),
@@ -303,6 +427,7 @@ impl Default for ServiceSection {
             working_directory: None,
             environment: Vec::new(),
             environment_file: Vec::new(),
+            unset_environment: Vec::new(),
             standard_output: StdOutput::default(),
             standard_error: StdOutput::default(),
             standard_input: StdInput::default(),
@@ -312,6 +437,16 @@ impl Default for ServiceSection {
             cpu_quota: None,
             tasks_max: None,
             limit_nofile: None,
+            limit_nproc: None,
+            limit_core: None,
+            // M17: Auto-created directories
+            state_directory: Vec::new(),
+            runtime_directory: Vec::new(),
+            configuration_directory: Vec::new(),
+            logs_directory: Vec::new(),
+            cache_directory: Vec::new(),
+            runtime_directory_preserve: RuntimeDirectoryPreserve::No,
+            dynamic_user: false,
             oom_score_adjust: None,
             // Security sandboxing defaults (all disabled)
             no_new_privileges: false,
@@ -329,6 +464,32 @@ impl Default for ServiceSection {
             read_only_paths: Vec::new(),
             inaccessible_paths: Vec::new(),
             system_call_filter: Vec::new(),
+            system_call_error_number: None,
+            system_call_architectures: Vec::new(),
+            device_policy: DevicePolicy::Auto,
+            device_allow: Vec::new(),
+            // M16 defaults (all disabled)
+            restrict_realtime: false,
+            protect_control_groups: false,
+            memory_deny_write_execute: false,
+            lock_personality: false,
+            protect_kernel_tunables: false,
+            protect_kernel_logs: false,
+            protect_clock: false,
+            protect_hostname: false,
+            ignore_sigpipe: false,
+            restrict_suid_sgid: false,
+            restrict_address_families: None,
+            // M18 defaults
+            start_limit_burst: None,
+            start_limit_interval_sec: None,
+            sockets: Vec::new(),
+            send_sighup: false,
+            slice: None,
+            delegate: false,
+            exec_stop_post: Vec::new(),
+            file_descriptor_store_max: None,
+            restart_prevent_exit_status: Vec::new(),
         }
     }
 }
@@ -342,6 +503,8 @@ pub struct InstallSection {
     pub also: Vec<String>,
     /// Symlink aliases for this unit
     pub alias: Vec<String>,
+    /// Default instance for template units (foo@.service)
+    pub default_instance: Option<String>,
 }
 
 /// Complete parsed service unit
@@ -392,6 +555,21 @@ pub fn get_template_name(name: &str) -> Option<String> {
 
     // Template is everything before @ plus @ plus the suffix
     Some(format!("{}@{}", &name[..at_pos], &name[suffix_start..]))
+}
+
+/// Check if a name is a bare template (e.g., "foo@.service" with no instance)
+/// Returns true if the name has "@." pattern (nothing between @ and suffix)
+pub fn is_bare_template(name: &str) -> bool {
+    name.contains("@.")
+}
+
+/// Create an instantiated unit name from a template and instance
+/// e.g., ("foo@.service", "bar") -> "foo@bar.service"
+pub fn instantiate_template(template: &str, instance: &str) -> Option<String> {
+    if !is_bare_template(template) {
+        return None;
+    }
+    Some(template.replace("@.", &format!("@{}.", instance)))
 }
 
 // Parsing helpers
@@ -651,5 +829,28 @@ mod tests {
 
         let svc2 = Service::new("foo.service".to_string());
         assert_eq!(svc2.instance, None);
+    }
+
+    #[test]
+    fn test_is_bare_template() {
+        assert!(is_bare_template("foo@.service"));
+        assert!(is_bare_template("getty@.service"));
+        assert!(!is_bare_template("foo@bar.service"));
+        assert!(!is_bare_template("foo.service"));
+    }
+
+    #[test]
+    fn test_instantiate_template() {
+        assert_eq!(
+            instantiate_template("foo@.service", "bar"),
+            Some("foo@bar.service".to_string())
+        );
+        assert_eq!(
+            instantiate_template("getty@.service", "tty1"),
+            Some("getty@tty1.service".to_string())
+        );
+        // Not a bare template - returns None
+        assert_eq!(instantiate_template("foo@bar.service", "baz"), None);
+        assert_eq!(instantiate_template("foo.service", "bar"), None);
     }
 }

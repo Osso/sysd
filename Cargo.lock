@@ -707,6 +707,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -973,6 +974,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "seccompiler"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "345a3e4dddf721a478089d4697b83c6c0a8f5bf16086f6c13397e4534eb6e2e5"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1087,6 +1097,7 @@ dependencies = [
  "nix 0.29.0",
  "peercred-ipc",
  "rmp-serde",
+ "seccompiler",
  "serde",
  "shlex",
  "thiserror",

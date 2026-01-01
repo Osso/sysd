@@ -15,11 +15,30 @@ pub struct DepGraph {
     edges: HashMap<String, HashSet<String>>,
     /// All known nodes
     nodes: HashSet<String>,
+    /// Alias resolution: symlink name -> canonical name
+    aliases: HashMap<String, String>,
 }
 
 impl DepGraph {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Register an alias (symlink name -> canonical name)
+    pub fn add_alias(&mut self, alias: &str, canonical: &str) {
+        if alias != canonical {
+            self.aliases.insert(alias.to_string(), canonical.to_string());
+        }
+    }
+
+    /// Pre-register a node (unit that was loaded)
+    pub fn add_node(&mut self, name: &str) {
+        self.nodes.insert(name.to_string());
+    }
+
+    /// Resolve a name through aliases to get canonical name
+    fn resolve(&self, name: &str) -> String {
+        self.aliases.get(name).cloned().unwrap_or_else(|| name.to_string())
     }
 
     /// Add a service to the graph, extracting its dependencies
@@ -35,12 +54,15 @@ impl DepGraph {
 
         // Before=X means we must start before X
         // So X depends on us: edge from X to name
+        // Only add edge if X is a loaded unit
         for dep in &service.unit.before {
-            self.nodes.insert(dep.clone());
-            self.edges
-                .entry(dep.clone())
-                .or_default()
-                .insert(name.clone());
+            let resolved_dep = self.resolve(dep);
+            if self.nodes.contains(&resolved_dep) {
+                self.edges
+                    .entry(resolved_dep)
+                    .or_default()
+                    .insert(name.clone());
+            }
         }
 
         // Requires=X and Wants=X imply After=X for ordering purposes
@@ -56,7 +78,11 @@ impl DepGraph {
 
     /// Add a unit (service or target) to the graph
     pub fn add_unit(&mut self, unit: &Unit) {
-        let name = unit.name();
+        self.add_unit_with_name(unit.name(), unit);
+    }
+
+    /// Add a unit to the graph with an explicit name (for template instances)
+    pub fn add_unit_with_name(&mut self, name: &str, unit: &Unit) {
         self.nodes.insert(name.to_string());
 
         let section = unit.unit_section();
@@ -66,15 +92,16 @@ impl DepGraph {
         // - Before=shutdown.target (service stops before shutdown)
         // - Conflicts=shutdown.target (stop service when shutdown starts)
         if section.default_dependencies && !unit.is_target() {
-            // After=basic.target - we depend on basic.target
+            // After=basic.target - we depend on basic.target (if loaded)
             self.add_edge(name, "basic.target");
 
-            // Before=shutdown.target - shutdown.target depends on us
-            self.nodes.insert("shutdown.target".to_string());
-            self.edges
-                .entry("shutdown.target".to_string())
-                .or_default()
-                .insert(name.to_string());
+            // Before=shutdown.target - shutdown.target depends on us (if loaded)
+            if self.nodes.contains("shutdown.target") {
+                self.edges
+                    .entry("shutdown.target".to_string())
+                    .or_default()
+                    .insert(name.to_string());
+            }
         }
 
         // After=X means X must start before us
@@ -83,12 +110,15 @@ impl DepGraph {
         }
 
         // Before=X means we must start before X
+        // Only add edge if X is a loaded unit
         for dep in &section.before {
-            self.nodes.insert(dep.clone());
-            self.edges
-                .entry(dep.clone())
-                .or_default()
-                .insert(name.to_string());
+            let resolved_dep = self.resolve(dep);
+            if self.nodes.contains(&resolved_dep) {
+                self.edges
+                    .entry(resolved_dep)
+                    .or_default()
+                    .insert(name.to_string());
+            }
         }
 
         // Requires=X and Wants=X imply ordering dependency
@@ -107,13 +137,18 @@ impl DepGraph {
     }
 
     /// Add a directed edge: `from` depends on `to` (to must start first)
+    /// Resolves `to` through aliases to use canonical names
+    /// Only creates edge if `to` is already a known node (loaded unit)
     fn add_edge(&mut self, from: &str, to: &str) {
-        self.nodes.insert(from.to_string());
-        self.nodes.insert(to.to_string());
+        let resolved_to = self.resolve(to);
+        // Only add edge if target exists - After= on missing units is ignored
+        if !self.nodes.contains(&resolved_to) {
+            return;
+        }
         self.edges
             .entry(from.to_string())
             .or_default()
-            .insert(to.to_string());
+            .insert(resolved_to);
     }
 
     /// Get direct dependencies of a node (nodes that must start before it)
@@ -179,30 +214,108 @@ impl DepGraph {
     /// Get the start order for a specific target and its dependencies
     /// Returns only the subset of nodes reachable from the target
     pub fn start_order_for(&self, target: &str) -> Result<Vec<String>, CycleError> {
-        // First collect all transitive dependencies
+        // First collect all transitive dependencies (following graph edges)
         let mut needed: HashSet<String> = HashSet::new();
         let mut to_visit: VecDeque<String> = VecDeque::new();
 
-        to_visit.push_back(target.to_string());
-        needed.insert(target.to_string());
+        // Only add target if it's in the graph
+        if self.nodes.contains(target) {
+            to_visit.push_back(target.to_string());
+            needed.insert(target.to_string());
+        }
 
         while let Some(node) = to_visit.pop_front() {
             if let Some(deps) = self.edges.get(&node) {
                 for dep in deps {
-                    if needed.insert(dep.clone()) {
+                    // Only follow edges to nodes that exist in our graph
+                    if self.nodes.contains(dep) && needed.insert(dep.clone()) {
                         to_visit.push_back(dep.clone());
                     }
                 }
             }
         }
 
-        // Now toposort just the needed nodes
-        let full_order = self.toposort()?;
+        // Toposort only the subgraph of needed nodes
+        // This avoids cycles from nodes we don't care about (like shutdown.target)
+        self.toposort_subset(&needed)
+    }
 
-        Ok(full_order
-            .into_iter()
-            .filter(|n| needed.contains(n))
-            .collect())
+    /// Toposort a subset of the graph, ignoring nodes outside the subset
+    /// If cycles exist, break them by adding cycle members in arbitrary order
+    fn toposort_subset(&self, subset: &HashSet<String>) -> Result<Vec<String>, CycleError> {
+        // Build in-degree map for subset nodes only
+        let mut in_degree: HashMap<String, usize> = HashMap::new();
+        for node in subset {
+            in_degree.insert(node.clone(), 0);
+        }
+
+        // Count only edges within the subset
+        for (from, deps) in &self.edges {
+            if subset.contains(from) {
+                let subset_deps = deps.iter().filter(|d| subset.contains(*d)).count();
+                *in_degree.entry(from.clone()).or_default() = subset_deps;
+            }
+        }
+
+        // Start with nodes that have no dependencies (within subset)
+        let mut queue: VecDeque<String> = in_degree
+            .iter()
+            .filter(|(_, &deg)| deg == 0)
+            .map(|(n, _)| n.clone())
+            .collect();
+
+        let mut result = Vec::new();
+        let mut added: HashSet<String> = HashSet::new();
+
+        while result.len() < subset.len() {
+            if let Some(node) = queue.pop_front() {
+                if added.insert(node.clone()) {
+                    result.push(node.clone());
+                } else {
+                    continue; // Skip duplicates
+                }
+
+                // For each node in subset that depends on this one, decrement in-degree
+                for (dependent, deps) in &self.edges {
+                    if subset.contains(dependent) && deps.contains(&node) {
+                        if let Some(deg) = in_degree.get_mut(dependent) {
+                            *deg = deg.saturating_sub(1);
+                            if *deg == 0 {
+                                queue.push_back(dependent.clone());
+                            }
+                        }
+                    }
+                }
+            } else {
+                // No nodes with zero in-degree - we have a cycle
+                // Break it by picking a node with minimum in-degree from remaining
+                let remaining: Vec<_> = in_degree
+                    .iter()
+                    .filter(|(n, &deg)| deg > 0 && !result.contains(n))
+                    .collect();
+
+                if remaining.is_empty() {
+                    break;
+                }
+
+                // Pick node with minimum in-degree to break cycle
+                let (cycle_node, _) = remaining
+                    .iter()
+                    .min_by_key(|(_, &deg)| deg)
+                    .unwrap();
+
+                log::debug!(
+                    "Breaking ordering cycle by starting {} early",
+                    cycle_node
+                );
+
+                // Add it and reset its in-degree
+                queue.push_back(cycle_node.to_string());
+                in_degree.insert(cycle_node.to_string(), 0);
+            }
+        }
+
+        Ok(result)
     }
 }
 

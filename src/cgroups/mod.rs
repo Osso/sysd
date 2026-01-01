@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 const SYSTEM_SLICE: &str = "system.slice";
 
+#[derive(Clone)]
 pub struct CgroupManager {
     root: PathBuf,
 }
@@ -175,18 +176,22 @@ pub struct CgroupLimits {
     pub memory_max: Option<u64>, // bytes
     pub cpu_quota: Option<u32>,  // percentage
     pub tasks_max: Option<u32>,
+    // Note: DeviceAllow is handled via mount namespace isolation in sandbox.rs
 }
 
 impl CgroupManager {
     /// Create a cgroup for a service, move the PID into it, and apply limits
+    /// If slice is None, defaults to system.slice
     pub fn setup_service_cgroup(
         &self,
         service_name: &str,
         pid: u32,
         limits: &CgroupLimits,
+        slice: Option<&str>,
     ) -> io::Result<PathBuf> {
-        // Create the cgroup in system.slice
-        let cgroup_path = self.create_cgroup(Some(SYSTEM_SLICE), service_name)?;
+        // Create the cgroup in the specified slice (or system.slice by default)
+        let slice = slice.unwrap_or(SYSTEM_SLICE);
+        let cgroup_path = self.create_cgroup(Some(slice), service_name)?;
 
         // Move the process into the cgroup
         self.add_pid(&cgroup_path, pid)?;
@@ -213,9 +218,56 @@ impl CgroupManager {
         Ok(cgroup_path)
     }
 
+    /// M19: Enable cgroup delegation for a service
+    /// This allows the service to manage its own cgroup subtree
+    pub fn enable_delegation(&self, cgroup_path: &Path) -> io::Result<()> {
+        // Read available controllers from the cgroup
+        let controllers_file = cgroup_path.join("cgroup.controllers");
+        let available = std::fs::read_to_string(&controllers_file).unwrap_or_default();
+
+        // Parse available controllers
+        let controllers: Vec<&str> = available.split_whitespace().collect();
+        if controllers.is_empty() {
+            log::debug!(
+                "No controllers available for delegation at {}",
+                cgroup_path.display()
+            );
+            return Ok(());
+        }
+
+        // Enable all available controllers for subtree
+        // Format: "+cpu +memory +io +pids" etc.
+        let enable_str: String = controllers
+            .iter()
+            .map(|c| format!("+{}", c))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let subtree_control = cgroup_path.join("cgroup.subtree_control");
+        if let Err(e) = std::fs::write(&subtree_control, &enable_str) {
+            // May fail if controller not enabled in parent - this is okay
+            log::debug!(
+                "Could not enable delegation at {}: {} (tried: {})",
+                cgroup_path.display(),
+                e,
+                enable_str
+            );
+        } else {
+            log::debug!(
+                "Enabled cgroup delegation at {}: {}",
+                cgroup_path.display(),
+                enable_str
+            );
+        }
+
+        Ok(())
+    }
+
     /// Clean up a service cgroup (remove if empty)
-    pub fn cleanup_service_cgroup(&self, service_name: &str) -> io::Result<()> {
-        let cgroup_path = self.root.join(SYSTEM_SLICE).join(service_name);
+    /// If slice is None, defaults to system.slice
+    pub fn cleanup_service_cgroup(&self, service_name: &str, slice: Option<&str>) -> io::Result<()> {
+        let slice = slice.unwrap_or(SYSTEM_SLICE);
+        let cgroup_path = self.root.join(slice).join(service_name);
 
         if !cgroup_path.exists() {
             return Ok(());

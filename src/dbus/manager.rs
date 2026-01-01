@@ -114,8 +114,7 @@ impl ManagerInterface {
     /// Create and start a transient unit (used by logind for session scopes)
     ///
     /// Logind uses this to create session scopes like "session-1.scope".
-    /// For now we stub this - PIDs stay in their current cgroup but logind thinks
-    /// the scope was created successfully.
+    /// Creates the cgroup, moves PIDs, and registers D-Bus objects.
     async fn start_transient_unit(
         &self,
         #[zbus(signal_context)] ctx: zbus::object_server::SignalEmitter<'_>,
@@ -140,17 +139,32 @@ impl ManagerInterface {
         let job = job_path(job_id);
         let unit_name = name.to_string();
 
+        // Register the scope (creates cgroup, moves PIDs, registers D-Bus objects)
+        {
+            let mut mgr = self.manager.write().await;
+            if let Err(e) = mgr
+                .register_scope(
+                    &unit_name,
+                    slice.as_deref(),
+                    description.as_deref(),
+                    &pids,
+                )
+                .await
+            {
+                log::error!("Failed to register scope {}: {}", unit_name, e);
+                return Err(fdo::Error::Failed(format!(
+                    "Failed to create scope: {}",
+                    e
+                )));
+            }
+        }
+
         // Emit JobRemoved signal to indicate the job completed successfully
         if let Err(e) = Self::job_removed(&ctx, job_id, job.as_ref(), &unit_name, "done").await {
             log::warn!("Failed to emit JobRemoved signal: {}", e);
         } else {
-            log::info!("Scope {} created (stub), JobRemoved emitted", unit_name);
+            log::info!("Scope {} created, JobRemoved emitted", unit_name);
         }
-
-        // TODO: When cgroups are implemented:
-        // 1. Create cgroup: /sys/fs/cgroup/{slice}/{name}/
-        // 2. Move PIDs into cgroup
-        // 3. Register D-Bus object for the scope
 
         Ok(job)
     }

@@ -17,6 +17,13 @@ pub struct SpawnOptions {
     pub watchdog_usec: Option<u64>,
     /// Socket file descriptors for socket activation (LISTEN_FDS)
     pub socket_fds: Vec<RawFd>,
+    /// M19: Override UID for DynamicUser= (allocated by DynamicUserManager)
+    pub dynamic_uid: Option<u32>,
+    /// M19: Override GID for DynamicUser= (allocated by DynamicUserManager)
+    pub dynamic_gid: Option<u32>,
+    /// M19: Stored FDs from previous run (FileDescriptorStoreMax=)
+    /// These are passed via LISTEN_FDS along with socket_fds
+    pub stored_fds: Vec<RawFd>,
 }
 
 /// Spawn a process for a service (convenience wrapper)
@@ -63,6 +70,11 @@ pub fn spawn_service_with_options(
         }
     }
 
+    // Unset environment variables (UnsetEnvironment=)
+    for var in &service.service.unset_environment {
+        cmd.env_remove(var);
+    }
+
     // Set NOTIFY_SOCKET for Type=notify services
     if let Some(socket_path) = &options.notify_socket {
         cmd.env("NOTIFY_SOCKET", socket_path);
@@ -73,21 +85,37 @@ pub fn spawn_service_with_options(
         cmd.env("WATCHDOG_USEC", usec.to_string());
     }
 
-    // Set LISTEN_FDS for socket activation
-    let socket_fds = options.socket_fds.clone();
+    // Set LISTEN_FDS for socket activation and stored FDs
+    // M19: Combine socket_fds and stored_fds for LISTEN_FDS
+    let mut all_fds = options.socket_fds.clone();
+    all_fds.extend(&options.stored_fds);
+    let socket_fds = all_fds;
+
     if !socket_fds.is_empty() {
         cmd.env("LISTEN_FDS", socket_fds.len().to_string());
         // LISTEN_PID is set in pre_exec after fork
+        // M19: Set LISTEN_FDNAMES for named FDs (not implemented yet - would need fd names)
     }
 
     // Collect pre_exec settings
-    let uid = service.service.user.as_ref().and_then(|u| resolve_user(u));
+    // M19: DynamicUser= overrides User=/Group= settings
+    let uid = options
+        .dynamic_uid
+        .or_else(|| service.service.user.as_ref().and_then(|u| resolve_user(u)));
+    let gid = options
+        .dynamic_gid
+        .or_else(|| service.service.group.as_ref().and_then(|g| resolve_group(g)));
     let limit_nofile = service.service.limit_nofile;
+    let limit_nproc = service.service.limit_nproc;
+    let limit_core = service.service.limit_core;
     let oom_score_adjust = service.service.oom_score_adjust;
     let tty_path = service.service.tty_path.clone();
     let tty_reset = service.service.tty_reset;
     let std_input = service.service.standard_input.clone();
     let service_section = service.service.clone(); // For sandbox
+
+    // M17: Create runtime directories before fork (as root)
+    create_service_directories(&service.service, &service.name, uid, gid)?;
 
     // Apply process settings in pre_exec (runs after fork, before exec)
     #[cfg(unix)]
@@ -124,7 +152,7 @@ pub fn spawn_service_with_options(
                 }
             }
 
-            // Set resource limits (LimitNOFILE=)
+            // Set resource limits (LimitNOFILE=, LimitNPROC=, LimitCORE=)
             if let Some(nofile) = limit_nofile {
                 let rlim = libc::rlimit {
                     rlim_cur: nofile,
@@ -132,6 +160,24 @@ pub fn spawn_service_with_options(
                 };
                 if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) != 0 {
                     log::warn!("Failed to set RLIMIT_NOFILE to {}", nofile);
+                }
+            }
+            if let Some(nproc) = limit_nproc {
+                let rlim = libc::rlimit {
+                    rlim_cur: nproc,
+                    rlim_max: nproc,
+                };
+                if libc::setrlimit(libc::RLIMIT_NPROC, &rlim) != 0 {
+                    log::warn!("Failed to set RLIMIT_NPROC to {}", nproc);
+                }
+            }
+            if let Some(core) = limit_core {
+                let rlim = libc::rlimit {
+                    rlim_cur: core,
+                    rlim_max: core,
+                };
+                if libc::setrlimit(libc::RLIMIT_CORE, &rlim) != 0 {
+                    log::warn!("Failed to set RLIMIT_CORE to {}", core);
                 }
             }
 
@@ -149,7 +195,11 @@ pub fn spawn_service_with_options(
                 // Continue anyway - sandbox failures shouldn't prevent service start
             }
 
-            // Set user ID (if specified) - must be after sandbox setup
+            // Set group and user IDs (if specified) - must be after sandbox setup
+            // Group must be set before user (can't change groups after dropping root)
+            if let Some(gid) = gid {
+                nix::unistd::setgid(nix::unistd::Gid::from_raw(gid))?;
+            }
             if let Some(uid) = uid {
                 nix::unistd::setuid(nix::unistd::Uid::from_raw(uid))?;
             }
@@ -331,6 +381,97 @@ fn resolve_user(user: &str) -> Option<u32> {
             Some((*pwd).pw_uid)
         }
     }
+}
+
+/// Resolve group name to GID
+#[cfg(unix)]
+fn resolve_group(group: &str) -> Option<u32> {
+    // Try numeric GID first
+    if let Ok(gid) = group.parse::<u32>() {
+        return Some(gid);
+    }
+
+    // Look up by name
+    use std::ffi::CString;
+    let name = CString::new(group).ok()?;
+    unsafe {
+        let grp = libc::getgrnam(name.as_ptr());
+        if grp.is_null() {
+            None
+        } else {
+            Some((*grp).gr_gid)
+        }
+    }
+}
+
+/// M17: Create service directories (State, Runtime, Config, Logs, Cache)
+fn create_service_directories(
+    service: &crate::units::ServiceSection,
+    service_name: &str,
+    uid: Option<u32>,
+    gid: Option<u32>,
+) -> Result<(), SpawnError> {
+    use std::os::unix::fs::{chown, PermissionsExt};
+    use std::path::Path;
+
+    // Extract base name from service name (remove .service suffix)
+    let base_name = service_name.strip_suffix(".service").unwrap_or(service_name);
+
+    // Helper to create a directory with correct ownership
+    let create_dir = |base: &str, name: &str| -> std::io::Result<()> {
+        let path = Path::new(base).join(name);
+        std::fs::create_dir_all(&path)?;
+        // Set ownership if user/group specified
+        if uid.is_some() || gid.is_some() {
+            chown(&path, uid, gid)?;
+        }
+        // Set permissions: 0755 for directories
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+        log::debug!("Created directory: {}", path.display());
+        Ok(())
+    };
+
+    // StateDirectory= -> /var/lib/<name>
+    for name in &service.state_directory {
+        let dir_name = if name.is_empty() { base_name } else { name };
+        if let Err(e) = create_dir("/var/lib", dir_name) {
+            log::warn!("Failed to create state directory {}: {}", dir_name, e);
+        }
+    }
+
+    // RuntimeDirectory= -> /run/<name>
+    for name in &service.runtime_directory {
+        let dir_name = if name.is_empty() { base_name } else { name };
+        if let Err(e) = create_dir("/run", dir_name) {
+            log::warn!("Failed to create runtime directory {}: {}", dir_name, e);
+        }
+    }
+
+    // ConfigurationDirectory= -> /etc/<name>
+    for name in &service.configuration_directory {
+        let dir_name = if name.is_empty() { base_name } else { name };
+        if let Err(e) = create_dir("/etc", dir_name) {
+            log::warn!("Failed to create configuration directory {}: {}", dir_name, e);
+        }
+    }
+
+    // LogsDirectory= -> /var/log/<name>
+    for name in &service.logs_directory {
+        let dir_name = if name.is_empty() { base_name } else { name };
+        if let Err(e) = create_dir("/var/log", dir_name) {
+            log::warn!("Failed to create logs directory {}: {}", dir_name, e);
+        }
+    }
+
+    // CacheDirectory= -> /var/cache/<name>
+    for name in &service.cache_directory {
+        let dir_name = if name.is_empty() { base_name } else { name };
+        if let Err(e) = create_dir("/var/cache", dir_name) {
+            log::warn!("Failed to create cache directory {}: {}", dir_name, e);
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]

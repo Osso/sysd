@@ -11,7 +11,7 @@ mod target;
 mod timer;
 mod unit;
 
-pub use mount::Mount;
+pub use mount::{Mount, MountSection};
 pub use parser::{parse_file, parse_unit_file, ParseError, ParsedFile};
 pub use service::*;
 pub use slice::Slice;
@@ -79,6 +79,17 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
         if let Some(vals) = unit.get("CONDITIONNEEDSUPDATE") {
             svc.unit.condition_needs_update = vals.iter().map(|(_, v)| v.clone()).collect();
         }
+        // M18: BindsTo
+        if let Some(vals) = unit.get("BINDSTO") {
+            svc.unit.binds_to = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        // M18: IgnoreOnIsolate
+        if let Some(vals) = unit.get("IGNOREONISOLATE") {
+            if let Some((_, s)) = vals.first() {
+                svc.unit.ignore_on_isolate =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
     }
 
     // [Service] section
@@ -140,6 +151,11 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
                 svc.service.watchdog_sec = parse_duration(s);
             }
         }
+        if let Some(vals) = service.get("NOTIFYACCESS") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.notify_access = NotifyAccess::parse(s).unwrap_or_default();
+            }
+        }
         if let Some(vals) = service.get("PIDFILE") {
             svc.service.pid_file = vals.first().map(|(_, v)| v.into());
         }
@@ -173,6 +189,12 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
         }
         if let Some(vals) = service.get("ENVIRONMENTFILE") {
             svc.service.environment_file = vals.iter().map(|(_, v)| v.into()).collect();
+        }
+        if let Some(vals) = service.get("UNSETENVIRONMENT") {
+            for (_, v) in vals {
+                // UnsetEnvironment can have space-separated variable names
+                svc.service.unset_environment.extend(v.split_whitespace().map(String::from));
+            }
         }
 
         // I/O
@@ -229,6 +251,73 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
                 } else {
                     s.parse().ok()
                 };
+            }
+        }
+        if let Some(vals) = service.get("LIMITNPROC") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.limit_nproc = if s.to_lowercase() == "infinity" {
+                    Some(u64::MAX)
+                } else {
+                    s.parse().ok()
+                };
+            }
+        }
+        if let Some(vals) = service.get("LIMITCORE") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.limit_core = if s.to_lowercase() == "infinity" {
+                    Some(u64::MAX)
+                } else {
+                    s.parse().ok()
+                };
+            }
+        }
+
+        // M17: Auto-created directories
+        if let Some(vals) = service.get("STATEDIRECTORY") {
+            for (_, v) in vals {
+                svc.service
+                    .state_directory
+                    .extend(v.split_whitespace().map(String::from));
+            }
+        }
+        if let Some(vals) = service.get("RUNTIMEDIRECTORY") {
+            for (_, v) in vals {
+                svc.service
+                    .runtime_directory
+                    .extend(v.split_whitespace().map(String::from));
+            }
+        }
+        if let Some(vals) = service.get("CONFIGURATIONDIRECTORY") {
+            for (_, v) in vals {
+                svc.service
+                    .configuration_directory
+                    .extend(v.split_whitespace().map(String::from));
+            }
+        }
+        if let Some(vals) = service.get("LOGSDIRECTORY") {
+            for (_, v) in vals {
+                svc.service
+                    .logs_directory
+                    .extend(v.split_whitespace().map(String::from));
+            }
+        }
+        if let Some(vals) = service.get("CACHEDIRECTORY") {
+            for (_, v) in vals {
+                svc.service
+                    .cache_directory
+                    .extend(v.split_whitespace().map(String::from));
+            }
+        }
+        if let Some(vals) = service.get("RUNTIMEDIRECTORYPRESERVE") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.runtime_directory_preserve =
+                    RuntimeDirectoryPreserve::parse(s).unwrap_or_default();
+            }
+        }
+        if let Some(vals) = service.get("DYNAMICUSER") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.dynamic_user =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
             }
         }
 
@@ -352,6 +441,148 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
                 );
             }
         }
+        if let Some(vals) = service.get("DEVICEPOLICY") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.device_policy = DevicePolicy::parse(s).unwrap_or_default();
+            }
+        }
+        if let Some(vals) = service.get("DEVICEALLOW") {
+            for (_, v) in vals {
+                // DeviceAllow values are kept as-is (e.g., "/dev/null rw" or "char-pts r")
+                svc.service.device_allow.push(v.clone());
+            }
+        }
+
+        // M16: Extended security hardening
+        if let Some(vals) = service.get("RESTRICTREALTIME") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.restrict_realtime =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("PROTECTCONTROLGROUPS") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.protect_control_groups =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("MEMORYDENYWRITEEXECUTE") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.memory_deny_write_execute =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("LOCKPERSONALITY") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.lock_personality =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("PROTECTKERNELTUNABLES") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.protect_kernel_tunables =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("PROTECTKERNELLOGS") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.protect_kernel_logs =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("PROTECTCLOCK") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.protect_clock =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("PROTECTHOSTNAME") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.protect_hostname =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("IGNORESIGPIPE") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.ignore_sigpipe =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("RESTRICTSUIDSGID") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.restrict_suid_sgid =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("RESTRICTADDRESSFAMILIES") {
+            let families: Vec<String> = vals
+                .iter()
+                .flat_map(|(_, v)| v.split_whitespace().map(String::from))
+                .collect();
+            svc.service.restrict_address_families = Some(families);
+        }
+        if let Some(vals) = service.get("SYSTEMCALLERRORNUMBER") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.system_call_error_number = s.parse().ok();
+            }
+        }
+        if let Some(vals) = service.get("SYSTEMCALLARCHITECTURES") {
+            for (_, v) in vals {
+                svc.service
+                    .system_call_architectures
+                    .extend(v.split_whitespace().map(String::from));
+            }
+        }
+
+        // M18: Process control & dependencies
+        if let Some(vals) = service.get("STARTLIMITBURST") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.start_limit_burst = s.parse().ok();
+            }
+        }
+        if let Some(vals) = service.get("STARTLIMITINTERVALSEC") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.start_limit_interval_sec = parse_duration(s);
+            }
+        }
+        if let Some(vals) = service.get("SOCKETS") {
+            svc.service.sockets = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = service.get("SENDSIGHUP") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.send_sighup =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("SLICE") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.slice = Some(s.clone());
+            }
+        }
+        if let Some(vals) = service.get("DELEGATE") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.delegate =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = service.get("EXECSTOPPOST") {
+            svc.service.exec_stop_post = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = service.get("FILEDESCRIPTORSTOREMAX") {
+            if let Some((_, s)) = vals.first() {
+                svc.service.file_descriptor_store_max = s.parse().ok();
+            }
+        }
+        if let Some(vals) = service.get("RESTARTPREVENTEXITSTATUS") {
+            // Parse space-separated exit codes
+            for (_, v) in vals {
+                for code in v.split_whitespace() {
+                    if let Ok(n) = code.parse::<i32>() {
+                        svc.service.restart_prevent_exit_status.push(n);
+                    }
+                }
+            }
+        }
     }
 
     // [Install] section
@@ -368,6 +599,9 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
         if let Some(vals) = install.get("ALIAS") {
             svc.install.alias = vals.iter().map(|(_, v)| v.clone()).collect();
         }
+        if let Some(vals) = install.get("DEFAULTINSTANCE") {
+            svc.install.default_instance = vals.first().map(|(_, v)| v.clone());
+        }
     }
 
     Ok(svc)
@@ -375,17 +609,31 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
 
 /// Parse a service file from disk
 pub async fn load_service(path: &Path) -> Result<Service, ParseError> {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
+    // Resolve symlinks to get canonical name (e.g., dbus.service -> dbus-broker.service)
+    let name = if path.is_symlink() {
+        std::fs::read_link(path)
+            .ok()
+            .and_then(|target| target.file_name().map(|f| f.to_os_string()))
+            .and_then(|f| f.into_string().ok())
+            .unwrap_or_else(|| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string()
+            })
+    } else {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    };
 
     let mut parsed = parse_unit_file(path).await?;
 
     // Load and merge drop-in files
     load_dropins(path, &mut parsed).await;
 
-    parse_service(name, &parsed)
+    parse_service(&name, &parsed)
 }
 
 /// Find and load drop-in configuration files (.d/*.conf)
@@ -981,6 +1229,9 @@ pub fn parse_socket(name: &str, parsed: &ParsedFile) -> Result<Socket, ParseErro
         if let Some(vals) = install.get("ALIAS") {
             sock.install.alias = vals.iter().map(|(_, v)| v.clone()).collect();
         }
+        if let Some(vals) = install.get("DEFAULTINSTANCE") {
+            sock.install.default_instance = vals.first().map(|(_, v)| v.clone());
+        }
     }
 
     Ok(sock)
@@ -1160,6 +1411,9 @@ pub fn parse_timer(name: &str, parsed: &ParsedFile) -> Result<Timer, ParseError>
         }
         if let Some(vals) = install.get("ALIAS") {
             tmr.install.alias = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = install.get("DEFAULTINSTANCE") {
+            tmr.install.default_instance = vals.first().map(|(_, v)| v.clone());
         }
     }
 

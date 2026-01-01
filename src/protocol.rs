@@ -55,6 +55,8 @@ pub enum Request {
     ReloadUnitFiles,
     /// Sync units (reload + restart changed)
     SyncUnits,
+    /// Switch to target (stop unrelated units)
+    SwitchTarget { target: String },
     /// Ping (health check)
     Ping,
 }
