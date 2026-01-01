@@ -38,6 +38,11 @@ pub fn init() -> Result<(), Pid1Error> {
     // Mount essential filesystems
     mount::mount_essential_filesystems()?;
 
+    // Make ctrl-alt-delete send SIGINT instead of immediate reboot
+    if let Err(e) = std::fs::write("/proc/sys/kernel/ctrl-alt-del", "0") {
+        log::warn!("Failed to configure ctrl-alt-del: {}", e);
+    }
+
     Ok(())
 }
 

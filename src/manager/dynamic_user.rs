@@ -90,6 +90,7 @@ impl DynamicUserManager {
     }
 
     /// Check if a UID is in the dynamic range
+    #[allow(dead_code)] // Used in tests, public API for future use
     pub fn is_dynamic_uid(uid: u32) -> bool {
         uid >= DYNAMIC_UID_MIN && uid <= DYNAMIC_UID_MAX
     }
