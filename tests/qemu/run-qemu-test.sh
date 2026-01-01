@@ -71,14 +71,32 @@ create_initramfs() {
     cp "$SYSD_BIN" "$initrd_dir/bin/sysd"
     chmod +x "$initrd_dir/bin/sysd"
 
-    # Copy busybox for utilities (if available)
+    # Copy busybox for utilities
+    local busybox_bin=""
     if command -v busybox &>/dev/null; then
-        cp "$(command -v busybox)" "$initrd_dir/bin/busybox"
+        busybox_bin="$(command -v busybox)"
+    elif [[ -f /usr/lib/initcpio/busybox ]]; then
+        # Arch Linux mkinitcpio-busybox
+        busybox_bin="/usr/lib/initcpio/busybox"
+    fi
+
+    if [[ -n "$busybox_bin" ]]; then
+        cp "$busybox_bin" "$initrd_dir/bin/busybox"
         # Create symlinks for common utilities
-        for cmd in sh cat ls mount ps; do
+        for cmd in sh cat ls mount ps kill sleep; do
             ln -sf busybox "$initrd_dir/bin/$cmd"
         done
+    else
+        log "Warning: busybox not found, shutdown test will fail"
     fi
+
+    # Create a shutdown trigger script that sends SIGTERM after delay
+    cat > "$initrd_dir/bin/trigger-shutdown" <<'SHUTDOWN_EOF'
+#!/bin/sh
+sleep 2
+kill -TERM 1
+SHUTDOWN_EOF
+    chmod +x "$initrd_dir/bin/trigger-shutdown"
 
     # Minimal /etc/passwd for User= directive
     echo "root:x:0:0:root:/:/bin/sh" > "$initrd_dir/etc/passwd"
@@ -88,10 +106,21 @@ create_initramfs() {
     mkdir -p "$initrd_dir/etc/systemd/system"
     mkdir -p "$initrd_dir/usr/lib/systemd/system"
 
-    # Create test target (minimal, no services)
+    # Create shutdown trigger service (sends SIGTERM to PID 1 after delay)
+    cat > "$initrd_dir/usr/lib/systemd/system/shutdown-trigger.service" <<'EOF'
+[Unit]
+Description=Shutdown Trigger for Testing
+
+[Service]
+Type=oneshot
+ExecStart=/bin/trigger-shutdown
+EOF
+
+    # Create test target that wants the shutdown trigger
     cat > "$initrd_dir/usr/lib/systemd/system/test.target" <<'EOF'
 [Unit]
 Description=Test Target
+Wants=shutdown-trigger.service
 EOF
 
     # Create default target symlink (sysd looks in /etc/systemd/system/)
@@ -153,14 +182,13 @@ run_qemu() {
         ((waited++))
     done
 
-    # Send SIGTERM to PID 1 via QEMU monitor (system_powerdown sends ACPI, we use nmi for immediate)
-    # Actually, sysd should handle the timeout and shutdown gracefully
-    # For now, just let it run and check if it shuts down cleanly
-    log "Sending shutdown signal..."
+    # Wait for shutdown-trigger.service to run and initiate shutdown
+    # Service sleeps 2s then sends SIGTERM, then shutdown takes ~5s
+    log "Waiting for shutdown-trigger.service to initiate shutdown..."
+    sleep 10
+
+    # Force quit if still running
     if [[ -S "$monitor_sock" ]]; then
-        echo "sendkey ctrl-alt-delete" | nc -U -q1 "$monitor_sock" 2>/dev/null || true
-        sleep 3
-        # Force quit if still running
         echo "quit" | nc -U -q1 "$monitor_sock" 2>/dev/null || true
     fi
 
