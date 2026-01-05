@@ -579,7 +579,7 @@ impl ServiceType {
         match s.to_lowercase().as_str() {
             "simple" => Some(Self::Simple),
             "forking" => Some(Self::Forking),
-            "notify" => Some(Self::Notify),
+            "notify" | "notify-reload" => Some(Self::Notify),
             "dbus" => Some(Self::Dbus),
             "oneshot" => Some(Self::Oneshot),
             "idle" => Some(Self::Idle),
@@ -669,6 +669,8 @@ mod tests {
         assert_eq!(ServiceType::parse("Simple"), Some(ServiceType::Simple));
         assert_eq!(ServiceType::parse("forking"), Some(ServiceType::Forking));
         assert_eq!(ServiceType::parse("notify"), Some(ServiceType::Notify));
+        // notify-reload is used by dbus-broker - treat as Notify
+        assert_eq!(ServiceType::parse("notify-reload"), Some(ServiceType::Notify));
         assert_eq!(ServiceType::parse("dbus"), Some(ServiceType::Dbus));
         assert_eq!(ServiceType::parse("oneshot"), Some(ServiceType::Oneshot));
         assert_eq!(ServiceType::parse("invalid"), None);

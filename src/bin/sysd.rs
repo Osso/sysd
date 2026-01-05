@@ -136,27 +136,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let manager: SharedManager = Arc::new(RwLock::new(manager));
 
-    // Start D-Bus server (shares manager with IPC)
-    // User mode uses session bus, system mode uses system bus
-    let _dbus_server = if !user_mode {
-        match DbusServer::new(Arc::clone(&manager)).await {
-            Ok(server) => {
-                info!("D-Bus interface available at org.freedesktop.systemd1");
-                Some(server)
+    // D-Bus server initialization is deferred until after boot
+    // because dbus-broker.service needs to start first
+    // Spawn a task that retries D-Bus connection with backoff
+    if !user_mode {
+        let manager_dbus = Arc::clone(&manager);
+        tokio::spawn(async move {
+            // Wait a bit for boot to start dbus.socket and dbus-broker.service
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            let mut attempts = 0;
+            let max_attempts = 30; // Try for ~60 seconds total
+            let mut delay = std::time::Duration::from_millis(500);
+
+            loop {
+                match DbusServer::new(Arc::clone(&manager_dbus)).await {
+                    Ok(_server) => {
+                        info!("D-Bus interface available at org.freedesktop.systemd1");
+                        // Keep server alive - it's moved into this task
+                        // The connection persists as long as this task runs
+                        std::future::pending::<()>().await;
+                    }
+                    Err(e) => {
+                        attempts += 1;
+                        if attempts >= max_attempts {
+                            log::warn!(
+                                "Failed to start D-Bus server after {} attempts: {} (logind integration unavailable)",
+                                attempts, e
+                            );
+                            break;
+                        }
+                        log::debug!(
+                            "D-Bus not ready yet (attempt {}): {}, retrying in {:?}",
+                            attempts, e, delay
+                        );
+                        tokio::time::sleep(delay).await;
+                        // Exponential backoff, max 5 seconds
+                        delay = std::cmp::min(delay * 2, std::time::Duration::from_secs(5));
+                    }
+                }
             }
-            Err(e) => {
-                log::warn!(
-                    "Failed to start D-Bus server: {} (logind integration unavailable)",
-                    e
-                );
-                None
-            }
-        }
+        });
     } else {
         // TODO: User mode D-Bus on session bus
         log::debug!("D-Bus not enabled in user mode (not yet implemented)");
-        None
-    };
+    }
 
     // PID 1: Set up signal handler for shutdown/reboot
     let signal_rx = if is_pid1 {
