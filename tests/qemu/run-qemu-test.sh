@@ -83,17 +83,66 @@ create_initramfs() {
     if [[ -n "$busybox_bin" ]]; then
         cp "$busybox_bin" "$initrd_dir/bin/busybox"
         # Create symlinks for common utilities
-        for cmd in sh cat ls mount ps kill sleep; do
+        for cmd in sh cat ls mount ps kill sleep grep mkdir mkfifo; do
             ln -sf busybox "$initrd_dir/bin/$cmd"
         done
     else
         log "Warning: busybox not found, shutdown test will fail"
     fi
 
-    # Create a shutdown trigger script that sends SIGTERM after delay
+    # Create a shutdown trigger script that runs tests then sends SIGTERM
     cat > "$initrd_dir/bin/trigger-shutdown" <<'SHUTDOWN_EOF'
 #!/bin/sh
-sleep 2
+echo "=== QEMU TESTS ==="
+
+# Test 1: File write to /tmp (may not exist if not in fstab)
+echo "TEST: file_write"
+if [ -d /tmp ]; then
+    echo "test_content_12345" > /tmp/test_file
+    if cat /tmp/test_file | grep -q "test_content_12345"; then
+        echo "RESULT: file_write=PASS"
+    else
+        echo "RESULT: file_write=FAIL"
+    fi
+else
+    # Create /tmp and try again
+    mkdir -p /tmp
+    echo "test_content_12345" > /tmp/test_file
+    if cat /tmp/test_file | grep -q "test_content_12345"; then
+        echo "RESULT: file_write=PASS"
+    else
+        echo "RESULT: file_write=FAIL"
+    fi
+fi
+
+# Test 2: File write to /run
+echo "TEST: run_write"
+echo "run_content_67890" > /run/test_file
+if cat /run/test_file | grep -q "run_content_67890"; then
+    echo "RESULT: run_write=PASS"
+else
+    echo "RESULT: run_write=FAIL"
+fi
+
+# Test 3: D-Bus socket exists
+echo "TEST: dbus_socket"
+if [ -S /run/dbus/system_bus_socket ]; then
+    echo "RESULT: dbus_socket=PASS"
+else
+    echo "RESULT: dbus_socket=MISSING (expected without dbus-broker)"
+fi
+
+# Test 4: sysd socket exists
+echo "TEST: sysd_socket"
+if [ -S /run/sysd.sock ]; then
+    echo "RESULT: sysd_socket=PASS"
+else
+    echo "RESULT: sysd_socket=FAIL"
+fi
+
+echo "=== QEMU TESTS DONE ==="
+
+sleep 1
 kill -TERM 1
 SHUTDOWN_EOF
     chmod +x "$initrd_dir/bin/trigger-shutdown"
@@ -106,20 +155,90 @@ SHUTDOWN_EOF
     mkdir -p "$initrd_dir/etc/systemd/system"
     mkdir -p "$initrd_dir/usr/lib/systemd/system"
 
+    # === D-Bus socket activation test ===
+    # Create mock dbus-broker that just creates socket and signals ready
+    cat > "$initrd_dir/bin/mock-dbus-broker" <<'DBUS_EOF'
+#!/bin/sh
+echo "mock-dbus-broker: starting"
+mkdir -p /run/dbus
+# Create the socket file (real dbus-broker would listen on it)
+# We use a simple approach: create a named pipe as placeholder
+mkfifo /run/dbus/system_bus_socket 2>/dev/null || true
+echo "mock-dbus-broker: socket created at /run/dbus/system_bus_socket"
+# Signal systemd we're ready (for Type=notify)
+if [ -n "$NOTIFY_SOCKET" ]; then
+    echo "READY=1" | cat > "$NOTIFY_SOCKET" 2>/dev/null || true
+fi
+echo "mock-dbus-broker: ready, waiting..."
+# Keep running until killed
+while true; do sleep 10; done
+DBUS_EOF
+    chmod +x "$initrd_dir/bin/mock-dbus-broker"
+
+    # Create dbus.socket unit (socket activation)
+    cat > "$initrd_dir/usr/lib/systemd/system/dbus.socket" <<'EOF'
+[Unit]
+Description=D-Bus System Message Bus Socket
+DefaultDependencies=no
+Before=sockets.target
+
+[Socket]
+ListenStream=/run/dbus/system_bus_socket
+EOF
+
+    # Create dbus-broker.service (activated by socket)
+    cat > "$initrd_dir/usr/lib/systemd/system/dbus-broker.service" <<'EOF'
+[Unit]
+Description=D-Bus System Message Bus
+DefaultDependencies=no
+After=dbus.socket
+Requires=dbus.socket
+
+[Service]
+Type=notify
+ExecStart=/bin/mock-dbus-broker
+EOF
+
+    # Create sockets.target
+    cat > "$initrd_dir/usr/lib/systemd/system/sockets.target" <<'EOF'
+[Unit]
+Description=Sockets
+DefaultDependencies=no
+EOF
+
+    # Create sysinit.target
+    cat > "$initrd_dir/usr/lib/systemd/system/sysinit.target" <<'EOF'
+[Unit]
+Description=System Initialization
+DefaultDependencies=no
+EOF
+
+    # Create basic.target that wants dbus.socket
+    cat > "$initrd_dir/usr/lib/systemd/system/basic.target" <<'EOF'
+[Unit]
+Description=Basic System
+Requires=sysinit.target sockets.target
+After=sysinit.target sockets.target
+Wants=dbus.socket
+EOF
+
     # Create shutdown trigger service (sends SIGTERM to PID 1 after delay)
     cat > "$initrd_dir/usr/lib/systemd/system/shutdown-trigger.service" <<'EOF'
 [Unit]
 Description=Shutdown Trigger for Testing
+After=basic.target
 
 [Service]
 Type=oneshot
 ExecStart=/bin/trigger-shutdown
 EOF
 
-    # Create test target that wants the shutdown trigger
+    # Create test target that requires basic.target (which pulls in dbus)
     cat > "$initrd_dir/usr/lib/systemd/system/test.target" <<'EOF'
 [Unit]
 Description=Test Target
+Requires=basic.target
+After=basic.target
 Wants=shutdown-trigger.service
 EOF
 
@@ -281,6 +400,60 @@ check_results() {
         log "✓ Filesystem sync: PASS"
     else
         log "○ Filesystem sync (may not log this)"
+    fi
+
+    # === File I/O Tests ===
+    log "--- File I/O Tests ---"
+
+    # Check file write to /tmp
+    if grep -q "RESULT: file_write=PASS" "$output_file"; then
+        log "✓ File write to /tmp: PASS"
+    elif grep -q "RESULT: file_write=FAIL" "$output_file"; then
+        err "✗ File write to /tmp: FAIL"
+        success=false
+    else
+        log "○ File write to /tmp (test not run)"
+    fi
+
+    # Check file write to /run
+    if grep -q "RESULT: run_write=PASS" "$output_file"; then
+        log "✓ File write to /run: PASS"
+    elif grep -q "RESULT: run_write=FAIL" "$output_file"; then
+        err "✗ File write to /run: FAIL"
+        success=false
+    else
+        log "○ File write to /run (test not run)"
+    fi
+
+    # === Socket Tests ===
+    log "--- Socket Tests ---"
+
+    # Check sysd socket exists
+    if grep -q "RESULT: sysd_socket=PASS" "$output_file"; then
+        log "✓ sysd socket exists: PASS"
+    elif grep -q "RESULT: sysd_socket=FAIL" "$output_file"; then
+        err "✗ sysd socket exists: FAIL"
+        success=false
+    else
+        log "○ sysd socket (test not run)"
+    fi
+
+    # Check D-Bus socket (should be created by socket activation)
+    if grep -q "RESULT: dbus_socket=PASS" "$output_file"; then
+        log "✓ D-Bus socket exists: PASS"
+    elif grep -q "RESULT: dbus_socket=MISSING" "$output_file"; then
+        err "✗ D-Bus socket missing: FAIL (socket activation broken)"
+        success=false
+    else
+        log "○ D-Bus socket (test not run)"
+    fi
+
+    # Check if dbus.socket was started
+    if grep -q "Started dbus.socket\|Starting dbus.socket" "$output_file"; then
+        log "✓ dbus.socket started: PASS"
+    else
+        err "✗ dbus.socket not started: FAIL"
+        success=false
     fi
 
     if $success; then

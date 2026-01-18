@@ -61,7 +61,7 @@ build_image() {
     cp "$target_dir/sysd" "$SCRIPT_DIR/sysd"
     cp "$target_dir/sysdctl" "$SCRIPT_DIR/sysdctl"
 
-    docker build -t sysd-test:latest "$SCRIPT_DIR"
+    DOCKER_BUILDKIT=0 docker build -t sysd-test:latest "$SCRIPT_DIR"
 
     # Clean up copied binaries
     rm -f "$SCRIPT_DIR/sysd" "$SCRIPT_DIR/sysdctl"

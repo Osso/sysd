@@ -2,11 +2,21 @@
 //!
 //! Handles mounting and unmounting filesystems.
 
+use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
 use crate::units::Mount;
 
 use super::{Manager, ManagerError};
+
+/// Write to kernel log (/dev/kmsg) - survives better than filesystem logs during early boot
+fn kmsg(msg: &str) {
+    if let Ok(mut f) = fs::OpenOptions::new().write(true).open("/dev/kmsg") {
+        let _ = writeln!(f, "sysd: {}", msg);
+    }
+    eprintln!("sysd: {}", msg);
+}
 
 impl Manager {
     /// Start a mount unit (execute mount operation)
@@ -30,7 +40,9 @@ impl Manager {
         let mount_point = &mnt.mount.r#where;
         let what = &mnt.mount.what;
         let fs_type = mnt.mount.fs_type.as_deref().unwrap_or("auto");
-        let options = mnt.mount.options.as_deref().unwrap_or("defaults");
+        // Apply specifier substitution: %% -> %
+        let options_raw = mnt.mount.options.as_deref().unwrap_or("defaults");
+        let options = options_raw.replace("%%", "%");
 
         // Create mount point directory if needed
         if let Some(mode) = mnt.mount.directory_mode {
@@ -47,12 +59,14 @@ impl Manager {
 
         // Check if already mounted (via /proc/mounts)
         if is_mounted(mount_point) {
+            kmsg(&format!("{} already mounted at {}, skipping", name, mount_point));
             log::info!("{} already mounted at {}", name, mount_point);
             if let Some(state) = self.states.get_mut(name) {
                 state.set_running(0);
             }
             return Ok(());
         }
+        kmsg(&format!("{} NOT mounted, will mount at {}", name, mount_point));
 
         // Execute mount
         log::info!(
@@ -117,7 +131,8 @@ impl Manager {
                 Ok(())
             }
             Err(e) => {
-                let msg = format!("mount failed: {}", e);
+                let msg = format!("mount {} at {} failed: {}", what, mount_point, e);
+                kmsg(&format!("MOUNT FAILED: {}", msg));
                 log::error!("{}: {}", name, msg);
                 if let Some(state) = self.states.get_mut(name) {
                     state.set_failed(msg.clone());

@@ -87,13 +87,29 @@ impl DepGraph {
 
         let section = unit.unit_section();
 
-        // DefaultDependencies=yes (default) adds implicit dependencies for services
-        // - After=basic.target (service waits for basic system to be up)
-        // - Before=shutdown.target (service stops before shutdown)
-        // - Conflicts=shutdown.target (stop service when shutdown starts)
+        // DefaultDependencies=yes (default) adds implicit dependencies
+        // Different unit types get different default dependencies:
+        // - Services: After=basic.target, Before=shutdown.target
+        // - Sockets: After=sysinit.target, Before=sockets.target, Before=shutdown.target
+        // - Targets: no implicit ordering
         if section.default_dependencies && !unit.is_target() {
-            // After=basic.target - we depend on basic.target (if loaded)
-            self.add_edge(name, "basic.target");
+            if unit.is_socket() {
+                // Sockets use sysinit.target, not basic.target
+                // This is crucial because dbus-broker.service has Before=basic.target
+                // but After=dbus.socket, so dbus.socket must NOT wait for basic.target
+                self.add_edge(name, "sysinit.target");
+
+                // Before=sockets.target - sockets.target depends on us (if loaded)
+                if self.nodes.contains("sockets.target") {
+                    self.edges
+                        .entry("sockets.target".to_string())
+                        .or_default()
+                        .insert(name.to_string());
+                }
+            } else {
+                // Services and other units wait for basic.target
+                self.add_edge(name, "basic.target");
+            }
 
             // Before=shutdown.target - shutdown.target depends on us (if loaded)
             if self.nodes.contains("shutdown.target") {
@@ -304,8 +320,15 @@ impl DepGraph {
                     .min_by_key(|(_, &deg)| deg)
                     .unwrap();
 
-                log::debug!(
-                    "Breaking ordering cycle by starting {} early",
+                // Show all cycle participants for debugging
+                let cycle_units: Vec<_> = remaining.iter().map(|(n, _)| n.as_str()).collect();
+                log::warn!(
+                    "Breaking ordering cycle: starting {} early (cycle involves: {})",
+                    cycle_node,
+                    cycle_units.join(", ")
+                );
+                eprintln!(
+                    "sysd: WARNING: Breaking ordering cycle by starting {} early",
                     cycle_node
                 );
 
@@ -406,9 +429,20 @@ mod tests {
     fn test_cycle_detection() {
         let mut graph = DepGraph::new();
         // a -> b -> c -> a (cycle)
-        graph.add_service(&make_service("a.service", &["c.service"]));
-        graph.add_service(&make_service("b.service", &["a.service"]));
-        graph.add_service(&make_service("c.service", &["b.service"]));
+        // Need to pre-register all nodes first, then add edges
+        let a = make_service("a.service", &["c.service"]);
+        let b = make_service("b.service", &["a.service"]);
+        let c = make_service("c.service", &["b.service"]);
+
+        // Pre-register all nodes so edges can be created
+        graph.add_node("a.service");
+        graph.add_node("b.service");
+        graph.add_node("c.service");
+
+        // Now add services (edges will be created since all nodes exist)
+        graph.add_service(&a);
+        graph.add_service(&b);
+        graph.add_service(&c);
 
         let err = graph.toposort().unwrap_err();
         assert!(!err.nodes.is_empty());
@@ -420,6 +454,9 @@ mod tests {
         // a.Before=b means b depends on a (a starts first)
         let mut a = make_service("a.service", &[]);
         a.unit.before = vec!["b.service".to_string()];
+
+        // Pre-register b.service so Before= edge can be created
+        graph.add_node("b.service");
         graph.add_service(&a);
         graph.add_service(&make_service("b.service", &[]));
 

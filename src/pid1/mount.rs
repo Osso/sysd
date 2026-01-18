@@ -9,7 +9,16 @@
 
 use nix::mount::{mount, MsFlags};
 use std::fs;
+use std::io::Write;
 use std::path::Path;
+
+/// Write to kernel log (/dev/kmsg) - survives better than filesystem logs during early boot
+fn kmsg(msg: &str) {
+    if let Ok(mut f) = fs::OpenOptions::new().write(true).open("/dev/kmsg") {
+        let _ = writeln!(f, "sysd: {}", msg);
+    }
+    eprintln!("sysd: {}", msg);
+}
 
 /// Mount information for an essential filesystem
 struct MountPoint {
@@ -88,6 +97,9 @@ const ESSENTIAL_MOUNTS: &[MountPoint] = &[
 
 /// Mount all essential filesystems
 pub fn mount_essential_filesystems() -> Result<(), MountError> {
+    // Print to console since logging may not be available yet
+    kmsg("Mounting essential filesystems...");
+
     for mp in ESSENTIAL_MOUNTS {
         mount_one(mp)?;
     }
@@ -95,6 +107,7 @@ pub fn mount_essential_filesystems() -> Result<(), MountError> {
     // Create essential directories in /run
     create_run_dirs()?;
 
+    kmsg("Essential filesystems mounted");
     log::info!("Essential filesystems mounted");
     Ok(())
 }
@@ -105,7 +118,8 @@ fn mount_one(mp: &MountPoint) -> Result<(), MountError> {
 
     // Skip if already mounted (check if target has different device than parent)
     if is_mountpoint(target) {
-        log::debug!("{} already mounted, skipping", mp.target);
+        kmsg(&format!("{} already mounted", mp.target));
+        log::info!("{} already mounted", mp.target);
         return Ok(());
     }
 
@@ -119,6 +133,7 @@ fn mount_one(mp: &MountPoint) -> Result<(), MountError> {
 
     // Mount the filesystem
     mount(Some(mp.source), target, Some(mp.fstype), mp.flags, mp.data).map_err(|e| {
+        kmsg(&format!("FAILED to mount {} on {}: {}", mp.fstype, mp.target, e));
         MountError::Mount {
             target: mp.target.to_string(),
             fstype: mp.fstype.to_string(),
@@ -126,8 +141,31 @@ fn mount_one(mp: &MountPoint) -> Result<(), MountError> {
         }
     })?;
 
-    log::debug!("Mounted {} on {}", mp.fstype, mp.target);
+    // Verify the mount succeeded by checking the mount list
+    // Skip verification for /proc itself since we need /proc to read the mount list
+    if mp.target != "/proc" && !verify_mount(mp.target) {
+        kmsg(&format!(
+            "WARNING: mount() succeeded but {} not in mount list!",
+            mp.target
+        ));
+    }
+
+    kmsg(&format!("Mounted {} on {}", mp.fstype, mp.target));
+    log::info!("Mounted {} on {}", mp.fstype, mp.target);
     Ok(())
+}
+
+/// Verify a mount point exists in /proc/mounts
+fn verify_mount(target: &str) -> bool {
+    if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
+        for line in mounts.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 && parts[1] == target {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Check if a path is a mount point

@@ -61,7 +61,7 @@ type SharedManager = Arc<RwLock<Manager>>;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
 
     let is_pid1 = pid1::is_pid1();
     let user_mode = args.user;
@@ -276,15 +276,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     info!("Booting to target: {}", target);
                     match mgr.get_boot_plan(&target).await {
                         Ok(plan) => {
+                            eprintln!("sysd: Boot plan: {} units", plan.len());
                             info!("Boot plan: {} units", plan.len());
-                            for unit_name in plan {
-                                if let Err(e) = mgr.start(&unit_name).await {
-                                    log::warn!("Failed to start {}: {}", unit_name, e);
+                            // Show first 10 units on console for debugging
+                            let preview: Vec<_> = plan.iter().take(10).collect();
+                            eprintln!("sysd: First units: {:?}", preview);
+                            log::debug!("Boot plan order: {:?}", plan);
+                            for unit_name in &plan {
+                                eprintln!("sysd: Starting {}", unit_name);
+                                log::info!("Starting {}", unit_name);
+                                match mgr.start(unit_name).await {
+                                    Ok(()) => log::info!("Started {}", unit_name),
+                                    Err(e) => {
+                                        eprintln!("sysd: FAILED to start {}: {}", unit_name, e);
+                                        log::warn!("Failed to start {}: {}", unit_name, e);
+                                    }
                                 }
                             }
+                            eprintln!("sysd: Boot complete");
                             info!("Boot complete");
                         }
-                        Err(e) => log::error!("Failed to get boot plan: {}", e),
+                        Err(e) => {
+                            eprintln!("sysd: ERROR: Failed to get boot plan: {}", e);
+                            log::error!("Failed to get boot plan: {}", e);
+                        }
                     }
                 }
                 Err(e) => log::error!("No default target found: {}", e),
