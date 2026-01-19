@@ -93,6 +93,54 @@ const ESSENTIAL_MOUNTS: &[MountPoint] = &[
             .union(MsFlags::MS_NOEXEC),
         data: None,
     },
+    // /sys/kernel/config - configfs for kernel configuration
+    MountPoint {
+        source: "configfs",
+        target: "/sys/kernel/config",
+        fstype: "configfs",
+        flags: MsFlags::MS_NOSUID
+            .union(MsFlags::MS_NODEV)
+            .union(MsFlags::MS_NOEXEC),
+        data: None,
+    },
+    // /sys/kernel/debug - debugfs for kernel debugging
+    MountPoint {
+        source: "debugfs",
+        target: "/sys/kernel/debug",
+        fstype: "debugfs",
+        flags: MsFlags::MS_NOSUID
+            .union(MsFlags::MS_NODEV)
+            .union(MsFlags::MS_NOEXEC),
+        data: None,
+    },
+    // /sys/kernel/security - securityfs for LSM
+    MountPoint {
+        source: "securityfs",
+        target: "/sys/kernel/security",
+        fstype: "securityfs",
+        flags: MsFlags::MS_NOSUID
+            .union(MsFlags::MS_NODEV)
+            .union(MsFlags::MS_NOEXEC),
+        data: None,
+    },
+    // /sys/fs/bpf - BPF filesystem
+    MountPoint {
+        source: "bpf",
+        target: "/sys/fs/bpf",
+        fstype: "bpf",
+        flags: MsFlags::MS_NOSUID
+            .union(MsFlags::MS_NODEV)
+            .union(MsFlags::MS_NOEXEC),
+        data: Some("mode=0700"),
+    },
+    // /dev/hugepages - huge pages
+    MountPoint {
+        source: "hugetlbfs",
+        target: "/dev/hugepages",
+        fstype: "hugetlbfs",
+        flags: MsFlags::MS_NOSUID.union(MsFlags::MS_NODEV),
+        data: Some("pagesize=2M"),
+    },
 ];
 
 /// Mount all essential filesystems
