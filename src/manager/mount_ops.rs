@@ -79,12 +79,14 @@ impl Manager {
 
         use nix::mount::{mount, MsFlags};
 
-        // Parse options into MsFlags
+        // Parse options into MsFlags and data options
         let mut flags = MsFlags::empty();
-        let mut data_options = Vec::new();
+        let mut data_options: Vec<&str> = Vec::new();
+        let mut graceful_options: Vec<&str> = Vec::new(); // x-systemd.graceful-option=X
 
         for opt in options.split(',') {
-            match opt.trim() {
+            let opt = opt.trim();
+            match opt {
                 "ro" | "read-only" => flags |= MsFlags::MS_RDONLY,
                 "rw" => {} // default
                 "nosuid" => flags |= MsFlags::MS_NOSUID,
@@ -102,6 +104,21 @@ impl Manager {
                 "remount" => flags |= MsFlags::MS_REMOUNT,
                 "defaults" => {} // no special flags
                 other => {
+                    // x-systemd.graceful-option=X: try X, but don't fail if unsupported
+                    if let Some(graceful_opt) = other.strip_prefix("x-systemd.graceful-option=") {
+                        graceful_options.push(graceful_opt);
+                        data_options.push(graceful_opt);
+                        continue;
+                    }
+                    // Filter out other userspace-only options (not passed to kernel)
+                    if other.starts_with("x-systemd.")
+                        || other.starts_with("x-")
+                        || other == "_netdev"
+                        || other == "nofail"
+                        || other.starts_with("comment=")
+                    {
+                        continue;
+                    }
                     // Pass as data option to filesystem
                     data_options.push(other);
                 }
@@ -121,6 +138,38 @@ impl Manager {
             flags,
             data.as_deref(),
         );
+
+        // If mount failed with EINVAL and we have graceful options, retry without them
+        let result = if result.is_err() && !graceful_options.is_empty() {
+            if let Err(nix::errno::Errno::EINVAL) = result {
+                log::info!(
+                    "{}: mount failed, retrying without graceful options: {:?}",
+                    name,
+                    graceful_options
+                );
+                let filtered: Vec<&str> = data_options
+                    .iter()
+                    .filter(|o| !graceful_options.contains(o))
+                    .copied()
+                    .collect();
+                let data = if filtered.is_empty() {
+                    None
+                } else {
+                    Some(filtered.join(","))
+                };
+                mount(
+                    Some(what.as_str()),
+                    mount_point.as_str(),
+                    Some(fs_type),
+                    flags,
+                    data.as_deref(),
+                )
+            } else {
+                result
+            }
+        } else {
+            result
+        };
 
         match result {
             Ok(()) => {

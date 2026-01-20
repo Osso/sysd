@@ -140,6 +140,15 @@ else
     echo "RESULT: sysd_socket=FAIL"
 fi
 
+# Test 5: /tmp mounted as tmpfs (tests x-systemd.* option filtering)
+echo "TEST: tmp_mount"
+if grep -q "tmpfs /tmp tmpfs" /proc/mounts 2>/dev/null; then
+    echo "RESULT: tmp_mount=PASS"
+else
+    echo "RESULT: tmp_mount=FAIL (x-systemd.* options not filtered?)"
+    cat /proc/mounts | grep tmp || echo "no /tmp mount found"
+fi
+
 echo "=== QEMU TESTS DONE ==="
 
 sleep 1
@@ -213,13 +222,36 @@ Description=System Initialization
 DefaultDependencies=no
 EOF
 
-    # Create basic.target that wants dbus.socket
+    # Create local-fs.target
+    cat > "$initrd_dir/usr/lib/systemd/system/local-fs.target" <<'EOF'
+[Unit]
+Description=Local File Systems
+DefaultDependencies=no
+EOF
+
+    # Create tmp.mount with x-systemd.* options (like real Arch Linux unit)
+    # This tests that x-systemd.* options are filtered before passing to kernel
+    cat > "$initrd_dir/usr/lib/systemd/system/tmp.mount" <<'EOF'
+[Unit]
+Description=Temporary Directory /tmp
+DefaultDependencies=no
+Before=local-fs.target
+After=sysinit.target
+
+[Mount]
+What=tmpfs
+Where=/tmp
+Type=tmpfs
+Options=mode=1777,strictatime,nosuid,nodev,size=50%%,nr_inodes=1m,x-systemd.graceful-option=usrquota
+EOF
+
+    # Create basic.target that wants dbus.socket and local-fs.target
     cat > "$initrd_dir/usr/lib/systemd/system/basic.target" <<'EOF'
 [Unit]
 Description=Basic System
-Requires=sysinit.target sockets.target
-After=sysinit.target sockets.target
-Wants=dbus.socket
+Requires=sysinit.target sockets.target local-fs.target
+After=sysinit.target sockets.target local-fs.target
+Wants=dbus.socket tmp.mount
 EOF
 
     # Create shutdown trigger service (sends SIGTERM to PID 1 after delay)
@@ -423,6 +455,16 @@ check_results() {
         success=false
     else
         log "○ File write to /run (test not run)"
+    fi
+
+    # Check /tmp mount (tests x-systemd.* option filtering)
+    if grep -q "RESULT: tmp_mount=PASS" "$output_file"; then
+        log "✓ /tmp mounted as tmpfs: PASS"
+    elif grep -q "RESULT: tmp_mount=FAIL" "$output_file"; then
+        err "✗ /tmp mount failed: FAIL (x-systemd.* options not filtered?)"
+        success=false
+    else
+        log "○ /tmp mount (test not run)"
     fi
 
     # === Socket Tests ===
