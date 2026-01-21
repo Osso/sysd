@@ -1,8 +1,8 @@
-//! Common unit type that wraps Service, Target, Mount, Slice, Socket, and Timer
+//! Common unit type that wraps Service, Target, Mount, Slice, Socket, Timer, and Path
 
-use super::{InstallSection, Mount, Service, Slice, Socket, Target, Timer, UnitSection};
+use super::{InstallSection, Mount, PathUnit, Service, Slice, Socket, Target, Timer, UnitSection};
 
-/// A unit can be a Service, Target, Mount, Slice, Socket, or Timer
+/// A unit can be a Service, Target, Mount, Slice, Socket, Timer, or Path
 #[derive(Debug, Clone)]
 pub enum Unit {
     Service(Service),
@@ -11,6 +11,7 @@ pub enum Unit {
     Slice(Slice),
     Socket(Socket),
     Timer(Timer),
+    Path(PathUnit),
 }
 
 impl Unit {
@@ -23,6 +24,7 @@ impl Unit {
             Unit::Slice(s) => &s.name,
             Unit::Socket(s) => &s.name,
             Unit::Timer(t) => &t.name,
+            Unit::Path(p) => &p.name,
         }
     }
 
@@ -35,6 +37,7 @@ impl Unit {
             Unit::Slice(s) => &s.unit,
             Unit::Socket(s) => &s.unit,
             Unit::Timer(t) => &t.unit,
+            Unit::Path(p) => &p.unit,
         }
     }
 
@@ -46,6 +49,7 @@ impl Unit {
             Unit::Mount(m) => Some(&m.install),
             Unit::Socket(s) => Some(&s.install),
             Unit::Timer(t) => Some(&t.install),
+            Unit::Path(p) => Some(&p.install),
         }
     }
 
@@ -79,7 +83,12 @@ impl Unit {
         matches!(self, Unit::Timer(_))
     }
 
-    /// Get the unit type as a string (service, target, mount, slice, socket, timer)
+    /// Check if this is a path
+    pub fn is_path(&self) -> bool {
+        matches!(self, Unit::Path(_))
+    }
+
+    /// Get the unit type as a string (service, target, mount, slice, socket, timer, path)
     pub fn unit_type(&self) -> &'static str {
         match self {
             Unit::Service(_) => "service",
@@ -88,6 +97,7 @@ impl Unit {
             Unit::Slice(_) => "slice",
             Unit::Socket(_) => "socket",
             Unit::Timer(_) => "timer",
+            Unit::Path(_) => "path",
         }
     }
 
@@ -139,6 +149,14 @@ impl Unit {
         }
     }
 
+    /// Get as path if it is one
+    pub fn as_path(&self) -> Option<&PathUnit> {
+        match self {
+            Unit::Path(p) => Some(p),
+            _ => None,
+        }
+    }
+
     /// Get all units this depends on (After + Requires + Wants)
     pub fn dependencies(&self) -> Vec<&String> {
         let unit = self.unit_section();
@@ -153,7 +171,21 @@ impl Unit {
     pub fn wants_dir(&self) -> &[String] {
         match self {
             Unit::Target(t) => &t.wants_dir,
-            Unit::Service(_) | Unit::Mount(_) | Unit::Slice(_) | Unit::Socket(_) | Unit::Timer(_) => &[],
+            Unit::Service(_) | Unit::Mount(_) | Unit::Slice(_) | Unit::Socket(_) | Unit::Timer(_) | Unit::Path(_) => &[],
+        }
+    }
+
+    /// Set the unit name (used for template instantiation)
+    /// For services, this also updates the instance field based on the new name
+    pub fn set_name(&mut self, new_name: String) {
+        match self {
+            Unit::Service(s) => s.set_name(new_name),
+            Unit::Target(t) => t.name = new_name,
+            Unit::Mount(m) => m.name = new_name,
+            Unit::Slice(sl) => sl.name = new_name,
+            Unit::Socket(so) => so.set_name(new_name),
+            Unit::Timer(t) => t.name = new_name,
+            Unit::Path(p) => p.name = new_name,
         }
     }
 }

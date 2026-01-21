@@ -529,6 +529,13 @@ impl Service {
             install: InstallSection::default(),
         }
     }
+
+    /// Update the service name and re-extract the instance
+    /// Used when loading a template for an instantiated unit
+    pub fn set_name(&mut self, new_name: String) {
+        self.instance = extract_instance(&new_name);
+        self.name = new_name;
+    }
 }
 
 /// Extract instance name from a unit name (e.g., "foo@bar.service" -> Some("bar"))

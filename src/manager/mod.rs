@@ -352,9 +352,21 @@ impl Manager {
         }
 
         // Parse it
-        let unit = units::load_unit(&path)
+        let mut unit = units::load_unit(&path)
             .await
             .map_err(|e| ManagerError::Parse(e.to_string()))?;
+
+        // If we loaded a template file for an instantiated unit (e.g., modprobe@drm.service
+        // from modprobe@.service), update the unit's name to the requested instantiated name.
+        // This ensures the instance specifier (%i) gets properly substituted.
+        if unit.name() != canonical_name {
+            log::debug!(
+                "Updating unit name from {} to {} (template instantiation)",
+                unit.name(),
+                canonical_name
+            );
+            unit.set_name(canonical_name.clone());
+        }
 
         // Initialize state under the canonical name
         self.states.insert(canonical_name.clone(), ServiceState::new());

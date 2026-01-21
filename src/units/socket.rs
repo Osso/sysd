@@ -100,6 +100,11 @@ impl Socket {
         }
     }
 
+    /// Update the socket name (used for template instantiation)
+    pub fn set_name(&mut self, new_name: String) {
+        self.name = new_name;
+    }
+
     /// Get the service name this socket activates
     pub fn service_name(&self) -> String {
         if let Some(ref svc) = self.socket.service {

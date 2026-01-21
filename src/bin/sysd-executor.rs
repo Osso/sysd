@@ -282,7 +282,9 @@ fn exec_program(program: &str, args: &[String]) -> Result<(), String> {
         .collect();
 
     unsafe {
-        libc::execv(program_c.as_ptr(), argv_ptrs.as_ptr());
+        // Use execvp to search PATH for commands without full paths
+        // (e.g., "journalctl" instead of "/usr/bin/journalctl")
+        libc::execvp(program_c.as_ptr(), argv_ptrs.as_ptr());
     }
 
     // If we get here, exec failed

@@ -787,9 +787,15 @@ pub fn spawn_service_via_executor(
         config.program
     );
 
-    let child = cmd.spawn().map_err(|e| {
+    let result = cmd.spawn().map_err(|e| {
         SpawnError::Spawn(format!("Failed to spawn executor: {}", e))
-    })?;
+    });
 
-    Ok(child)
+    // Close memfd in parent - child has its own copy after fork
+    // This prevents FD leak on repeated spawns (especially during service restarts)
+    unsafe {
+        libc::close(memfd);
+    }
+
+    result
 }

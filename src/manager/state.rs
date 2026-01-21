@@ -217,8 +217,11 @@ impl ServiceState {
             .unwrap_or(false)
     }
 
-    /// Clear restart state (after successful start)
+    /// Clear restart state before attempting restart
+    /// Sets state to Inactive so start_single() doesn't see it as already active
     pub fn clear_restart(&mut self) {
+        self.active = ActiveState::Inactive;
+        self.sub = SubState::Dead;
         self.restart_at = None;
         // Don't reset count here - only on explicit stop or long uptime
     }
