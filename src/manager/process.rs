@@ -56,46 +56,72 @@ pub fn spawn_service_with_options(
         cmd.current_dir(wd);
     }
 
-    // Set environment
-    cmd.env_clear();
-    cmd.envs(std::env::vars()); // Inherit current env
+    // Combine socket_fds and stored_fds for LISTEN_FDS
+    // M19: Combine socket_fds and stored_fds for LISTEN_FDS
+    let mut all_fds = options.socket_fds.clone();
+    all_fds.extend(&options.stored_fds);
+    let socket_fds = all_fds;
+    let socket_fd_count = socket_fds.len();
+
+    if !socket_fds.is_empty() {
+        // Verify FDs are valid before passing
+        for &fd in &socket_fds {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if flags < 0 {
+                log::error!("Socket fd {} is invalid: {}", fd, std::io::Error::last_os_error());
+            } else {
+                log::debug!("Socket fd {} is valid (flags={})", fd, flags);
+            }
+        }
+    }
+
+    // Build environment variables
+    // We must collect ALL env vars first because when socket activation is used,
+    // we need to set them via setenv() in pre_exec. Any cmd.env() call causes
+    // Rust/Tokio to build an explicit envp for execve() which ignores setenv().
+    let mut extra_env: HashMap<String, String> = HashMap::new();
+
+    // Service-defined environment
     for (key, value) in &service.service.environment {
-        cmd.env(key, value);
+        extra_env.insert(key.clone(), value.clone());
     }
 
     // Load environment files
     for env_file in &service.service.environment_file {
         if let Ok(vars) = load_env_file(env_file) {
-            cmd.envs(vars);
+            for (k, v) in vars {
+                extra_env.insert(k, v);
+            }
         }
-    }
-
-    // Unset environment variables (UnsetEnvironment=)
-    for var in &service.service.unset_environment {
-        cmd.env_remove(var);
     }
 
     // Set NOTIFY_SOCKET for Type=notify services
     if let Some(socket_path) = &options.notify_socket {
-        cmd.env("NOTIFY_SOCKET", socket_path);
+        extra_env.insert("NOTIFY_SOCKET".to_string(), socket_path.clone());
     }
 
     // Set WATCHDOG_USEC for services with WatchdogSec
     if let Some(usec) = options.watchdog_usec {
-        cmd.env("WATCHDOG_USEC", usec.to_string());
+        extra_env.insert("WATCHDOG_USEC".to_string(), usec.to_string());
     }
 
-    // Set LISTEN_FDS for socket activation and stored FDs
-    // M19: Combine socket_fds and stored_fds for LISTEN_FDS
-    let mut all_fds = options.socket_fds.clone();
-    all_fds.extend(&options.stored_fds);
-    let socket_fds = all_fds;
+    // Variables to unset
+    let unset_vars: Vec<String> = service.service.unset_environment.clone();
 
-    if !socket_fds.is_empty() {
-        cmd.env("LISTEN_FDS", socket_fds.len().to_string());
-        // LISTEN_PID is set in pre_exec after fork
-        // M19: Set LISTEN_FDNAMES for named FDs (not implemented yet - would need fd names)
+    // Set environment based on whether socket activation is used
+    if socket_fds.is_empty() {
+        // No socket activation - use cmd.env() normally
+        cmd.env_clear();
+        cmd.envs(std::env::vars()); // Inherit current env
+        cmd.envs(&extra_env);
+        for var in &unset_vars {
+            cmd.env_remove(var);
+        }
     }
+    // When socket_fds is non-empty, we MUST NOT call cmd.env() because that
+    // would cause Rust to build an explicit envp for execve(), which ignores
+    // the setenv() calls we make in pre_exec for LISTEN_PID.
+    // Instead, we'll set all environment variables in pre_exec using setenv().
 
     // Collect pre_exec settings
     // M19: DynamicUser= overrides User=/Group= settings
@@ -122,10 +148,40 @@ pub fn spawn_service_with_options(
     unsafe {
         cmd.pre_exec(move || {
             // Socket activation: duplicate FDs to positions 3, 4, 5, ...
-            // and set LISTEN_PID to our PID
+            // and set LISTEN_PID/LISTEN_FDS environment variables
             if !socket_fds.is_empty() {
-                // Set LISTEN_PID (can only be done after fork)
-                std::env::set_var("LISTEN_PID", std::process::id().to_string());
+                // When socket activation is used, we set ALL environment variables here
+                // because we can't use cmd.env() (it would build an explicit envp for
+                // execve that ignores our setenv calls).
+
+                // Set extra environment variables (service env, NOTIFY_SOCKET, etc.)
+                for (key, value) in &extra_env {
+                    if let (Ok(k), Ok(v)) = (
+                        std::ffi::CString::new(key.as_str()),
+                        std::ffi::CString::new(value.as_str()),
+                    ) {
+                        libc::setenv(k.as_ptr(), v.as_ptr(), 1);
+                    }
+                }
+
+                // Unset environment variables
+                for var in &unset_vars {
+                    if let Ok(k) = std::ffi::CString::new(var.as_str()) {
+                        libc::unsetenv(k.as_ptr());
+                    }
+                }
+
+                // Set LISTEN_FDS and LISTEN_PID
+                // (std::env::set_var is not async-signal-safe in forked child)
+                let pid = std::process::id();
+
+                let listen_fds_key = std::ffi::CString::new("LISTEN_FDS").unwrap();
+                let listen_fds_val = std::ffi::CString::new(socket_fd_count.to_string()).unwrap();
+                libc::setenv(listen_fds_key.as_ptr(), listen_fds_val.as_ptr(), 1);
+
+                let listen_pid_key = std::ffi::CString::new("LISTEN_PID").unwrap();
+                let listen_pid_val = std::ffi::CString::new(pid.to_string()).unwrap();
+                libc::setenv(listen_pid_key.as_ptr(), listen_pid_val.as_ptr(), 1);
 
                 // SD_LISTEN_FDS_START is 3 (after stdin/stdout/stderr)
                 const SD_LISTEN_FDS_START: RawFd = 3;
@@ -276,7 +332,10 @@ pub fn spawn_service_with_options(
     cmd.stdin(stdin);
 
     // Spawn the process
-    let child = cmd.spawn().map_err(|e| SpawnError::Spawn(e.to_string()))?;
+    log::debug!("Spawning: {} {:?}", program, args);
+    let child = cmd.spawn().map_err(|e| {
+        SpawnError::Spawn(format!("{}: {} {:?}", e, program, args))
+    })?;
 
     Ok(child)
 }
@@ -484,4 +543,253 @@ pub enum SpawnError {
 
     #[error("Failed to spawn process: {0}")]
     Spawn(String),
+}
+
+// ============================================================================
+// Executor-based spawning (sd-executor pattern)
+// ============================================================================
+
+use crate::executor::{
+    DevicePolicyConfig, ExecConfig, ProtectHomeConfig, ProtectProcConfig, ProtectSystemConfig,
+    SandboxConfig, StdInputConfig,
+};
+
+/// Build ExecConfig from Service and SpawnOptions
+pub fn build_exec_config(
+    service: &Service,
+    options: &SpawnOptions,
+) -> Result<ExecConfig, SpawnError> {
+    let exec_start = service
+        .service
+        .exec_start
+        .first()
+        .ok_or_else(|| SpawnError::NoExecStart(service.name.clone()))?;
+
+    let exec_start = substitute_specifiers(exec_start, service);
+    let (program, args) = parse_command(&exec_start)?;
+
+    // Build environment
+    let mut environment: HashMap<String, String> = std::env::vars().collect();
+
+    // Service-defined environment
+    for (key, value) in &service.service.environment {
+        environment.insert(key.clone(), value.clone());
+    }
+
+    // Load environment files
+    for env_file in &service.service.environment_file {
+        if let Ok(vars) = load_env_file(env_file) {
+            for (k, v) in vars {
+                environment.insert(k, v);
+            }
+        }
+    }
+
+    // NOTIFY_SOCKET
+    if let Some(socket_path) = &options.notify_socket {
+        environment.insert("NOTIFY_SOCKET".to_string(), socket_path.clone());
+    }
+
+    // WATCHDOG_USEC
+    if let Some(usec) = options.watchdog_usec {
+        environment.insert("WATCHDOG_USEC".to_string(), usec.to_string());
+    }
+
+    // Resolve uid/gid
+    let uid = options
+        .dynamic_uid
+        .or_else(|| service.service.user.as_ref().and_then(|u| resolve_user(u)));
+    let gid = options
+        .dynamic_gid
+        .or_else(|| service.service.group.as_ref().and_then(|g| resolve_group(g)));
+
+    // Socket FD count
+    let mut all_fds = options.socket_fds.clone();
+    all_fds.extend(&options.stored_fds);
+    let socket_fd_count = all_fds.len();
+
+    // Build sandbox config
+    let sandbox = SandboxConfig {
+        no_new_privileges: service.service.no_new_privileges,
+        protect_system: match service.service.protect_system {
+            crate::units::ProtectSystem::No => ProtectSystemConfig::No,
+            crate::units::ProtectSystem::Yes => ProtectSystemConfig::Yes,
+            crate::units::ProtectSystem::Full => ProtectSystemConfig::Full,
+            crate::units::ProtectSystem::Strict => ProtectSystemConfig::Strict,
+        },
+        protect_home: match service.service.protect_home {
+            crate::units::ProtectHome::No => ProtectHomeConfig::No,
+            crate::units::ProtectHome::Yes => ProtectHomeConfig::Yes,
+            crate::units::ProtectHome::ReadOnly => ProtectHomeConfig::ReadOnly,
+            crate::units::ProtectHome::Tmpfs => ProtectHomeConfig::Tmpfs,
+        },
+        private_tmp: service.service.private_tmp,
+        private_devices: service.service.private_devices,
+        private_network: service.service.private_network,
+        protect_kernel_modules: service.service.protect_kernel_modules,
+        protect_proc: match service.service.protect_proc {
+            crate::units::ProtectProc::Default => ProtectProcConfig::Default,
+            crate::units::ProtectProc::Invisible => ProtectProcConfig::Invisible,
+            crate::units::ProtectProc::Ptraceable => ProtectProcConfig::Ptraceable,
+            crate::units::ProtectProc::NoAccess => ProtectProcConfig::NoAccess,
+        },
+        capability_bounding_set: service.service.capability_bounding_set.clone(),
+        ambient_capabilities: service.service.ambient_capabilities.clone(),
+        restrict_namespaces: service.service.restrict_namespaces.clone(),
+        read_write_paths: service.service.read_write_paths.clone(),
+        read_only_paths: service.service.read_only_paths.clone(),
+        inaccessible_paths: service.service.inaccessible_paths.clone(),
+        system_call_filter: service.service.system_call_filter.clone(),
+        system_call_error_number: service.service.system_call_error_number,
+        system_call_architectures: service.service.system_call_architectures.clone(),
+        device_policy: match service.service.device_policy {
+            crate::units::DevicePolicy::Auto => DevicePolicyConfig::Auto,
+            crate::units::DevicePolicy::Closed => DevicePolicyConfig::Closed,
+            crate::units::DevicePolicy::Strict => DevicePolicyConfig::Strict,
+        },
+        device_allow: service.service.device_allow.clone(),
+        restrict_realtime: service.service.restrict_realtime,
+        protect_control_groups: service.service.protect_control_groups,
+        memory_deny_write_execute: service.service.memory_deny_write_execute,
+        lock_personality: service.service.lock_personality,
+        protect_kernel_tunables: service.service.protect_kernel_tunables,
+        protect_kernel_logs: service.service.protect_kernel_logs,
+        protect_clock: service.service.protect_clock,
+        protect_hostname: service.service.protect_hostname,
+        ignore_sigpipe: service.service.ignore_sigpipe,
+        restrict_suid_sgid: service.service.restrict_suid_sgid,
+        restrict_address_families: service.service.restrict_address_families.clone(),
+    };
+
+    // Build std_input config
+    let std_input = match service.service.standard_input {
+        StdInput::Null => StdInputConfig::Null,
+        StdInput::Tty => StdInputConfig::Tty,
+        StdInput::TtyForce => StdInputConfig::TtyForce,
+        StdInput::TtyFail => StdInputConfig::TtyFail,
+    };
+
+    Ok(ExecConfig {
+        program,
+        args,
+        working_directory: service.service.working_directory.clone(),
+        environment,
+        unset_environment: service.service.unset_environment.clone(),
+        uid,
+        gid,
+        limit_nofile: service.service.limit_nofile,
+        limit_nproc: service.service.limit_nproc,
+        limit_core: service.service.limit_core,
+        oom_score_adjust: service.service.oom_score_adjust,
+        socket_fd_count,
+        std_input,
+        tty_path: service.service.tty_path.clone(),
+        tty_reset: service.service.tty_reset,
+        sandbox,
+    })
+}
+
+/// Spawn a process using the executor pattern
+///
+/// This avoids CoW memory issues by:
+/// 1. Serializing execution config to a memfd
+/// 2. Spawning sysd-executor with the memfd FD
+/// 3. Executor deserializes, applies sandbox, and execs target
+pub fn spawn_service_via_executor(
+    service: &Service,
+    options: &SpawnOptions,
+    executor_path: &str,
+) -> Result<Child, SpawnError> {
+    // Build config
+    let config = build_exec_config(service, options)?;
+
+    // Create runtime directories before spawning
+    let uid = config.uid;
+    let gid = config.gid;
+    create_service_directories(&service.service, &service.name, uid, gid)?;
+
+    // Serialize to memfd
+    let memfd = crate::executor::serialize_to_memfd(&config)
+        .map_err(|e| SpawnError::Spawn(format!("Failed to serialize config: {}", e)))?;
+
+    // Combine socket FDs
+    let mut all_fds = options.socket_fds.clone();
+    all_fds.extend(&options.stored_fds);
+
+    // Build command for executor
+    let mut cmd = Command::new(executor_path);
+    cmd.arg(format!("--deserialize={}", memfd));
+
+    // Stdin from /dev/null unless TTY
+    let stdin = match service.service.standard_input {
+        StdInput::Null => Stdio::null(),
+        _ => Stdio::inherit(),
+    };
+    cmd.stdin(stdin);
+    cmd.stdout(Stdio::inherit());
+    cmd.stderr(Stdio::inherit());
+
+    // Pass socket FDs to executor
+    // The executor expects them at positions 3, 4, 5, ...
+    #[cfg(unix)]
+    if !all_fds.is_empty() {
+        unsafe {
+            cmd.pre_exec(move || {
+                const SD_LISTEN_FDS_START: RawFd = 3;
+
+                for (i, &fd) in all_fds.iter().enumerate() {
+                    let target_fd = SD_LISTEN_FDS_START + i as RawFd;
+
+                    if fd != target_fd {
+                        if libc::dup2(fd, target_fd) < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if fd >= SD_LISTEN_FDS_START + all_fds.len() as RawFd
+                            || fd < SD_LISTEN_FDS_START
+                        {
+                            libc::close(fd);
+                        }
+                    }
+
+                    // Clear FD_CLOEXEC
+                    let flags = libc::fcntl(target_fd, libc::F_GETFD);
+                    if flags >= 0 {
+                        libc::fcntl(target_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                    }
+                }
+
+                // Also clear FD_CLOEXEC on the memfd so executor can read it
+                let flags = libc::fcntl(memfd, libc::F_GETFD);
+                if flags >= 0 {
+                    libc::fcntl(memfd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                }
+
+                Ok(())
+            });
+        }
+    } else {
+        // Still need to clear FD_CLOEXEC on memfd
+        #[cfg(unix)]
+        unsafe {
+            cmd.pre_exec(move || {
+                let flags = libc::fcntl(memfd, libc::F_GETFD);
+                if flags >= 0 {
+                    libc::fcntl(memfd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                }
+                Ok(())
+            });
+        }
+    }
+
+    log::debug!(
+        "Spawning via executor: {} -> {}",
+        executor_path,
+        config.program
+    );
+
+    let child = cmd.spawn().map_err(|e| {
+        SpawnError::Spawn(format!("Failed to spawn executor: {}", e))
+    })?;
+
+    Ok(child)
 }

@@ -13,6 +13,10 @@ path = "src/bin/sysd.rs"
 name = "sysdctl"
 path = "src/bin/sysdctl.rs"
 
+[[bin]]
+name = "sysd-executor"
+path = "src/bin/sysd-executor.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.48", features = ["full", "signal"] }
@@ -23,6 +27,7 @@ zbus = "5.12"
 # Logging
 log = "0.4"
 env_logger = "0.11"
+fern = "0.7"
 
 # Config/parsing
 shlex = "1.3"

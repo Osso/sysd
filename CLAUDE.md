@@ -34,14 +34,14 @@ src/
 ## Build & Test
 
 ```bash
-# Build (uses musl target via .cargo/config.toml)
+# Build
 cargo build --release
 
 # Run all tests
 ./run-tests.sh
 
 # Or run specific test suites:
-./run-tests.sh --unit     # Unit tests only (149 tests, fast)
+./run-tests.sh --unit     # Unit tests only (156 tests, fast)
 ./run-tests.sh --docker   # Docker integration tests (Arch Linux units)
 ./run-tests.sh --qemu     # QEMU integration tests (boots as PID 1)
 ./run-tests.sh --btrfs    # QEMU btrfs mount tests
@@ -86,7 +86,9 @@ cargo build --release
 2. Add parse case in `ServiceType::parse()`
 3. Handle in `Manager::start_single()` in `src/manager/mod.rs`
 
-## Testing Tips
+## Testing Rules
+
+**Always run `./run-tests.sh --unit` after making code changes.** Unit tests are fast (~0.01s) and catch most regressions.
 
 - Unit tests are in each module (run with `cargo test`)
 - Integration tests in `tests/` directory

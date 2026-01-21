@@ -90,6 +90,10 @@ pub struct Manager {
     /// M19: Stored file descriptors for FileDescriptorStoreMax= services
     /// Map of service_name -> Vec<(fd_name, raw_fd)>
     fd_store: HashMap<String, Vec<(String, RawFd)>>,
+    /// Path to sysd-executor binary for sd-executor pattern
+    executor_path: String,
+    /// Map of PID -> service name for tracking which process belongs to which service
+    pid_to_service: HashMap<u32, String>,
 }
 
 impl Manager {
@@ -144,6 +148,14 @@ impl Manager {
         // Clone for scope_manager before moving into struct
         let scope_manager = ScopeManager::new(cgroup_manager.clone());
 
+        // Find executor binary (next to current binary, or fallback to PATH)
+        let executor_path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("sysd-executor")))
+            .filter(|p| p.exists())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "sysd-executor".to_string());
+
         Self {
             units: HashMap::new(),
             states: HashMap::new(),
@@ -168,6 +180,8 @@ impl Manager {
             dynamic_user_manager: dynamic_user::DynamicUserManager::new(),
             dynamic_uids: HashMap::new(),
             fd_store: HashMap::new(),
+            executor_path,
+            pid_to_service: HashMap::new(),
         }
     }
 
@@ -311,8 +325,14 @@ impl Manager {
         let path = self.find_unit(&name)?;
 
         // Resolve symlinks to get canonical name (e.g., dbus.service -> dbus-broker.service)
+        // Also detect masked units (symlinks to /dev/null)
         let canonical_name = if path.is_symlink() {
             if let Ok(target) = std::fs::read_link(&path) {
+                // Check if unit is masked (symlink to /dev/null)
+                if target.as_os_str() == "/dev/null" {
+                    log::debug!("{} is masked, skipping", name);
+                    return Err(ManagerError::Masked(name));
+                }
                 // Get just the filename from the symlink target
                 target
                     .file_name()
@@ -397,7 +417,18 @@ impl Manager {
     /// Start a single service (no dependency resolution)
     pub async fn start(&mut self, name: &str) -> Result<(), ManagerError> {
         let name = self.normalize_name(name);
-        self.start_single(&name).await
+        match self.start_single(&name).await {
+            Ok(()) => Ok(()),
+            Err(ManagerError::IsTarget(_)) => {
+                // Targets are synchronization points - just mark as active
+                if let Some(state) = self.states.get_mut(&name) {
+                    state.set_running(0);
+                }
+                log::debug!("Target {} reached", name);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Start a unit with all its dependencies
@@ -549,6 +580,8 @@ impl Manager {
 
     /// Start a single unit (internal, assumes already loaded)
     async fn start_single(&mut self, name: &str) -> Result<(), ManagerError> {
+        log::debug!("start_single({})", name);
+
         // Load if not already loaded (may resolve symlink to different name)
         let actual_name = if self.units.contains_key(name) {
             name.to_string()
@@ -628,6 +661,11 @@ impl Manager {
         let watchdog_usec = service.service.watchdog_sec.map(|d| d.as_micros() as u64);
         let socket_fds = self.get_socket_fds(&service.name);
 
+        // DEBUG: Log socket FDs being passed
+        if !socket_fds.is_empty() {
+            log::info!("{}: passing socket FDs {:?}", actual_name, socket_fds);
+        }
+
         // M19: DynamicUser= - allocate ephemeral UID/GID
         let (dynamic_uid, dynamic_gid) = if service.service.dynamic_user {
             match self.dynamic_user_manager.allocate(&actual_name) {
@@ -667,8 +705,10 @@ impl Manager {
         };
 
         // Spawn the process
-        let child = process::spawn_service_with_options(service, &options)?;
+        let child = process::spawn_service_via_executor(service, &options, &self.executor_path)?;
+        log::debug!("{}: spawn returned, getting PID", actual_name);
         let pid = child.id().unwrap_or(0);
+        log::debug!("{}: PID is {}", actual_name, pid);
 
         // Set up cgroup for the process (if available)
         // Note: DeviceAllow/DevicePolicy is handled via mount namespace in sandbox.rs
@@ -720,8 +760,9 @@ impl Manager {
             );
         }
 
-        // Store the child process
+        // Store the child process and track PID -> service mapping
         self.processes.insert(actual_name.to_string(), child);
+        self.pid_to_service.insert(pid, actual_name.to_string());
 
         let is_forking = service.service.service_type == ServiceType::Forking;
         let is_dbus = service.service.service_type == ServiceType::Dbus;
@@ -1319,6 +1360,9 @@ pub enum ManagerError {
 
     #[error("Failed to stop: {0}")]
     StopFailed(String),
+
+    #[error("Unit is masked: {0}")]
+    Masked(String),
 }
 
 impl From<std::io::Error> for ManagerError {

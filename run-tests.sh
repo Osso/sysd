@@ -2,11 +2,13 @@
 # Run all sysd tests
 #
 # Usage: ./run-tests.sh [options]
-#   --unit     Run unit tests only (fast, no deps)
-#   --docker   Run Docker integration tests
-#   --qemu     Run QEMU integration tests
-#   --btrfs    Run QEMU btrfs mount test
-#   --all      Run all tests (default)
+#   --unit         Run unit tests only (fast, no deps)
+#   --docker       Run Docker integration tests
+#   --qemu         Run QEMU integration tests
+#   --btrfs        Run QEMU btrfs mount test
+#   --arch         Run full Arch Linux boot test (QEMU, requires root)
+#   --arch-docker  Run full Arch Linux boot test (Docker, no root needed)
+#   --all          Run all tests (default, excludes --arch variants)
 
 set -euo pipefail
 
@@ -20,6 +22,11 @@ NC='\033[0m'
 log() { echo -e "${GREEN}[+]${NC} $*"; }
 err() { echo -e "${RED}[-]${NC} $*" >&2; }
 
+build_release() {
+    log "Building release binary..."
+    cargo build --release
+}
+
 run_unit_tests() {
     log "Running unit tests..."
     cargo test --lib
@@ -27,18 +34,38 @@ run_unit_tests() {
 
 run_docker_tests() {
     log "Running Docker integration tests..."
+    build_release
     # Use legacy builder to avoid buildx activity tracking issues
     DOCKER_BUILDKIT=0 tests/docker/run-docker-test.sh
 }
 
 run_qemu_tests() {
     log "Running QEMU integration tests..."
+    build_release
     tests/qemu/run-qemu-test.sh
 }
 
 run_btrfs_tests() {
     log "Running QEMU btrfs mount tests..."
+    build_release
     tests/qemu/run-btrfs-test.sh
+}
+
+run_arch_tests() {
+    log "Running full Arch Linux boot tests (QEMU)..."
+    build_release
+    # This test requires root for pacstrap
+    if [[ $EUID -ne 0 ]]; then
+        err "Arch test requires root. Run with: sudo $0 --arch"
+        exit 1
+    fi
+    tests/qemu/run-arch-test.sh
+}
+
+run_arch_docker_tests() {
+    log "Running full Arch Linux boot tests (Docker)..."
+    build_release
+    tests/docker-arch/run-arch-docker-test.sh
 }
 
 # Parse args
@@ -58,9 +85,13 @@ elif [[ "$1" == "--qemu" ]]; then
     run_qemu_tests
 elif [[ "$1" == "--btrfs" ]]; then
     run_btrfs_tests
+elif [[ "$1" == "--arch" ]]; then
+    run_arch_tests
+elif [[ "$1" == "--arch-docker" ]]; then
+    run_arch_docker_tests
 else
     err "Unknown option: $1"
-    echo "Usage: $0 [--unit|--docker|--qemu|--btrfs|--all]"
+    echo "Usage: $0 [--unit|--docker|--qemu|--btrfs|--arch|--arch-docker|--all]"
     exit 1
 fi
 

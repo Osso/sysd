@@ -19,6 +19,7 @@
 
 pub mod cgroups;
 pub mod dbus;
+pub mod executor;
 pub mod fstab;
 pub mod getty;
 pub mod manager;
