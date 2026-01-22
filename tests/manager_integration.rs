@@ -387,3 +387,85 @@ ExecStart=/bin/sleep 60
 
     manager.stop("test-dbus-nobusname.service").await.unwrap();
 }
+
+#[tokio::test]
+async fn test_socket_activation_triggers_service() {
+    let dir = unique_test_dir();
+    let socket_path = dir.join("test.sock");
+
+    // Create socket unit
+    let socket_unit = format!(
+        r#"
+[Unit]
+Description=Test socket for activation
+
+[Socket]
+ListenStream={}
+"#,
+        socket_path.display()
+    );
+    write_test_service(&dir, "test-activation.socket", &socket_unit);
+
+    // Create service unit activated by the socket (short timeout for cleanup)
+    write_test_service(
+        &dir,
+        "test-activation.service",
+        r#"
+[Unit]
+Description=Test service activated by socket
+
+[Service]
+Type=simple
+ExecStart=/bin/sleep 60
+TimeoutStopSec=1
+"#,
+    );
+
+    let mut manager = Manager::new();
+    manager
+        .load_from_path(&dir.join("test-activation.socket"))
+        .await
+        .unwrap();
+    manager
+        .load_from_path(&dir.join("test-activation.service"))
+        .await
+        .unwrap();
+
+    // Take the activation receiver before starting
+    let mut activation_rx = manager.take_socket_activation_rx().unwrap();
+
+    // Start the socket
+    manager.start("test-activation.socket").await.unwrap();
+
+    // Verify socket is active
+    let state = manager.status("test-activation.socket").unwrap();
+    assert!(state.is_active(), "socket should be active");
+
+    // Verify socket file was created
+    assert!(socket_path.exists(), "socket file should exist");
+
+    // Connect to the socket to trigger activation
+    let _conn = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
+
+    // Wait for and receive activation message
+    let activation = tokio::time::timeout(std::time::Duration::from_secs(2), activation_rx.recv())
+        .await
+        .expect("should receive activation within 2 seconds")
+        .expect("activation channel should not be closed");
+
+    assert_eq!(activation.socket_name, "test-activation.socket");
+    assert_eq!(activation.service_name, "test-activation.service");
+
+    // Handle the activation (starts the service)
+    manager.handle_socket_activation(activation).await.unwrap();
+
+    // Verify service is now running
+    let state = manager.status("test-activation.service").unwrap();
+    assert!(state.is_active(), "service should be active after activation");
+    assert!(state.main_pid.is_some(), "service should have a PID");
+
+    // Cleanup: kill process directly to avoid stop timeout
+    if let Some(pid) = state.main_pid {
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    }
+}

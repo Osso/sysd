@@ -31,11 +31,11 @@ fn kernel_available() -> bool {
         })
 }
 
-/// Check if sysd release binary exists (musl target)
+/// Check if sysd release binary exists
 fn sysd_binary_exists() -> bool {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     Path::new(manifest_dir)
-        .join("target/x86_64-unknown-linux-musl/release/sysd")
+        .join("target/release/sysd")
         .exists()
 }
 

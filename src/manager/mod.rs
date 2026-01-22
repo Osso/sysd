@@ -672,10 +672,11 @@ impl Manager {
         let is_notify = service.service.service_type == ServiceType::Notify;
         let watchdog_usec = service.service.watchdog_sec.map(|d| d.as_micros() as u64);
         let socket_fds = self.get_socket_fds(&service.name);
+        let socket_fd_names = self.get_socket_fd_names(&service.name);
 
         // DEBUG: Log socket FDs being passed
         if !socket_fds.is_empty() {
-            log::info!("{}: passing socket FDs {:?}", actual_name, socket_fds);
+            log::info!("{}: passing socket FDs {:?} names {:?}", actual_name, socket_fds, socket_fd_names);
         }
 
         // M19: DynamicUser= - allocate ephemeral UID/GID
@@ -711,13 +712,131 @@ impl Manager {
             },
             watchdog_usec,
             socket_fds,
+            socket_fd_names,
             dynamic_uid,
             dynamic_gid,
             stored_fds,
         };
 
-        // Spawn the process
-        let child = process::spawn_service_via_executor(service, &options, &self.executor_path)?;
+        // Type=oneshot services run all ExecStart commands in sequence
+        if service.service.service_type == ServiceType::Oneshot {
+            let num_commands = service.service.exec_start.len();
+            log::info!("Starting oneshot {} ({} command{})", actual_name, num_commands,
+                       if num_commands == 1 { "" } else { "s" });
+
+            // Set up cgroup once for all commands
+            let limits = CgroupLimits {
+                memory_max: service.service.memory_max,
+                cpu_quota: service.service.cpu_quota,
+                tasks_max: service.service.tasks_max,
+            };
+            let slice = service.service.slice.as_deref();
+            let delegate = service.service.delegate;
+            let mut cgroup_path_for_cleanup: Option<std::path::PathBuf> = None;
+
+            // Run each ExecStart command in sequence
+            for (cmd_idx, _) in service.service.exec_start.iter().enumerate() {
+                let child = process::spawn_service_via_executor(service, &options, &self.executor_path, cmd_idx)?;
+                log::debug!("{}: spawn returned, getting PID", actual_name);
+                let pid = child.id().unwrap_or(0);
+                log::debug!("{}: PID is {}", actual_name, pid);
+
+                // Set up cgroup for the first command only, then reuse for subsequent
+                if cmd_idx == 0 {
+                    if let Some(ref cgroup_mgr) = self.cgroup_manager {
+                        match cgroup_mgr.setup_service_cgroup(&actual_name, pid, &limits, slice) {
+                            Ok(cgroup_path) => {
+                                log::debug!("Created cgroup {} for {}", cgroup_path.display(), actual_name);
+                                if delegate {
+                                    if let Err(e) = cgroup_mgr.enable_delegation(&cgroup_path) {
+                                        log::warn!("Failed to enable cgroup delegation for {}: {}", actual_name, e);
+                                    }
+                                }
+                                cgroup_path_for_cleanup = Some(cgroup_path.clone());
+                                self.cgroup_paths.insert(actual_name.to_string(), cgroup_path);
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to set up cgroup for {}: {}", actual_name, e);
+                            }
+                        }
+                    }
+                } else if let Some(ref cgroup_path) = cgroup_path_for_cleanup {
+                    // Move subsequent processes into the same cgroup
+                    if let Some(ref cgroup_mgr) = self.cgroup_manager {
+                        if let Err(e) = cgroup_mgr.add_pid(cgroup_path, pid) {
+                            log::warn!("Failed to add PID {} to cgroup for {}: {}", pid, actual_name, e);
+                        }
+                    }
+                }
+
+                log::info!("Started {} (PID {}), waiting for oneshot to complete", actual_name, pid);
+
+                // Wait for the command to complete
+                match child.wait_with_output().await {
+                    Ok(output) => {
+                        let exit_code = output.status.code().unwrap_or(-1);
+                        if exit_code != 0 {
+                            // Command failed - clean up and return error
+                            if let Some(cgroup_path) = cgroup_path_for_cleanup.take() {
+                                if let Some(ref cgroup_mgr) = self.cgroup_manager {
+                                    if let Err(e) = cgroup_mgr.remove_cgroup(&cgroup_path) {
+                                        log::warn!("Failed to remove cgroup for {}: {}", actual_name, e);
+                                    }
+                                }
+                                self.cgroup_paths.remove(&actual_name);
+                            }
+                            self.active_jobs = self.active_jobs.saturating_sub(1);
+                            if let Some(state) = self.states.get_mut(&actual_name) {
+                                state.set_failed(format!("exit code {}", exit_code));
+                            }
+                            log::warn!("Oneshot {} command {} failed with exit code {}", actual_name, cmd_idx, exit_code);
+                            return Err(ManagerError::StartFailed(format!(
+                                "{} command {} exited with code {}",
+                                actual_name, cmd_idx, exit_code
+                            )));
+                        }
+                        log::debug!("Oneshot {} command {} completed successfully", actual_name, cmd_idx);
+                    }
+                    Err(e) => {
+                        if let Some(cgroup_path) = cgroup_path_for_cleanup.take() {
+                            if let Some(ref cgroup_mgr) = self.cgroup_manager {
+                                let _ = cgroup_mgr.remove_cgroup(&cgroup_path);
+                            }
+                            self.cgroup_paths.remove(&actual_name);
+                        }
+                        self.active_jobs = self.active_jobs.saturating_sub(1);
+                        if let Some(state) = self.states.get_mut(&actual_name) {
+                            state.set_failed(e.to_string());
+                        }
+                        log::error!("Failed to wait for oneshot {} command {}: {}", actual_name, cmd_idx, e);
+                        return Err(ManagerError::StartFailed(e.to_string()));
+                    }
+                }
+            }
+
+            // All commands completed successfully
+            if let Some(cgroup_path) = cgroup_path_for_cleanup {
+                if let Some(ref cgroup_mgr) = self.cgroup_manager {
+                    if let Err(e) = cgroup_mgr.remove_cgroup(&cgroup_path) {
+                        log::warn!("Failed to remove cgroup for {}: {}", actual_name, e);
+                    }
+                }
+                self.cgroup_paths.remove(&actual_name);
+            }
+            self.active_jobs = self.active_jobs.saturating_sub(1);
+            if let Some(state) = self.states.get_mut(&actual_name) {
+                if service.service.remain_after_exit {
+                    state.set_exited();
+                } else {
+                    state.set_inactive();
+                }
+            }
+            log::info!("Oneshot {} completed successfully (exit 0)", actual_name);
+            return Ok(());
+        }
+
+        // Non-oneshot services: spawn single process (first ExecStart command)
+        let child = process::spawn_service_via_executor(service, &options, &self.executor_path, 0)?;
         log::debug!("{}: spawn returned, getting PID", actual_name);
         let pid = child.id().unwrap_or(0);
         log::debug!("{}: PID is {}", actual_name, pid);

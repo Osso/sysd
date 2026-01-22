@@ -314,10 +314,33 @@ impl DepGraph {
                     break;
                 }
 
-                // Pick node with minimum in-degree to break cycle
+                // Pick node to break cycle, prioritizing by unit type:
+                // 1. Targets (sync points, no process)
+                // 2. Mounts (filesystem setup)
+                // 3. Sockets (needed by services, quick to create)
+                // 4. Paths, timers, slices (quick setup)
+                // 5. Services (last - most complex, may need sockets)
+                // Within same priority, pick minimum in-degree
+                let unit_type_priority = |name: &str| -> u8 {
+                    if name.ends_with(".target") {
+                        0
+                    } else if name.ends_with(".mount") {
+                        1
+                    } else if name.ends_with(".socket") {
+                        2
+                    } else if name.ends_with(".path")
+                        || name.ends_with(".timer")
+                        || name.ends_with(".slice")
+                    {
+                        3
+                    } else {
+                        4 // .service and others
+                    }
+                };
+
                 let (cycle_node, _) = remaining
                     .iter()
-                    .min_by_key(|(_, &deg)| deg)
+                    .min_by_key(|(name, &deg)| (unit_type_priority(name), deg))
                     .unwrap();
 
                 // Show all cycle participants for debugging
@@ -480,5 +503,80 @@ mod tests {
         assert!(order.contains(&"b.service".to_string()));
         assert!(order.contains(&"c.service".to_string()));
         assert!(!order.contains(&"unrelated.service".to_string()));
+    }
+
+    #[test]
+    fn test_cycle_breaking_prioritizes_sockets() {
+        // Simulate dbus-broker.service and dbus.socket in a cycle
+        // The cycle breaker should start dbus.socket before dbus-broker.service
+        let mut graph = DepGraph::new();
+
+        // Create a cycle: service -> socket -> target -> service
+        graph.add_node("dbus.socket");
+        graph.add_node("dbus-broker.service");
+        graph.add_node("basic.target");
+
+        // dbus-broker.service After=dbus.socket (service depends on socket)
+        graph.add_edge("dbus-broker.service", "dbus.socket");
+        // dbus.socket After=basic.target - socket waits for target
+        graph.add_edge("dbus.socket", "basic.target");
+        // basic.target depends on service (creating cycle)
+        graph.add_edge("basic.target", "dbus-broker.service");
+
+        // Use start_order_for which breaks cycles via toposort_subset
+        let order = graph.start_order_for("dbus-broker.service").unwrap();
+        let socket_pos = order.iter().position(|s| s == "dbus.socket").unwrap();
+        let service_pos = order
+            .iter()
+            .position(|s| s == "dbus-broker.service")
+            .unwrap();
+
+        // When breaking the cycle, socket should be prioritized over service
+        // So dbus.socket should appear before dbus-broker.service
+        assert!(
+            socket_pos < service_pos,
+            "dbus.socket (pos {}) should come before dbus-broker.service (pos {})",
+            socket_pos,
+            service_pos
+        );
+    }
+
+    #[test]
+    fn test_cycle_breaking_prioritizes_targets_over_sockets() {
+        // In a cycle with target, socket, and service, order should be:
+        // target -> socket -> service
+        let mut graph = DepGraph::new();
+
+        graph.add_node("sysinit.target");
+        graph.add_node("dbus.socket");
+        graph.add_node("dbus-broker.service");
+
+        // Create cycle: all depend on each other
+        graph.add_edge("dbus-broker.service", "dbus.socket");
+        graph.add_edge("dbus.socket", "sysinit.target");
+        graph.add_edge("sysinit.target", "dbus-broker.service");
+
+        // Use start_order_for which breaks cycles via toposort_subset
+        let order = graph.start_order_for("dbus-broker.service").unwrap();
+        let target_pos = order.iter().position(|s| s == "sysinit.target").unwrap();
+        let socket_pos = order.iter().position(|s| s == "dbus.socket").unwrap();
+        let service_pos = order
+            .iter()
+            .position(|s| s == "dbus-broker.service")
+            .unwrap();
+
+        // Priority: target < socket < service
+        assert!(
+            target_pos < socket_pos,
+            "target (pos {}) should come before socket (pos {})",
+            target_pos,
+            socket_pos
+        );
+        assert!(
+            socket_pos < service_pos,
+            "socket (pos {}) should come before service (pos {})",
+            socket_pos,
+            service_pos
+        );
     }
 }

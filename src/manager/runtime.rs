@@ -273,19 +273,57 @@ impl Manager {
     }
 
     /// Check on running processes and update states
+    ///
+    /// Uses waitpid(-1, WNOHANG) to reap any zombie processes, then looks up
+    /// which service they belong to. This approach:
+    /// 1. Avoids race conditions with a separate zombie reaper
+    /// 2. Preserves actual exit codes
+    /// 3. Handles orphaned processes (reparented to PID 1)
     pub async fn reap(&mut self) {
+        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+        use nix::unistd::Pid;
+
         let mut exited = Vec::new();
 
-        for (name, child) in &mut self.processes {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    exited.push((name.clone(), status.code().unwrap_or(-1)));
+        // Reap all available zombies using waitpid(-1, WNOHANG)
+        loop {
+            match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) => {
+                    // No more zombies to reap
+                    break;
                 }
-                Ok(None) => {
-                    // Still running
+                Ok(status) => {
+                    // Extract PID and exit code from status
+                    let (pid, code) = match status {
+                        WaitStatus::Exited(p, code) => (p.as_raw() as u32, code),
+                        WaitStatus::Signaled(p, signal, _) => {
+                            // Process killed by signal, use negative signal number
+                            (p.as_raw() as u32, -(signal as i32))
+                        }
+                        WaitStatus::Stopped(p, _) | WaitStatus::Continued(p) => {
+                            // Process stopped/continued, not exited - ignore
+                            log::debug!("Process {} stopped/continued", p.as_raw());
+                            continue;
+                        }
+                        _ => continue,
+                    };
+
+                    // Look up which service this PID belongs to
+                    if let Some(name) = self.pid_to_service.remove(&pid) {
+                        log::debug!("Reaped {} (PID {}) with exit code {}", name, pid, code);
+                        exited.push((name, code));
+                    } else {
+                        // Orphaned process - just log and discard
+                        log::debug!("Reaped orphaned process PID {} (exit {})", pid, code);
+                    }
+                }
+                Err(nix::errno::Errno::ECHILD) => {
+                    // No children at all
+                    break;
                 }
                 Err(e) => {
-                    log::error!("Error checking {}: {}", name, e);
+                    log::error!("waitpid error: {}", e);
+                    break;
                 }
             }
         }

@@ -13,13 +13,35 @@ impl Manager {
         let section = unit.unit_section();
 
         // ConditionPathExists - path must exist (or not exist if prefixed with !)
+        // The | prefix makes it a trigger condition (OR with other | conditions)
+        // Collect trigger conditions separately to implement OR logic
+        let mut trigger_conditions: Vec<(&str, bool)> = Vec::new();
+        let mut regular_conditions: Vec<(&str, bool)> = Vec::new();
+
         for path in &section.condition_path_exists {
-            let (negated, path) = if let Some(p) = path.strip_prefix('!') {
+            // Strip | prefix (trigger condition marker)
+            let (trigger, path) = if let Some(p) = path.strip_prefix('|') {
                 (true, p)
             } else {
                 (false, path.as_str())
             };
 
+            // Strip ! prefix (negation)
+            let (negated, path) = if let Some(p) = path.strip_prefix('!') {
+                (true, p)
+            } else {
+                (false, path)
+            };
+
+            if trigger {
+                trigger_conditions.push((path, negated));
+            } else {
+                regular_conditions.push((path, negated));
+            }
+        }
+
+        // Regular conditions must ALL pass
+        for (path, negated) in regular_conditions {
             let exists = std::path::Path::new(path).exists();
             if negated && exists {
                 return Some(format!(
@@ -31,6 +53,26 @@ impl Manager {
                 return Some(format!(
                     "ConditionPathExists={} failed (path missing)",
                     path
+                ));
+            }
+        }
+
+        // Trigger conditions: ANY one passing is enough (OR logic)
+        // If there are trigger conditions and NONE pass, fail
+        if !trigger_conditions.is_empty() {
+            let any_pass = trigger_conditions.iter().any(|(path, negated)| {
+                let exists = std::path::Path::new(path).exists();
+                if *negated { !exists } else { exists }
+            });
+            if !any_pass {
+                // Build a descriptive error message
+                let failed: Vec<_> = trigger_conditions
+                    .iter()
+                    .map(|(p, n)| if *n { format!("|!{}", p) } else { format!("|{}", p) })
+                    .collect();
+                return Some(format!(
+                    "ConditionPathExists={} failed (no trigger condition matched)",
+                    failed.join(", ")
                 ));
             }
         }
@@ -379,6 +421,33 @@ impl Manager {
                                 e.file_name().to_string_lossy().starts_with("SecureBoot-")
                             })
                         })
+                        .unwrap_or(false)
+            }
+            "tpm2" => {
+                // Check for TPM2 device
+                std::fs::read_to_string("/sys/class/tpm/tpm0/tpm_version_major")
+                    .map(|v| v.trim() == "2")
+                    .unwrap_or(false)
+            }
+            "measured-uki" => {
+                // Check if booted from a measured UKI (systemd-stub sets StubInfo EFI variable)
+                // The GUID 4a67b082-0a4c-41cf-b6c7-440b29bb8c4f is the systemd loader namespace
+                std::fs::read_dir("/sys/firmware/efi/efivars")
+                    .map(|entries| {
+                        entries.filter_map(|e| e.ok()).any(|e| {
+                            e.file_name()
+                                .to_string_lossy()
+                                .starts_with("StubInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f")
+                        })
+                    })
+                    .unwrap_or(false)
+            }
+            "cvm" => {
+                // Confidential VM (AMD SEV or Intel TDX)
+                std::path::Path::new("/sys/kernel/security/coco/tdx_guest").exists()
+                    || std::path::Path::new("/sys/kernel/security/coco/sev_guest").exists()
+                    || std::fs::read_to_string("/sys/devices/system/cpu/vulnerabilities/sev")
+                        .map(|v| v.contains("SEV"))
                         .unwrap_or(false)
             }
             _ => false,

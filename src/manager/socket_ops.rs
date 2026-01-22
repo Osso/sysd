@@ -36,7 +36,7 @@ impl Manager {
         for listener in &socket.socket.listeners {
             match self.create_listener(listener, socket) {
                 Ok(fd) => {
-                    log::debug!(
+                    log::info!(
                         "{}: created {:?} listener on {} (fd {})",
                         name,
                         listener.listen_type,
@@ -145,13 +145,7 @@ impl Manager {
                 }
             }
             ListenType::Fifo => self.create_fifo(&listener.address, socket),
-            ListenType::Netlink => {
-                // Netlink sockets are complex - stub for now
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "Netlink sockets not yet implemented",
-                ))
-            }
+            ListenType::Netlink => self.create_netlink_socket(&listener.address)
         }
     }
 
@@ -289,6 +283,94 @@ impl Manager {
         }
     }
 
+    /// Create a netlink socket
+    /// Address format: "<protocol> <groups>" e.g., "route 1361" or "audit 1"
+    fn create_netlink_socket(&self, addr: &str) -> std::io::Result<RawFd> {
+        use std::mem::size_of;
+
+        // Parse address: "protocol groups"
+        let parts: Vec<&str> = addr.split_whitespace().collect();
+        if parts.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Invalid netlink address: empty",
+            ));
+        }
+
+        // Map protocol name to constant
+        let protocol = match parts[0].to_lowercase().as_str() {
+            "route" => libc::NETLINK_ROUTE,
+            "kobject-uevent" => libc::NETLINK_KOBJECT_UEVENT,
+            "audit" => libc::NETLINK_AUDIT,
+            "selinux" => libc::NETLINK_SELINUX,
+            "netfilter" | "firewall" => libc::NETLINK_NETFILTER,
+            "connector" | "cn" => libc::NETLINK_CONNECTOR,
+            "iscsi" => libc::NETLINK_ISCSI,
+            "rdma" => libc::NETLINK_RDMA,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Unknown netlink protocol: {}", parts[0]),
+                ))
+            }
+        };
+
+        // Parse groups (default to 0 if not specified)
+        let groups: u32 = if parts.len() > 1 {
+            parts[1].parse().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Invalid netlink groups: {}", parts[1]),
+                )
+            })?
+        } else {
+            0
+        };
+
+        unsafe {
+            // Create netlink socket
+            let fd = libc::socket(libc::AF_NETLINK, libc::SOCK_DGRAM, protocol);
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            // Set non-blocking
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags < 0 {
+                libc::close(fd);
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+                libc::close(fd);
+                return Err(std::io::Error::last_os_error());
+            }
+
+            // Bind to netlink address
+            let mut addr: libc::sockaddr_nl = std::mem::zeroed();
+            addr.nl_family = libc::AF_NETLINK as u16;
+            addr.nl_pid = 0; // Let kernel assign
+            addr.nl_groups = groups;
+
+            let addr_ptr = &addr as *const libc::sockaddr_nl as *const libc::sockaddr;
+            let addr_len = size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+
+            if libc::bind(fd, addr_ptr, addr_len) < 0 {
+                let err = std::io::Error::last_os_error();
+                libc::close(fd);
+                return Err(err);
+            }
+
+            log::debug!(
+                "Created netlink socket: protocol={}, groups={}, fd={}",
+                parts[0],
+                groups,
+                fd
+            );
+
+            Ok(fd)
+        }
+    }
+
     /// Stop a socket unit (close listening sockets)
     pub(super) async fn stop_socket(
         &mut self,
@@ -356,6 +438,57 @@ impl Manager {
                 if socket.service_name() == service_name {
                     if let Some(fds) = self.socket_fds.get(socket_name) {
                         return fds.clone();
+                    }
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    /// Get socket FD names for a service (for LISTEN_FDNAMES)
+    /// Returns names in the same order as get_socket_fds returns FDs
+    pub fn get_socket_fd_names(&self, service_name: &str) -> Vec<String> {
+        // Helper to get fd_name for a socket, with fallback to socket name
+        let get_fd_name = |socket_name: &str| -> String {
+            if let Some(socket) = self.units.get(socket_name).and_then(|u| u.as_socket()) {
+                socket
+                    .socket
+                    .fd_name
+                    .clone()
+                    .unwrap_or_else(|| socket_name.strip_suffix(".socket").unwrap_or(socket_name).to_string())
+            } else {
+                socket_name.strip_suffix(".socket").unwrap_or(socket_name).to_string()
+            }
+        };
+
+        // Check if service has explicit Sockets= directive
+        if let Some(service) = self.units.get(service_name).and_then(|u| u.as_service()) {
+            if !service.service.sockets.is_empty() {
+                // Collect names from all named sockets (one name per FD)
+                let mut names = Vec::new();
+                for socket_name in &service.service.sockets {
+                    if let Some(socket_fds) = self.socket_fds.get(socket_name) {
+                        let fd_name = get_fd_name(socket_name);
+                        // Each FD gets the same name (as per systemd behavior)
+                        for _ in 0..socket_fds.len() {
+                            names.push(fd_name.clone());
+                        }
+                    }
+                }
+                if !names.is_empty() {
+                    return names;
+                }
+            }
+        }
+
+        // Fall back to name matching: find socket unit that activates this service
+        for (socket_name, unit) in &self.units {
+            if let Some(socket) = unit.as_socket() {
+                if socket.service_name() == service_name {
+                    if let Some(socket_fds) = self.socket_fds.get(socket_name) {
+                        let fd_name = get_fd_name(socket_name);
+                        // Each FD gets the same name
+                        return vec![fd_name; socket_fds.len()];
                     }
                 }
             }

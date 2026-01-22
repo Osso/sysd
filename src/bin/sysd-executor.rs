@@ -60,7 +60,7 @@ fn parse_deserialize_fd(args: &[String]) -> Option<RawFd> {
 
 fn apply_and_exec(config: ExecConfig) -> Result<(), String> {
     // 1. Set up socket activation FDs (must be done early, before other setup)
-    setup_socket_fds(config.socket_fd_count)?;
+    setup_socket_fds(config.socket_fd_count, &config.socket_fd_names)?;
 
     // 2. Set environment variables
     setup_environment(&config.environment, &config.unset_environment)?;
@@ -73,32 +73,39 @@ fn apply_and_exec(config: ExecConfig) -> Result<(), String> {
         set_oom_score_adjust(score)?;
     }
 
-    // 5. Apply security sandbox (must be before dropping privileges)
-    apply_sandbox(&config.sandbox)?;
+    // 5. Apply security sandbox PHASE 1: mount namespace, protections (before privileges)
+    // This does NOT include: NoNewPrivileges, ambient caps, seccomp (those come later)
+    apply_sandbox_phase1(&config.sandbox)?;
 
-    // 6. Set credentials (uid/gid) - must be after sandbox setup
-    set_credentials(config.gid, config.uid)?;
+    // 6. Set credentials (uid/gid)
+    // Use SECBIT_KEEP_CAPS to preserve capabilities across setuid()
+    let needs_caps = !config.sandbox.ambient_capabilities.is_empty();
+    set_credentials(config.gid, config.uid, needs_caps)?;
 
-    // 7. Set working directory
+    // 7. Apply security sandbox PHASE 2: capabilities, NoNewPrivileges, seccomp
+    // Must be AFTER setuid() so ambient caps work correctly
+    apply_sandbox_phase2(&config.sandbox)?;
+
+    // 8. Set working directory
     if let Some(ref wd) = config.working_directory {
         std::env::set_current_dir(wd)
             .map_err(|e| format!("Failed to set working directory: {}", e))?;
     }
 
-    // 8. Set up TTY if needed
+    // 9. Set up TTY if needed
     setup_tty(&config)?;
 
-    // 9. Exec the target program
+    // 10. Exec the target program
     exec_program(&config.program, &config.args)
 }
 
-fn setup_socket_fds(count: usize) -> Result<(), String> {
+fn setup_socket_fds(count: usize, names: &[String]) -> Result<(), String> {
     if count == 0 {
         return Ok(());
     }
 
     // Socket FDs are already at positions 3, 4, 5, ... passed by parent
-    // Set LISTEN_FDS and LISTEN_PID environment variables
+    // Set LISTEN_FDS, LISTEN_PID, and LISTEN_FDNAMES environment variables
     let pid = std::process::id();
 
     unsafe {
@@ -109,6 +116,16 @@ fn setup_socket_fds(count: usize) -> Result<(), String> {
         let listen_pid_key = CString::new("LISTEN_PID").unwrap();
         let listen_pid_val = CString::new(pid.to_string()).unwrap();
         libc::setenv(listen_pid_key.as_ptr(), listen_pid_val.as_ptr(), 1);
+
+        // Set LISTEN_FDNAMES (colon-separated list of names)
+        // If names is shorter than count, pad with "unknown"
+        let fd_names: Vec<String> = (0..count)
+            .map(|i| names.get(i).cloned().unwrap_or_else(|| "unknown".to_string()))
+            .collect();
+        let fd_names_str = fd_names.join(":");
+        let listen_fdnames_key = CString::new("LISTEN_FDNAMES").unwrap();
+        let listen_fdnames_val = CString::new(fd_names_str).unwrap();
+        libc::setenv(listen_fdnames_key.as_ptr(), listen_fdnames_val.as_ptr(), 1);
 
         // Clear FD_CLOEXEC on socket FDs so they survive exec
         const SD_LISTEN_FDS_START: RawFd = 3;
@@ -176,7 +193,27 @@ fn set_oom_score_adjust(score: i32) -> Result<(), String> {
         .map_err(|e| format!("Failed to set oom_score_adj: {}", e))
 }
 
-fn set_credentials(gid: Option<u32>, uid: Option<u32>) -> Result<(), String> {
+// Securebits constants for preserving capabilities across setuid
+const SECBIT_KEEP_CAPS: libc::c_ulong = 1 << 4;
+const SECBIT_NO_SETUID_FIXUP: libc::c_ulong = 1 << 2;
+
+fn set_credentials(gid: Option<u32>, uid: Option<u32>, needs_caps: bool) -> Result<(), String> {
+    // If we need to preserve capabilities across setuid(), set SECBIT_KEEP_CAPS
+    // This prevents the kernel from clearing the permitted capability set on setuid()
+    if needs_caps && uid.is_some() {
+        unsafe {
+            // Set KEEP_CAPS and NO_SETUID_FIXUP to preserve capabilities
+            let securebits = SECBIT_KEEP_CAPS | SECBIT_NO_SETUID_FIXUP;
+            if libc::prctl(libc::PR_SET_SECUREBITS, securebits, 0, 0, 0) != 0 {
+                eprintln!(
+                    "sysd-executor: warning: failed to set securebits: {}",
+                    std::io::Error::last_os_error()
+                );
+                // Continue anyway - caps might not work but we shouldn't fail the service
+            }
+        }
+    }
+
     // Group must be set before user
     if let Some(gid) = gid {
         unsafe {
@@ -187,8 +224,13 @@ fn set_credentials(gid: Option<u32>, uid: Option<u32>) -> Result<(), String> {
                     std::io::Error::last_os_error()
                 ));
             }
+            // Also set supplementary groups to empty (like systemd does)
+            if libc::setgroups(0, std::ptr::null()) != 0 {
+                // Non-fatal - might not have CAP_SETGID
+            }
         }
     }
+
     if let Some(uid) = uid {
         unsafe {
             if libc::setuid(uid) != 0 {
@@ -200,6 +242,7 @@ fn set_credentials(gid: Option<u32>, uid: Option<u32>) -> Result<(), String> {
             }
         }
     }
+
     Ok(())
 }
 
@@ -298,46 +341,32 @@ fn exec_program(program: &str, args: &[String]) -> Result<(), String> {
 // Sandbox implementation (extracted from manager/sandbox.rs)
 // ============================================================================
 
-fn apply_sandbox(sandbox: &SandboxConfig) -> Result<(), String> {
-    // NoNewPrivileges
-    if sandbox.no_new_privileges {
-        apply_no_new_privileges()?;
-    }
-
-    // ProtectKernelModules - drop CAP_SYS_MODULE
+/// Phase 1: Apply sandbox settings that must happen BEFORE dropping privileges
+/// This includes mount namespace, ProtectSystem, PrivateTmp, etc.
+fn apply_sandbox_phase1(sandbox: &SandboxConfig) -> Result<(), String> {
+    // ProtectKernelModules - drop CAP_SYS_MODULE from bounding set
     if sandbox.protect_kernel_modules {
         drop_capability(16)?; // CAP_SYS_MODULE
     }
 
-    // Capability bounding set
+    // Capability bounding set - drop capabilities we don't need
     apply_capability_bounding_set(&sandbox.capability_bounding_set)?;
 
-    // Ambient capabilities
-    apply_ambient_capabilities(&sandbox.ambient_capabilities)?;
-
-    // Private network namespace
+    // Private network namespace (requires CAP_SYS_ADMIN - must be before setuid)
     if sandbox.private_network {
         apply_private_network()?;
     }
 
-    // prctl-based protections
-    if sandbox.restrict_realtime {
-        // Handled via seccomp
-    }
-
+    // prctl-based protections that don't require capabilities
     if sandbox.memory_deny_write_execute {
         apply_memory_deny_write_execute()?;
-    }
-
-    if sandbox.lock_personality {
-        // Handled via seccomp
     }
 
     if sandbox.ignore_sigpipe {
         apply_ignore_sigpipe()?;
     }
 
-    // Mount namespace operations
+    // Mount namespace operations (require CAP_SYS_ADMIN - must be before setuid)
     let needs_mount_ns = !matches!(sandbox.protect_system, ProtectSystemConfig::No)
         || !matches!(sandbox.protect_home, ProtectHomeConfig::No)
         || sandbox.private_tmp
@@ -387,7 +416,23 @@ fn apply_sandbox(sandbox: &SandboxConfig) -> Result<(), String> {
         )?;
     }
 
-    // Seccomp filters (must be last)
+    Ok(())
+}
+
+/// Phase 2: Apply sandbox settings that must happen AFTER dropping privileges
+/// This includes ambient capabilities, NoNewPrivileges, and seccomp
+fn apply_sandbox_phase2(sandbox: &SandboxConfig) -> Result<(), String> {
+    // Ambient capabilities - must be done AFTER setuid when using SECBIT_KEEP_CAPS
+    // To raise an ambient cap, it must be in both permitted and inheritable sets
+    apply_ambient_capabilities(&sandbox.ambient_capabilities)?;
+
+    // NoNewPrivileges - MUST be after ambient capabilities
+    // (PR_CAP_AMBIENT_RAISE fails if NoNewPrivileges is set)
+    if sandbox.no_new_privileges {
+        apply_no_new_privileges()?;
+    }
+
+    // Seccomp filters (must be last - after all other setup is complete)
     let has_seccomp = sandbox.restrict_namespaces.is_some()
         || !sandbox.system_call_filter.is_empty()
         || sandbox.protect_clock
@@ -480,6 +525,9 @@ fn capability_name_to_num(name: &str) -> Option<u32> {
         "WAKE_ALARM" => Some(35),
         "BLOCK_SUSPEND" => Some(36),
         "AUDIT_READ" => Some(37),
+        "PERFMON" => Some(38),
+        "BPF" => Some(39),
+        "CHECKPOINT_RESTORE" => Some(40),
         _ => None,
     }
 }
@@ -487,20 +535,104 @@ fn capability_name_to_num(name: &str) -> Option<u32> {
 const PR_CAP_AMBIENT: libc::c_int = 47;
 const PR_CAP_AMBIENT_RAISE: libc::c_ulong = 2;
 
+// Capability set manipulation constants
+const _LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
+
+#[repr(C)]
+struct CapUserHeader {
+    version: u32,
+    pid: libc::c_int,
+}
+
+#[repr(C)]
+struct CapUserData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
 fn apply_ambient_capabilities(caps: &[String]) -> Result<(), String> {
+    if caps.is_empty() {
+        return Ok(());
+    }
+
+    // Get current capabilities
+    let mut header = CapUserHeader {
+        version: _LINUX_CAPABILITY_VERSION_3,
+        pid: 0, // current process
+    };
+    // We need 2 CapUserData structs for 64-bit capability set (caps 0-31 and 32-63)
+    let mut data = [
+        CapUserData { effective: 0, permitted: 0, inheritable: 0 },
+        CapUserData { effective: 0, permitted: 0, inheritable: 0 },
+    ];
+
+    unsafe {
+        if libc::syscall(
+            libc::SYS_capget,
+            &mut header as *mut CapUserHeader,
+            data.as_mut_ptr(),
+        ) != 0
+        {
+            eprintln!(
+                "sysd-executor: capget failed: {}",
+                std::io::Error::last_os_error()
+            );
+            // Continue anyway - we'll try to raise ambient caps
+        }
+    }
+
+    // Add each ambient capability to the inheritable set and raise to ambient
+    for cap_str in caps {
+        if let Some(cap_num) = capability_name_to_num(cap_str) {
+            // Add to inheritable set
+            let cap_idx = (cap_num / 32) as usize;
+            let cap_bit = 1u32 << (cap_num % 32);
+
+            if cap_idx < 2 {
+                data[cap_idx].inheritable |= cap_bit;
+            }
+        }
+    }
+
+    // Set the updated capabilities (with inheritable set)
+    unsafe {
+        if libc::syscall(
+            libc::SYS_capset,
+            &header as *const CapUserHeader,
+            data.as_ptr(),
+        ) != 0
+        {
+            eprintln!(
+                "sysd-executor: capset failed: {}",
+                std::io::Error::last_os_error()
+            );
+            // Continue anyway - ambient caps might still work if already inheritable
+        }
+    }
+
+    // Now raise each capability to ambient
     for cap_str in caps {
         if let Some(cap_num) = capability_name_to_num(cap_str) {
             unsafe {
-                libc::prctl(
+                let ret = libc::prctl(
                     PR_CAP_AMBIENT,
                     PR_CAP_AMBIENT_RAISE,
                     cap_num as libc::c_ulong,
                     0,
                     0,
                 );
+                if ret != 0 {
+                    eprintln!(
+                        "sysd-executor: failed to raise ambient cap {}: {}",
+                        cap_str,
+                        std::io::Error::last_os_error()
+                    );
+                }
             }
         }
     }
+
     Ok(())
 }
 
@@ -825,19 +957,53 @@ fn mount_tmpfs(path: &str) -> Result<(), String> {
 
 fn make_inaccessible(path: &str) -> Result<(), String> {
     let path_c = CString::new(path).map_err(|e| e.to_string())?;
-    let fstype = CString::new("tmpfs").unwrap();
-    let source = CString::new("tmpfs").unwrap();
 
-    unsafe {
-        if libc::mount(
-            source.as_ptr(),
-            path_c.as_ptr(),
-            fstype.as_ptr(),
-            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
-            std::ptr::null(),
-        ) != 0
-        {
-            return Err(format!("Failed to make {} inaccessible", path));
+    // Check if path is a directory or a file
+    let metadata = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => return Err(format!("Failed to stat {}: {}", path, e)),
+    };
+
+    if metadata.is_dir() {
+        // For directories, mount an empty tmpfs over it
+        let fstype = CString::new("tmpfs").unwrap();
+        let source = CString::new("tmpfs").unwrap();
+
+        unsafe {
+            if libc::mount(
+                source.as_ptr(),
+                path_c.as_ptr(),
+                fstype.as_ptr(),
+                libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                std::ptr::null(),
+            ) != 0
+            {
+                let errno = *libc::__errno_location();
+                return Err(format!(
+                    "Failed to make {} inaccessible (tmpfs mount): errno {}",
+                    path, errno
+                ));
+            }
+        }
+    } else {
+        // For files, bind-mount /dev/null over them
+        let dev_null = CString::new("/dev/null").unwrap();
+
+        unsafe {
+            if libc::mount(
+                dev_null.as_ptr(),
+                path_c.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            ) != 0
+            {
+                let errno = *libc::__errno_location();
+                return Err(format!(
+                    "Failed to make {} inaccessible (bind /dev/null): errno {}",
+                    path, errno
+                ));
+            }
         }
     }
     Ok(())

@@ -4,6 +4,7 @@
 
 mod mount;
 mod parser;
+mod path;
 mod service;
 mod slice;
 mod socket;
@@ -13,6 +14,7 @@ mod unit;
 
 pub use mount::{Mount, MountSection};
 pub use parser::{parse_file, parse_unit_file, ParseError, ParsedFile};
+pub use path::{Path as PathUnit, PathSection};
 pub use service::*;
 pub use slice::Slice;
 pub use socket::{ListenType, Listener, Socket, SocketSection};
@@ -546,7 +548,10 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
             }
         }
         if let Some(vals) = service.get("SOCKETS") {
-            svc.service.sockets = vals.iter().map(|(_, v)| v.clone()).collect();
+            // Split on whitespace: Sockets=foo.socket bar.socket
+            for (_, v) in vals {
+                svc.service.sockets.extend(v.split_whitespace().map(String::from));
+            }
         }
         if let Some(vals) = service.get("SENDSIGHUP") {
             if let Some((_, s)) = vals.first() {
@@ -797,6 +802,107 @@ pub async fn load_target(path: &Path) -> Result<Target, ParseError> {
     }
 
     Ok(target)
+}
+
+/// Convert parsed INI data into a typed Path unit
+pub fn parse_path_unit(name: &str, parsed: &ParsedFile) -> Result<path::Path, ParseError> {
+    let mut path_unit = path::Path::new(name.to_string());
+
+    // [Unit] section
+    if let Some(unit) = parsed.get("[Unit]") {
+        if let Some(vals) = unit.get("DESCRIPTION") {
+            path_unit.unit.description = vals.first().map(|(_, v)| v.clone());
+        }
+        if let Some(vals) = unit.get("AFTER") {
+            path_unit.unit.after = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("BEFORE") {
+            path_unit.unit.before = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("REQUIRES") {
+            path_unit.unit.requires = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("WANTS") {
+            path_unit.unit.wants = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = unit.get("CONFLICTS") {
+            path_unit.unit.conflicts = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        // Note: PartOf= is not yet in UnitSection, skip for now
+        if let Some(vals) = unit.get("DEFAULTDEPENDENCIES") {
+            if let Some((_, s)) = vals.first() {
+                path_unit.unit.default_dependencies =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+    }
+
+    // [Path] section
+    if let Some(path_section) = parsed.get("[Path]") {
+        if let Some(vals) = path_section.get("PATHEXISTS") {
+            path_unit.path.path_exists = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = path_section.get("PATHEXISTSGLOB") {
+            path_unit.path.path_exists_glob = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = path_section.get("PATHCHANGED") {
+            path_unit.path.path_changed = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = path_section.get("PATHMODIFIED") {
+            path_unit.path.path_modified = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = path_section.get("DIRECTORYNOTEMPTY") {
+            path_unit.path.directory_not_empty = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = path_section.get("UNIT") {
+            path_unit.path.unit = vals.first().map(|(_, v)| v.clone());
+        }
+        if let Some(vals) = path_section.get("MAKEDIRECTORY") {
+            if let Some((_, s)) = vals.first() {
+                path_unit.path.make_directory =
+                    matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on");
+            }
+        }
+        if let Some(vals) = path_section.get("DIRECTORYMODE") {
+            if let Some((_, s)) = vals.first() {
+                // Parse octal mode like "0755"
+                path_unit.path.directory_mode = u32::from_str_radix(s.trim_start_matches('0'), 8).ok();
+            }
+        }
+    }
+
+    // [Install] section
+    if let Some(install) = parsed.get("[Install]") {
+        if let Some(vals) = install.get("WANTEDBY") {
+            path_unit.install.wanted_by = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = install.get("REQUIREDBY") {
+            path_unit.install.required_by = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = install.get("ALSO") {
+            path_unit.install.also = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+        if let Some(vals) = install.get("ALIAS") {
+            path_unit.install.alias = vals.iter().map(|(_, v)| v.clone()).collect();
+        }
+    }
+
+    Ok(path_unit)
+}
+
+/// Parse a path unit file from disk
+pub async fn load_path(path: &Path) -> Result<path::Path, ParseError> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    let mut parsed = parse_unit_file(path).await?;
+
+    // Load and merge drop-in files
+    load_dropins(path, &mut parsed).await;
+
+    parse_path_unit(name, &parsed)
 }
 
 /// Convert parsed INI data into a typed Slice
@@ -1490,6 +1596,10 @@ pub async fn load_unit(path: &Path) -> Result<Unit, ParseError> {
         Some("timer") => {
             let timer = load_timer(path).await?;
             Ok(Unit::Timer(timer))
+        }
+        Some("path") => {
+            let path_unit = load_path(path).await?;
+            Ok(Unit::Path(path_unit))
         }
         _ => Err(ParseError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -2462,5 +2572,92 @@ ExecStart=/bin/true
         let svc2 = parse_service("update-done.service", &parsed2).unwrap();
 
         assert_eq!(svc2.unit.condition_needs_update, vec!["|/etc", "|/var"]);
+    }
+
+    #[test]
+    fn test_parse_path_cups() {
+        let content = r#"
+[Unit]
+Description=CUPS Scheduler
+PartOf=cups.service
+
+[Path]
+PathExists=/var/cache/cups/org.cups.cupsd
+
+[Install]
+WantedBy=multi-user.target
+"#;
+        let parsed = parse_file(content).unwrap();
+        let path_unit = parse_path_unit("cups.path", &parsed).unwrap();
+
+        assert_eq!(path_unit.name, "cups.path");
+        assert_eq!(path_unit.unit.description, Some("CUPS Scheduler".into()));
+        assert_eq!(path_unit.path.path_exists, vec!["/var/cache/cups/org.cups.cupsd"]);
+        assert!(path_unit.install.wanted_by.contains(&"multi-user.target".into()));
+        assert_eq!(path_unit.activated_unit(), "cups.service");
+    }
+
+    #[test]
+    fn test_parse_path_directory_not_empty() {
+        let content = r#"
+[Unit]
+Description=Forward Password Requests to Wall Directory Watch
+DefaultDependencies=no
+Before=paths.target
+
+[Path]
+DirectoryNotEmpty=/run/systemd/ask-password
+MakeDirectory=yes
+"#;
+        let parsed = parse_file(content).unwrap();
+        let path_unit = parse_path_unit("systemd-ask-password-wall.path", &parsed).unwrap();
+
+        assert_eq!(path_unit.name, "systemd-ask-password-wall.path");
+        assert!(!path_unit.unit.default_dependencies);
+        assert!(path_unit.unit.before.contains(&"paths.target".into()));
+        assert_eq!(path_unit.path.directory_not_empty, vec!["/run/systemd/ask-password"]);
+        assert!(path_unit.path.make_directory);
+        assert_eq!(path_unit.activated_unit(), "systemd-ask-password-wall.service");
+    }
+
+    #[test]
+    fn test_parse_path_with_unit() {
+        let content = r#"
+[Unit]
+Description=Custom watcher
+
+[Path]
+PathChanged=/etc/passwd
+Unit=custom-handler.service
+"#;
+        let parsed = parse_file(content).unwrap();
+        let path_unit = parse_path_unit("passwd-watcher.path", &parsed).unwrap();
+
+        assert_eq!(path_unit.path.path_changed, vec!["/etc/passwd"]);
+        assert_eq!(path_unit.path.unit, Some("custom-handler.service".into()));
+        assert_eq!(path_unit.activated_unit(), "custom-handler.service");
+    }
+
+    #[test]
+    fn test_parse_sockets_directive() {
+        // Test that Sockets= is split on whitespace
+        let content = r#"
+[Unit]
+Description=Journal Service
+
+[Service]
+Type=notify
+ExecStart=/usr/lib/systemd/systemd-journald
+Sockets=systemd-journald.socket systemd-journald-dev-log.socket
+"#;
+        let parsed = parse_file(content).unwrap();
+        let svc = parse_service("systemd-journald.service", &parsed).unwrap();
+
+        assert_eq!(svc.service.sockets.len(), 2);
+        assert!(svc.service.sockets.contains(&"systemd-journald.socket".to_string()));
+        assert!(svc
+            .service
+            .sockets
+            .contains(&"systemd-journald-dev-log.socket".to_string()));
     }
 }

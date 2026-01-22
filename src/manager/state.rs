@@ -240,6 +240,23 @@ impl ServiceState {
         self.state_change_time = Instant::now();
     }
 
+    /// Set state to active (exited) - for oneshot with RemainAfterExit=yes
+    pub fn set_exited(&mut self) {
+        self.active = ActiveState::Active;
+        self.sub = SubState::Exited;
+        self.main_pid = None;
+        self.exit_code = Some(0);
+        self.state_change_time = Instant::now();
+    }
+
+    /// Set state to inactive (for oneshot with RemainAfterExit=no)
+    pub fn set_inactive(&mut self) {
+        self.active = ActiveState::Inactive;
+        self.sub = SubState::Dead;
+        self.main_pid = None;
+        self.state_change_time = Instant::now();
+    }
+
     pub fn is_active(&self) -> bool {
         matches!(self.active, ActiveState::Active | ActiveState::Activating)
     }

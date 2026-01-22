@@ -17,6 +17,8 @@ pub struct SpawnOptions {
     pub watchdog_usec: Option<u64>,
     /// Socket file descriptors for socket activation (LISTEN_FDS)
     pub socket_fds: Vec<RawFd>,
+    /// Names for socket FDs (for LISTEN_FDNAMES)
+    pub socket_fd_names: Vec<String>,
     /// M19: Override UID for DynamicUser= (allocated by DynamicUserManager)
     pub dynamic_uid: Option<u32>,
     /// M19: Override GID for DynamicUser= (allocated by DynamicUserManager)
@@ -62,6 +64,17 @@ pub fn spawn_service_with_options(
     all_fds.extend(&options.stored_fds);
     let socket_fds = all_fds;
     let socket_fd_count = socket_fds.len();
+
+    // Build socket FD names for LISTEN_FDNAMES
+    let mut socket_fd_names = options.socket_fd_names.clone();
+    // Pad with "stored" for stored FDs (per systemd convention)
+    for _ in 0..options.stored_fds.len() {
+        socket_fd_names.push("stored".to_string());
+    }
+    // Pad with "unknown" if names is shorter than FD count
+    while socket_fd_names.len() < socket_fd_count {
+        socket_fd_names.push("unknown".to_string());
+    }
 
     if !socket_fds.is_empty() {
         // Verify FDs are valid before passing
@@ -171,7 +184,7 @@ pub fn spawn_service_with_options(
                     }
                 }
 
-                // Set LISTEN_FDS and LISTEN_PID
+                // Set LISTEN_FDS, LISTEN_PID, and LISTEN_FDNAMES
                 // (std::env::set_var is not async-signal-safe in forked child)
                 let pid = std::process::id();
 
@@ -182,6 +195,12 @@ pub fn spawn_service_with_options(
                 let listen_pid_key = std::ffi::CString::new("LISTEN_PID").unwrap();
                 let listen_pid_val = std::ffi::CString::new(pid.to_string()).unwrap();
                 libc::setenv(listen_pid_key.as_ptr(), listen_pid_val.as_ptr(), 1);
+
+                // Set LISTEN_FDNAMES (colon-separated list of names)
+                let fd_names_str = socket_fd_names.join(":");
+                let listen_fdnames_key = std::ffi::CString::new("LISTEN_FDNAMES").unwrap();
+                let listen_fdnames_val = std::ffi::CString::new(fd_names_str).unwrap();
+                libc::setenv(listen_fdnames_key.as_ptr(), listen_fdnames_val.as_ptr(), 1);
 
                 // SD_LISTEN_FDS_START is 3 (after stdin/stdout/stderr)
                 const SD_LISTEN_FDS_START: RawFd = 3;
@@ -555,14 +574,16 @@ use crate::executor::{
 };
 
 /// Build ExecConfig from Service and SpawnOptions
+/// `command_index` specifies which ExecStart command to use (0 = first)
 pub fn build_exec_config(
     service: &Service,
     options: &SpawnOptions,
+    command_index: usize,
 ) -> Result<ExecConfig, SpawnError> {
     let exec_start = service
         .service
         .exec_start
-        .first()
+        .get(command_index)
         .ok_or_else(|| SpawnError::NoExecStart(service.name.clone()))?;
 
     let exec_start = substitute_specifiers(exec_start, service);
@@ -603,10 +624,16 @@ pub fn build_exec_config(
         .dynamic_gid
         .or_else(|| service.service.group.as_ref().and_then(|g| resolve_group(g)));
 
-    // Socket FD count
+    // Socket FD count and names
     let mut all_fds = options.socket_fds.clone();
     all_fds.extend(&options.stored_fds);
     let socket_fd_count = all_fds.len();
+
+    // Extend socket names with "stored" for stored FDs (per systemd convention)
+    let mut socket_fd_names = options.socket_fd_names.clone();
+    for _ in 0..options.stored_fds.len() {
+        socket_fd_names.push("stored".to_string());
+    }
 
     // Build sandbox config
     let sandbox = SandboxConfig {
@@ -682,6 +709,7 @@ pub fn build_exec_config(
         limit_core: service.service.limit_core,
         oom_score_adjust: service.service.oom_score_adjust,
         socket_fd_count,
+        socket_fd_names,
         std_input,
         tty_path: service.service.tty_path.clone(),
         tty_reset: service.service.tty_reset,
@@ -695,13 +723,15 @@ pub fn build_exec_config(
 /// 1. Serializing execution config to a memfd
 /// 2. Spawning sysd-executor with the memfd FD
 /// 3. Executor deserializes, applies sandbox, and execs target
+/// `command_index` specifies which ExecStart command to use (0 = first)
 pub fn spawn_service_via_executor(
     service: &Service,
     options: &SpawnOptions,
     executor_path: &str,
+    command_index: usize,
 ) -> Result<Child, SpawnError> {
     // Build config
-    let config = build_exec_config(service, options)?;
+    let config = build_exec_config(service, options, command_index)?;
 
     // Create runtime directories before spawning
     let uid = config.uid;

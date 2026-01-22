@@ -17,7 +17,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORK_DIR="${PROJECT_DIR}/target/qemu-btrfs-test"
-SYSD_BIN="${PROJECT_DIR}/target/x86_64-unknown-linux-musl/release/sysd"
+SYSD_BIN="${PROJECT_DIR}/target/release/sysd"
 DISK_IMG="${WORK_DIR}/root.img"
 DISK_SIZE="256M"
 
@@ -91,12 +91,20 @@ create_disk_image() {
     sudo btrfs subvolume create "$mnt/@home"
 
     # Create directory structure in @root
-    sudo mkdir -p "$mnt/@root"/{bin,dev,proc,sys,run,tmp,etc,home,usr/lib/systemd/system}
+    sudo mkdir -p "$mnt/@root"/{bin,dev,proc,sys,run,tmp,etc,home,usr/lib/systemd/system,lib64}
     sudo mkdir -p "$mnt/@root/etc/systemd/system"
 
     # Copy sysd
     sudo cp "$SYSD_BIN" "$mnt/@root/bin/sysd"
     sudo chmod +x "$mnt/@root/bin/sysd"
+
+    # Copy required glibc libraries for dynamically linked binary
+    sudo cp /lib64/ld-linux-x86-64.so.2 "$mnt/@root/lib64/"
+    for lib in /usr/lib/libc.so.6 /usr/lib/libm.so.6 /usr/lib/libgcc_s.so.1; do
+        [[ -f "$lib" ]] && sudo cp "$lib" "$mnt/@root/usr/lib/"
+    done
+    # Create /lib -> /usr/lib symlink (Arch Linux style)
+    sudo ln -sf usr/lib "$mnt/@root/lib"
 
     # Copy busybox for utilities
     local busybox_bin=""

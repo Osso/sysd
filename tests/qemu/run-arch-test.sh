@@ -243,7 +243,9 @@ rpc: files
 netgroup: files
 EOF
 
-    # Disable pam_systemd.so which hangs trying to talk to logind
+    # Disable pam_systemd.so - it tries to talk to logind which needs full D-Bus
+    # integration to work. LISTEN_FDNAMES is implemented but logind also needs
+    # D-Bus connectivity which sysd doesn't fully support yet.
     log "Disabling pam_systemd.so..."
     sed -i 's/^-session.*pam_systemd.so/#&/' "$mnt/etc/pam.d/system-login"
 

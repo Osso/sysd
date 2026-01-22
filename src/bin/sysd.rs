@@ -15,14 +15,61 @@
 
 use clap::Parser;
 use log::info;
+use std::fs::OpenOptions;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use peercred_ipc::{CallerInfo, Connection, Server};
 use sysd::dbus::DbusServer;
 use sysd::manager::Manager;
-use sysd::pid1::{self, ShutdownType, SignalHandler, SysdSignal, ZombieReaper};
+use sysd::pid1::{self, ShutdownType, SignalHandler, SysdSignal};
 use sysd::protocol::{socket_path, Request, Response, UnitInfo};
+
+/// Set up logging to both console and file
+fn setup_logging(user_mode: bool) {
+    let log_path = if user_mode {
+        // User mode: /run/user/<uid>/sysd.log
+        if let Some(uid) = std::env::var("XDG_RUNTIME_DIR").ok() {
+            format!("{}/sysd.log", uid)
+        } else {
+            format!("/run/user/{}/sysd.log", nix::unistd::getuid())
+        }
+    } else {
+        // System mode: /var/log/sysd.log
+        "/var/log/sysd.log".to_string()
+    };
+
+    let mut dispatch = fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "[{}][{}] {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                message
+            ))
+        })
+        .level(log::LevelFilter::Debug)
+        .chain(std::io::stderr());
+
+    // Try to add file output
+    if let Ok(file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        dispatch = dispatch.chain(file);
+        eprintln!("sysd: Logging to {}", log_path);
+    } else {
+        eprintln!("sysd: Could not open log file {}, logging to stderr only", log_path);
+    }
+
+    if let Err(e) = dispatch.apply() {
+        eprintln!("sysd: Failed to set up logging: {}", e);
+        // Fall back to env_logger
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "sysd")]
@@ -61,10 +108,10 @@ type SharedManager = Arc<RwLock<Manager>>;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
-
     let is_pid1 = pid1::is_pid1();
     let user_mode = args.user;
+
+    setup_logging(user_mode);
     // Boot when: explicit `boot` subcommand, OR running as PID 1 (unless --no-boot)
     let should_boot = matches!(args.command, Some(Command::Boot)) || (is_pid1 && !args.no_boot);
 
@@ -134,13 +181,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Take the socket activation receiver before wrapping manager in Arc
+    let socket_activation_rx = manager.take_socket_activation_rx();
+
     let manager: SharedManager = Arc::new(RwLock::new(manager));
+
+    // Shutdown flag to stop background tasks during shutdown
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+
+    // Spawn socket activation handler task
+    if let Some(mut rx) = socket_activation_rx {
+        let manager_sock = Arc::clone(&manager);
+        let shutdown_sock = Arc::clone(&shutdown_flag);
+        tokio::spawn(async move {
+            while let Some(activation) = rx.recv().await {
+                if shutdown_sock.load(Ordering::Relaxed) {
+                    log::debug!("Socket activation handler stopping due to shutdown");
+                    break;
+                }
+                let mut mgr = manager_sock.write().await;
+                if let Err(e) = mgr.handle_socket_activation(activation).await {
+                    log::error!("Socket activation failed: {}", e);
+                }
+            }
+        });
+    }
 
     // D-Bus server initialization is deferred until after boot
     // because dbus-broker.service needs to start first
     // Spawn a task that retries D-Bus connection with backoff
     if !user_mode {
         let manager_dbus = Arc::clone(&manager);
+        let shutdown_dbus = Arc::clone(&shutdown_flag);
         tokio::spawn(async move {
             // Wait a bit for boot to start dbus.socket and dbus-broker.service
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -150,6 +222,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut delay = std::time::Duration::from_millis(500);
 
             loop {
+                // Stop retrying if shutdown is in progress
+                if shutdown_dbus.load(Ordering::Relaxed) {
+                    log::debug!("D-Bus retry loop stopping due to shutdown");
+                    break;
+                }
                 match DbusServer::new(Arc::clone(&manager_dbus)).await {
                     Ok(_server) => {
                         info!("D-Bus interface available at org.freedesktop.systemd1");
@@ -195,17 +272,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // PID 1: Spawn zombie reaper task
-    if is_pid1 {
-        tokio::spawn(async move {
-            let reaper = ZombieReaper::new();
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
-            loop {
-                interval.tick().await;
-                reaper.reap_all();
-            }
-        });
-    }
+    // Note: Zombie reaping is now handled by the Manager's reap() function
+    // using waitpid(-1, WNOHANG). This avoids race conditions and preserves
+    // actual exit codes. The Manager's background task (below) calls reap()
+    // every 100ms which handles both service processes and orphaned processes.
+    let _ = is_pid1; // Mark as used
 
     // Spawn background task for processing notify messages, D-Bus readiness, watchdog, and service reaping
     let manager_bg = Arc::clone(&manager);
@@ -225,6 +296,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // PID 1: Spawn signal handler task
     if let Some(mut rx) = signal_rx {
         let manager_sig = Arc::clone(&manager);
+        let shutdown_sig = Arc::clone(&shutdown_flag);
         tokio::spawn(async move {
             while let Some(sig) = rx.recv().await {
                 match sig {
@@ -233,11 +305,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     SysdSignal::Term => {
                         info!("Received SIGTERM, initiating poweroff");
+                        shutdown_sig.store(true, Ordering::Relaxed);
                         stop_all_services(&manager_sig).await;
                         pid1::shutdown(ShutdownType::Poweroff).await;
                     }
                     SysdSignal::Int => {
                         info!("Received SIGINT, initiating reboot");
+                        shutdown_sig.store(true, Ordering::Relaxed);
                         stop_all_services(&manager_sig).await;
                         pid1::shutdown(ShutdownType::Reboot).await;
                     }

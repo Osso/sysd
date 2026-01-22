@@ -52,6 +52,8 @@ pub struct ExecConfig {
     // Socket activation
     /// Socket FD positions (will be at 3, 4, 5, ...)
     pub socket_fd_count: usize,
+    /// Names for socket FDs (for LISTEN_FDNAMES)
+    pub socket_fd_names: Vec<String>,
 
     // TTY
     /// StandardInput type
@@ -243,6 +245,7 @@ mod tests {
             limit_core: Some(0),
             oom_score_adjust: Some(-500),
             socket_fd_count: 2,
+            socket_fd_names: vec!["connection".to_string(), "varlink".to_string()],
             std_input: StdInputConfig::Null,
             tty_path: None,
             tty_reset: false,

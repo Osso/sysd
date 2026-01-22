@@ -31,12 +31,9 @@ check_deps() {
 build_binaries() {
     log "Building sysd binaries..."
 
-    # Build for musl target (statically linked, works in any container)
-    # The project .cargo/config.toml sets musl as default target
     cargo build --release --manifest-path "$PROJECT_DIR/Cargo.toml" 2>&1 | tail -5
 
-    # Musl binaries are in target/x86_64-unknown-linux-musl/release/
-    local target_dir="$PROJECT_DIR/target/x86_64-unknown-linux-musl/release"
+    local target_dir="$PROJECT_DIR/target/release"
 
     if [[ ! -f "$target_dir/sysd" ]]; then
         err "sysd binary not found at $target_dir/sysd"
@@ -55,7 +52,7 @@ build_binaries() {
 build_image() {
     log "Building Docker image..."
 
-    local target_dir="$PROJECT_DIR/target/x86_64-unknown-linux-musl/release"
+    local target_dir="$PROJECT_DIR/target/release"
 
     # Copy binaries to docker context
     cp "$target_dir/sysd" "$SCRIPT_DIR/sysd"
