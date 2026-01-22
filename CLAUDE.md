@@ -100,3 +100,40 @@ cargo build --release
 sysd listens on `/run/sysd.sock` (or `/run/user/<uid>/sysd.sock` for user mode).
 Uses MessagePack over Unix socket with peer credentials.
 See `src/protocol.rs` for Request/Response enums.
+
+## Implementation Notes
+
+### Drop-in Override Files
+- Location: `/etc/systemd/system/<unit>.d/*.conf`
+- systemd reset convention: `Key=` (empty value) clears all previous values for that key
+- Implemented in `merge_parsed_files()` in `src/units/mod.rs`
+
+### Oneshot Services
+- Oneshot services run asynchronously to avoid blocking socket activation
+- Completion is handled via `OneshotCompletion` messages sent through a channel
+- The background task in `sysd.rs` processes completion messages
+- Multi-command oneshots run commands sequentially via the completion handler
+
+### Notify Socket (`/run/sysd/notify`)
+- sd_notify() messages from services are received via Unix datagram socket
+- **Critical**: When converting nix::Errno to std::io::Error, use `from_raw_os_error(e as i32)`
+  to preserve the raw OS error code. Using `Error::new(ErrorKind::Other, e)` loses the code.
+- Must check `e.raw_os_error() == Some(libc::EAGAIN)` for EAGAIN handling
+- SCM_CREDENTIALS provides sender PID for verification
+- Journald, sshd, dbus-broker, logind all send READY=1 via this mechanism
+
+### Boot Lock Contention
+- The boot loop releases the manager lock between starting each unit
+- This allows socket activation and other background tasks to run during boot
+- Oneshot services don't block - they spawn a task to wait for completion
+
+### sysd-executor
+- Helper binary that applies ExecConfig (sandbox, environment, etc.) before exec
+- Must be included in initramfs for QEMU tests
+- Receives configuration via memfd serialized with rmp-serde
+
+### pam_systemd.so and logind Integration
+- pam_systemd.so calls logind via D-Bus when users log in (SSH, getty, etc.)
+- logind calls sysd's StartTransientUnit to create session scopes (e.g., `session-1.scope`)
+- Session scopes are created in user slices (e.g., `/sys/fs/cgroup/user-0.slice/session-1.scope`)
+- Requires: working D-Bus (dbus-broker), logind receiving READY=1, sysd D-Bus interface
