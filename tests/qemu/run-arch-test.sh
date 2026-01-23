@@ -243,18 +243,21 @@ rpc: files
 netgroup: files
 EOF
 
-    # Disable pam_systemd.so - it tries to talk to logind which needs full D-Bus
-    # integration to work. LISTEN_FDNAMES is implemented but logind also needs
-    # D-Bus connectivity which sysd doesn't fully support yet.
-    log "Disabling pam_systemd.so..."
-    sed -i 's/^-session.*pam_systemd.so/#&/' "$mnt/etc/pam.d/system-login"
+    # pam_systemd.so is enabled - sysd handles user-runtime-dir@ and user@ services
+    log "pam_systemd.so enabled (sysd supports logind session scopes)"
 
-    # Remove systemd profile.d scripts that can cause issues
-    rm -f "$mnt/etc/profile.d/70-systemd-shell-extra.sh"
-    rm -f "$mnt/etc/profile.d/80-systemd-osc-context.sh"
+    # DISABLE pam_systemd_home.so - it may hang waiting for systemd-homed varlink socket
+    log "Disabling pam_systemd_home.so (no systemd-homed running)..."
+    sed -i 's/^-.*pam_systemd_home.so/#&/' "$mnt/etc/pam.d/system-auth"
 
-    # Use /bin/sh for root to avoid any bash initialization issues
-    sed -i 's#^root:x:0:0::/root:/usr/bin/bash$#root:x:0:0::/root:/bin/sh#' "$mnt/etc/passwd"
+    # Remove profile.d scripts that may hang when systemd --user isn't available
+    rm -f "$mnt/etc/profile.d/"*.sh
+
+    # Create a minimal /etc/profile
+    cat > "$mnt/etc/profile" <<'PROFILEEOF'
+# Minimal profile for sysd testing
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PROFILEEOF
 
     # Enable services via symlinks
     log "Enabling services..."
@@ -267,6 +270,30 @@ EOF
     # Enable dbus-broker
     ln -sf /usr/lib/systemd/system/dbus-broker.service "$mnt/etc/systemd/system/multi-user.target.wants/"
     ln -sf /usr/lib/systemd/system/dbus.socket "$mnt/etc/systemd/system/sockets.target.wants/"
+
+    # Override dbus-broker.service to remove --audit flag and sandbox settings
+    # These can cause issues in our init environment
+    mkdir -p "$mnt/etc/systemd/system/dbus-broker.service.d"
+    cat > "$mnt/etc/systemd/system/dbus-broker.service.d/override.conf" <<EOF
+[Service]
+# Clear ExecStart and set without --audit
+ExecStart=
+ExecStart=/usr/bin/dbus-broker-launch --scope system
+# Disable sandbox settings that may interfere
+ProtectSystem=
+PrivateTmp=
+PrivateDevices=
+EOF
+
+    # Override systemd-logind.service to disable sandbox settings
+    # Mount namespace can interfere with D-Bus access
+    mkdir -p "$mnt/etc/systemd/system/systemd-logind.service.d"
+    cat > "$mnt/etc/systemd/system/systemd-logind.service.d/override.conf" <<EOF
+[Service]
+# Disable sandbox settings that may interfere with D-Bus
+ProtectSystem=
+PrivateTmp=
+EOF
 
     # Create fstab
     cat > "$mnt/etc/fstab" <<EOF
@@ -630,15 +657,18 @@ run_tests() {
     # Test 2: D-Bus is running
     log "Test: D-Bus running..."
     local dbus_err
-    # Try ListNames which is commonly allowed, or just check socket exists and broker running
-    dbus_err=$(ssh_cmd "ls -la /run/dbus/ 2>&1; pgrep -a dbus-broker 2>&1; dbus-send --system --dest=org.freedesktop.DBus --print-reply /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>&1" 2>&1)
+    # Debug: Check dbus-broker status in detail
+    log "Checking dbus-broker status..."
+    dbus_err=$(ssh_cmd "echo '=== /run/dbus/ ==='; ls -la /run/dbus/ 2>&1; echo '=== dbus-broker processes ==='; pgrep -la dbus 2>&1; echo '=== dbus-broker-launch processes ==='; pgrep -la broker 2>&1; echo '=== sysdctl status ==='; /usr/bin/sysdctl status dbus-broker.service 2>&1 || echo 'sysdctl failed'; echo '=== dbus-send test ==='; dbus-send --system --dest=org.freedesktop.DBus --print-reply /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>&1 || echo 'dbus-send failed'" 2>&1)
+    log "D-Bus debug output:"
+    echo "$dbus_err"
     if echo "$dbus_err" | grep -q "array"; then
         results+="✓ D-Bus running: PASS\n"
     elif echo "$dbus_err" | grep -q "system_bus_socket" && echo "$dbus_err" | grep -q "dbus-broker"; then
         # Socket exists and broker is running - D-Bus is functional even if policy restricts some methods
         results+="✓ D-Bus running: PASS (socket active, broker running)\n"
     else
-        log "D-Bus test output: $dbus_err"
+        log "D-Bus test failed"
         results+="✗ D-Bus running: FAIL\n"
         success=false
     fi
@@ -712,8 +742,8 @@ run_tests() {
     # Collect debug info if tests failed
     if ! $success; then
         log "=== Debug Information ==="
-        echo "--- Boot log (last 50 lines) ---"
-        cat "$OUTPUT_FILE" | tail -50
+        echo "--- Boot log (last 500 lines) ---"
+        cat "$OUTPUT_FILE" | tail -500
         echo ""
         echo "--- Running processes ---"
         ssh_cmd "ps aux" 2>/dev/null || true
@@ -748,6 +778,63 @@ shutdown_vm() {
     else
         log "VM shutdown cleanly"
     fi
+}
+
+# Extract debug logs from disk image after shutdown
+extract_debug_logs() {
+    log "Extracting debug logs from disk image..."
+
+    # Setup loop device
+    local loop_dev
+    loop_dev=$(losetup -f --show -P "$DISK_IMG")
+    local loop_part="${loop_dev}p1"
+
+    # Wait for partition to appear
+    sleep 1
+    partprobe "$loop_dev" 2>/dev/null || true
+    sleep 1
+
+    # Mount read-only
+    local mnt="$WORK_DIR/mnt-extract"
+    mkdir -p "$mnt"
+    mount -o ro "$loop_part" "$mnt" 2>/dev/null || {
+        losetup -d "$loop_dev" 2>/dev/null || true
+        return
+    }
+
+    # Extract interesting logs
+    echo ""
+    log "=== Shell Debug Log ==="
+    if [[ -f "$mnt/tmp/shell_debug.log" ]]; then
+        cat "$mnt/tmp/shell_debug.log"
+    else
+        echo "(No shell debug log found - shell may not have started)"
+    fi
+
+    echo ""
+    log "=== PAM Auth Log ==="
+    if [[ -f "$mnt/var/log/auth.log" ]]; then
+        tail -100 "$mnt/var/log/auth.log" 2>/dev/null || true
+    fi
+
+    echo ""
+    log "=== Logind Journal Entries ==="
+    if [[ -d "$mnt/var/log/journal" ]]; then
+        # Try to read journal entries for logind
+        journalctl --directory="$mnt/var/log/journal" -u systemd-logind.service --no-pager -n 50 2>/dev/null || true
+    fi
+
+    echo ""
+    log "=== User Runtime Directory ==="
+    ls -la "$mnt/run/user/" 2>/dev/null || echo "(No /run/user directory)"
+
+    echo ""
+    log "=== Session Scopes in Cgroups ==="
+    find "$mnt/sys/fs/cgroup" -name "session-*.scope" -type d 2>/dev/null | head -10 || echo "(No session scopes found)"
+
+    # Cleanup
+    umount "$mnt" 2>/dev/null || true
+    losetup -d "$loop_dev" 2>/dev/null || true
 }
 
 # Clean work directory
@@ -862,6 +949,9 @@ main() {
 
     # Shutdown
     shutdown_vm
+
+    # Extract debug logs from disk (especially if SSH commands timed out)
+    extract_debug_logs
 
     exit $test_result
 }
