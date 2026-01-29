@@ -46,6 +46,11 @@ dirs = "6.0"
 # Time
 chrono = "0.4"
 
+# Filesystem watching
+inotify = "0.11"
+glob = "0.3"
+futures-lite = "2.6"
+
 # IPC
 peercred-ipc = { git = "https://github.com/Osso/peercred-ipc" }
 rmp-serde = "1"
