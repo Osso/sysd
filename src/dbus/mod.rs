@@ -27,8 +27,13 @@ pub struct DbusServer {
 }
 
 impl DbusServer {
-    /// Start the D-Bus server on the system bus
+    /// Start the D-Bus server on the system bus (for system mode)
     pub async fn new(manager: Arc<RwLock<Manager>>) -> zbus::Result<Self> {
+        Self::new_system(manager).await
+    }
+
+    /// Start the D-Bus server on the system bus
+    pub async fn new_system(manager: Arc<RwLock<Manager>>) -> zbus::Result<Self> {
         let manager_iface = ManagerInterface::new(manager.clone());
 
         let connection = Builder::system()?
@@ -38,6 +43,28 @@ impl DbusServer {
             .await?;
 
         // Set the D-Bus connection on the Manager for scope registration
+        {
+            let mut mgr = manager.write().await;
+            mgr.set_dbus_connection(connection.clone());
+        }
+
+        Ok(Self { connection })
+    }
+
+    /// Start the D-Bus server on the session bus (for user mode)
+    ///
+    /// In user mode, we connect to the session bus and provide the same
+    /// org.freedesktop.systemd1 interface that user-level tools expect.
+    pub async fn new_session(manager: Arc<RwLock<Manager>>) -> zbus::Result<Self> {
+        let manager_iface = ManagerInterface::new(manager.clone());
+
+        let connection = Builder::session()?
+            .name("org.freedesktop.systemd1")?
+            .serve_at("/org/freedesktop/systemd1", manager_iface)?
+            .build()
+            .await?;
+
+        // Set the D-Bus connection on the Manager
         {
             let mut mgr = manager.write().await;
             mgr.set_dbus_connection(connection.clone());

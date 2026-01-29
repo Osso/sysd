@@ -8,6 +8,7 @@
 
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::RwLock;
@@ -123,10 +124,81 @@ impl ManagerInterface {
                     "failed"
                 }
             } else if unit_name.starts_with("user@") {
-                // user@.service manages systemd --user, which we don't support
-                // Just report as "done" so logind continues
-                log::info!("Skipping user@.service (systemd --user not supported)");
-                "done"
+                // Start a user-mode sysd instance for this user
+                let uid_str = unit_name
+                    .strip_prefix("user@")
+                    .and_then(|s| s.strip_suffix(".service"))
+                    .unwrap_or("0");
+                if let Ok(uid) = uid_str.parse::<u32>() {
+                    let runtime_dir = format!("/run/user/{}", uid);
+                    let sysd_socket = format!("{}/sysd.sock", runtime_dir);
+                    let bus_path = format!("{}/bus", runtime_dir);
+
+                    // Check if user sysd already running
+                    if std::path::Path::new(&sysd_socket).exists() {
+                        log::info!("User sysd already running for uid {}", uid);
+                        "done"
+                    } else {
+                        // First ensure dbus-daemon is running for session bus
+                        if !std::path::Path::new(&bus_path).exists() {
+                            let address = format!("unix:path={}", bus_path);
+                            match std::process::Command::new("dbus-daemon")
+                                .args(["--session", "--address", &address, "--nofork", "--nopidfile"])
+                                .uid(uid)
+                                .gid(uid)
+                                .env("XDG_RUNTIME_DIR", &runtime_dir)
+                                .stdin(std::process::Stdio::null())
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .spawn()
+                            {
+                                Ok(child) => {
+                                    log::info!(
+                                        "Started user D-Bus daemon for uid {} (PID {}) at {}",
+                                        uid, child.id(), bus_path
+                                    );
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to start user D-Bus for uid {}: {}", uid, e);
+                                    return;
+                                }
+                            }
+                        }
+
+                        // Now start user-mode sysd
+                        let dbus_addr = format!("unix:path={}", bus_path);
+                        match std::process::Command::new("/usr/bin/sysd")
+                            .args(["--user"])
+                            .uid(uid)
+                            .gid(uid)
+                            .env("XDG_RUNTIME_DIR", &runtime_dir)
+                            .env("DBUS_SESSION_BUS_ADDRESS", &dbus_addr)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
+                        {
+                            Ok(child) => {
+                                let pid = child.id();
+                                log::info!(
+                                    "Started user sysd for uid {} (PID {}) at {}",
+                                    uid, pid, sysd_socket
+                                );
+                                // Give sysd a moment to start
+                                std::thread::sleep(std::time::Duration::from_millis(200));
+                                "done"
+                            }
+                            Err(e) => {
+                                log::error!("Failed to start user sysd for uid {}: {}", uid, e);
+                                "failed"
+                            }
+                        }
+                    }
+                } else {
+                    log::error!("Invalid uid in user@.service: {}", uid_str);
+                    "failed"
+                }
             } else {
                 // Regular unit start
                 let mut mgr = manager.write().await;

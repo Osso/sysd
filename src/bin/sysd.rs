@@ -184,6 +184,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Take the socket activation receiver before wrapping manager in Arc
     let socket_activation_rx = manager.take_socket_activation_rx();
 
+    // Take the timer fired receiver before wrapping manager in Arc
+    let timer_rx = manager.take_timer_rx();
+
+    // Take the path triggered receiver before wrapping manager in Arc
+    let path_rx = manager.take_path_rx();
+
+    // Take the oneshot completion receiver before wrapping manager in Arc
+    let oneshot_completion_rx = manager.take_oneshot_completion_rx();
+
     let manager: SharedManager = Arc::new(RwLock::new(manager));
 
     // Shutdown flag to stop background tasks during shutdown
@@ -203,6 +212,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Err(e) = mgr.handle_socket_activation(activation).await {
                     log::error!("Socket activation failed: {}", e);
                 }
+            }
+        });
+    }
+
+    // Spawn timer fired handler task
+    if let Some(mut rx) = timer_rx {
+        let manager_timer = Arc::clone(&manager);
+        let shutdown_timer = Arc::clone(&shutdown_flag);
+        tokio::spawn(async move {
+            while let Some(fired) = rx.recv().await {
+                if shutdown_timer.load(Ordering::Relaxed) {
+                    log::debug!("Timer handler stopping due to shutdown");
+                    break;
+                }
+                let mut mgr = manager_timer.write().await;
+                if let Err(e) = mgr.handle_timer_fired(fired).await {
+                    log::error!("Timer activation failed: {}", e);
+                }
+            }
+        });
+    }
+
+    // Spawn path triggered handler task
+    if let Some(mut rx) = path_rx {
+        let manager_path = Arc::clone(&manager);
+        let shutdown_path = Arc::clone(&shutdown_flag);
+        tokio::spawn(async move {
+            while let Some(triggered) = rx.recv().await {
+                if shutdown_path.load(Ordering::Relaxed) {
+                    log::debug!("Path handler stopping due to shutdown");
+                    break;
+                }
+                let mut mgr = manager_path.write().await;
+                if let Err(e) = mgr.handle_path_triggered(triggered).await {
+                    log::error!("Path activation failed: {}", e);
+                }
+            }
+        });
+    }
+
+    // Spawn oneshot completion handler task
+    if let Some(mut rx) = oneshot_completion_rx {
+        let manager_oneshot = Arc::clone(&manager);
+        let shutdown_oneshot = Arc::clone(&shutdown_flag);
+        tokio::spawn(async move {
+            while let Some(completion) = rx.recv().await {
+                if shutdown_oneshot.load(Ordering::Relaxed) {
+                    log::debug!("Oneshot completion handler stopping due to shutdown");
+                    break;
+                }
+                let mut mgr = manager_oneshot.write().await;
+                mgr.handle_oneshot_completion(completion).await;
             }
         });
     }
@@ -255,8 +316,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     } else {
-        // TODO: User mode D-Bus on session bus
-        log::debug!("D-Bus not enabled in user mode (not yet implemented)");
+        // User mode: connect to session bus
+        let manager_dbus = Arc::clone(&manager);
+        let shutdown_dbus = Arc::clone(&shutdown_flag);
+        tokio::spawn(async move {
+            // In user mode, session bus should already be available
+            // Retry with backoff in case dbus-daemon is still starting
+            let mut attempts = 0;
+            let max_attempts = 20; // Try for ~30 seconds
+            let mut delay = std::time::Duration::from_millis(200);
+
+            loop {
+                if shutdown_dbus.load(Ordering::Relaxed) {
+                    log::debug!("D-Bus retry loop stopping due to shutdown");
+                    break;
+                }
+                match DbusServer::new_session(Arc::clone(&manager_dbus)).await {
+                    Ok(_server) => {
+                        info!("D-Bus interface available on session bus at org.freedesktop.systemd1");
+                        // Keep server alive
+                        std::future::pending::<()>().await;
+                    }
+                    Err(e) => {
+                        attempts += 1;
+                        if attempts >= max_attempts {
+                            log::warn!(
+                                "Failed to start D-Bus server on session bus after {} attempts: {}",
+                                attempts, e
+                            );
+                            log::info!("User mode will continue without D-Bus interface");
+                            break;
+                        }
+                        log::debug!(
+                            "Session D-Bus not ready yet (attempt {}): {}, retrying in {:?}",
+                            attempts, e, delay
+                        );
+                        tokio::time::sleep(delay).await;
+                        delay = std::cmp::min(delay * 2, std::time::Duration::from_secs(3));
+                    }
+                }
+            }
+        });
     }
 
     // PID 1: Set up signal handler for shutdown/reboot
@@ -344,40 +444,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if should_boot {
         let manager_boot = Arc::clone(&manager);
         tokio::spawn(async move {
-            let mut mgr = manager_boot.write().await;
-            match mgr.get_default_target() {
-                Ok(target) => {
-                    info!("Booting to target: {}", target);
-                    match mgr.get_boot_plan(&target).await {
-                        Ok(plan) => {
-                            eprintln!("sysd: Boot plan: {} units", plan.len());
-                            info!("Boot plan: {} units", plan.len());
-                            // Show first 10 units on console for debugging
-                            let preview: Vec<_> = plan.iter().take(10).collect();
-                            eprintln!("sysd: First units: {:?}", preview);
-                            log::debug!("Boot plan order: {:?}", plan);
-                            for unit_name in &plan {
-                                eprintln!("sysd: Starting {}", unit_name);
-                                log::info!("Starting {}", unit_name);
-                                match mgr.start(unit_name).await {
-                                    Ok(()) => log::info!("Started {}", unit_name),
-                                    Err(e) => {
-                                        eprintln!("sysd: FAILED to start {}: {}", unit_name, e);
-                                        log::warn!("Failed to start {}: {}", unit_name, e);
-                                    }
-                                }
-                            }
-                            eprintln!("sysd: Boot complete");
-                            info!("Boot complete");
-                        }
-                        Err(e) => {
-                            eprintln!("sysd: ERROR: Failed to get boot plan: {}", e);
-                            log::error!("Failed to get boot plan: {}", e);
-                        }
+            // Get default target and boot plan while holding lock briefly
+            let (target, plan) = {
+                let mgr = manager_boot.read().await;
+                let target = match mgr.get_default_target() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        log::error!("No default target found: {}", e);
+                        return;
+                    }
+                };
+                // Release read lock, reacquire as write to get boot plan
+                drop(mgr);
+                let mut mgr = manager_boot.write().await;
+                match mgr.get_boot_plan(&target).await {
+                    Ok(p) => (target, p),
+                    Err(e) => {
+                        eprintln!("sysd: ERROR: Failed to get boot plan: {}", e);
+                        log::error!("Failed to get boot plan: {}", e);
+                        return;
                     }
                 }
-                Err(e) => log::error!("No default target found: {}", e),
+            };
+
+            info!("Booting to target: {}", target);
+            eprintln!("sysd: Boot plan: {} units", plan.len());
+            info!("Boot plan: {} units", plan.len());
+            let preview: Vec<_> = plan.iter().take(10).collect();
+            eprintln!("sysd: First units: {:?}", preview);
+            log::debug!("Boot plan order: {:?}", plan);
+
+            // Start each unit, releasing the lock between starts to allow
+            // socket activation and other background tasks to run
+            for unit_name in &plan {
+                eprintln!("sysd: Starting {}", unit_name);
+                log::info!("Starting {}", unit_name);
+                let mut mgr = manager_boot.write().await;
+                match mgr.start(unit_name).await {
+                    Ok(()) => log::info!("Started {}", unit_name),
+                    Err(e) => {
+                        eprintln!("sysd: FAILED to start {}: {}", unit_name, e);
+                        log::warn!("Failed to start {}: {}", unit_name, e);
+                    }
+                }
+                // Lock is released here when mgr goes out of scope
             }
+            eprintln!("sysd: Boot complete");
+            info!("Boot complete");
         });
     }
 
@@ -465,6 +578,40 @@ async fn handle_request(request: Request, manager: &SharedManager) -> Response {
             match mgr.start(&name).await {
                 Ok(_) => Response::Ok,
                 Err(e) => Response::Error(e.to_string()),
+            }
+        }
+
+        Request::StartAndWait { name } => {
+            // Start the unit
+            {
+                let mut mgr = manager.write().await;
+                if let Err(e) = mgr.start(&name).await {
+                    return Response::Error(e.to_string());
+                }
+            }
+
+            // Poll until unit becomes inactive or failed
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                let mgr = manager.read().await;
+                if let Some(state) = mgr.status(&name) {
+                    use sysd::manager::ActiveState;
+                    match state.active {
+                        ActiveState::Inactive | ActiveState::Failed => {
+                            let exit_code = state.exit_code.unwrap_or(0);
+                            return if state.active == ActiveState::Failed {
+                                Response::Error(format!("Unit failed with exit code {}", exit_code))
+                            } else {
+                                Response::Ok
+                            };
+                        }
+                        _ => continue,
+                    }
+                } else {
+                    // Unit not found (maybe it was never started or removed)
+                    return Response::Error(format!("Unit {} not found", name));
+                }
             }
         }
 
@@ -608,6 +755,24 @@ async fn handle_request(request: Request, manager: &SharedManager) -> Response {
                 }
                 Err(e) => Response::Error(e.to_string()),
             }
+        }
+
+        Request::ImportEnvironment { vars } => {
+            let mut mgr = manager.write().await;
+            mgr.import_environment(vars);
+            Response::Ok
+        }
+
+        Request::UnsetEnvironment { names } => {
+            let mut mgr = manager.write().await;
+            mgr.unset_environment(&names);
+            Response::Ok
+        }
+
+        Request::ResetFailed => {
+            let mut mgr = manager.write().await;
+            mgr.reset_failed();
+            Response::Ok
         }
     }
 }

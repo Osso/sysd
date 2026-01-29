@@ -19,6 +19,8 @@ mod socket_watcher;
 mod state;
 mod timer_ops;
 mod timer_scheduler;
+mod path_ops;
+mod path_watcher;
 mod virtualization;
 
 pub use deps::{CycleError, DepGraph};
@@ -40,6 +42,23 @@ use tokio::sync::mpsc;
 
 use crate::cgroups::{CgroupLimits, CgroupManager};
 use crate::units::{self, KillMode, Service, ServiceType, Unit};
+
+/// Message sent when a oneshot command completes
+#[derive(Debug)]
+pub struct OneshotCompletion {
+    /// Service name
+    pub service_name: String,
+    /// Command index (0-based)
+    pub cmd_idx: usize,
+    /// Total number of commands
+    pub total_cmds: usize,
+    /// Exit code (None if killed by signal)
+    pub exit_code: Option<i32>,
+    /// Error message if failed
+    pub error: Option<String>,
+    /// Whether this service has RemainAfterExit set
+    pub remain_after_exit: bool,
+}
 
 /// Service manager that tracks and controls units (services and targets)
 pub struct Manager {
@@ -79,6 +98,10 @@ pub struct Manager {
     timer_tx: mpsc::Sender<timer_scheduler::TimerFired>,
     /// Receiver for timer fired messages
     timer_rx: Option<mpsc::Receiver<timer_scheduler::TimerFired>>,
+    /// Channel for path triggered messages
+    path_tx: mpsc::Sender<path_watcher::PathTriggered>,
+    /// Receiver for path triggered messages
+    path_rx: Option<mpsc::Receiver<path_watcher::PathTriggered>>,
     /// Boot time for monotonic timer calculations
     boot_time: std::time::Instant,
     /// Scope manager for transient scopes (logind sessions)
@@ -94,6 +117,17 @@ pub struct Manager {
     executor_path: String,
     /// Map of PID -> service name for tracking which process belongs to which service
     pid_to_service: HashMap<u32, String>,
+    /// Channel for oneshot completion messages
+    oneshot_completion_tx: mpsc::Sender<OneshotCompletion>,
+    /// Receiver for oneshot completion messages
+    oneshot_completion_rx: Option<mpsc::Receiver<OneshotCompletion>>,
+    /// Pending oneshot services (services waiting for next command to start)
+    /// Map of service_name -> (next_cmd_idx, total_cmds, remain_after_exit)
+    pending_oneshot_cmds: HashMap<String, (usize, usize, bool)>,
+    /// Imported environment variables (for user session management)
+    user_environment: HashMap<String, String>,
+    /// Whether running in user mode (vs system mode)
+    user_mode: bool,
 }
 
 impl Manager {
@@ -135,6 +169,12 @@ impl Manager {
         // Create timer fired channel
         let (timer_tx, timer_rx) = mpsc::channel(32);
 
+        // Create path triggered channel
+        let (path_tx, path_rx) = mpsc::channel(32);
+
+        // Create oneshot completion channel
+        let (oneshot_completion_tx, oneshot_completion_rx) = mpsc::channel(32);
+
         // Set unit paths based on mode
         let unit_paths = if user_mode {
             Self::user_unit_paths()
@@ -175,6 +215,8 @@ impl Manager {
             socket_activation_rx: Some(socket_activation_rx),
             timer_tx,
             timer_rx: Some(timer_rx),
+            path_tx,
+            path_rx: Some(path_rx),
             boot_time: std::time::Instant::now(),
             scope_manager,
             dynamic_user_manager: dynamic_user::DynamicUserManager::new(),
@@ -182,6 +224,11 @@ impl Manager {
             fd_store: HashMap::new(),
             executor_path,
             pid_to_service: HashMap::new(),
+            oneshot_completion_tx,
+            oneshot_completion_rx: Some(oneshot_completion_rx),
+            pending_oneshot_cmds: HashMap::new(),
+            user_environment: HashMap::new(),
+            user_mode,
         }
     }
 
@@ -258,13 +305,47 @@ impl Manager {
         self.cgroup_manager.is_some()
     }
 
+    /// Check if running in user mode
+    pub fn is_user_mode(&self) -> bool {
+        self.user_mode
+    }
+
+    /// Get the directory for enable/disable symlinks
+    ///
+    /// In system mode: /etc/systemd/system
+    /// In user mode: ~/.config/systemd/user (first user path)
+    pub fn enable_dir(&self) -> PathBuf {
+        if self.user_mode {
+            // Use first user path (highest priority, typically ~/.config/systemd/user)
+            self.unit_paths
+                .first()
+                .cloned()
+                .unwrap_or_else(|| PathBuf::from("/etc/systemd/user"))
+        } else {
+            PathBuf::from("/etc/systemd/system")
+        }
+    }
+
     /// Initialize the notify socket listener
     pub fn init_notify_socket(&mut self) -> std::io::Result<()> {
-        let (listener, rx) = AsyncNotifyListener::new(std::path::Path::new(NOTIFY_SOCKET_PATH))?;
+        let socket_path = self.notify_socket_path_for_mode();
+        let (listener, rx) = AsyncNotifyListener::new(std::path::Path::new(&socket_path))?;
         self.notify_listener = Some(listener);
         self.notify_rx = Some(rx);
-        log::info!("Notify socket listening at {}", NOTIFY_SOCKET_PATH);
+        log::info!("Notify socket listening at {}", socket_path);
         Ok(())
+    }
+
+    /// Get the notify socket path based on mode (system vs user)
+    fn notify_socket_path_for_mode(&self) -> String {
+        if self.user_mode {
+            // User mode: /run/user/<uid>/sysd/notify
+            let uid = nix::unistd::getuid().as_raw();
+            format!("/run/user/{}/sysd/notify", uid)
+        } else {
+            // System mode: /run/sysd/notify
+            NOTIFY_SOCKET_PATH.to_string()
+        }
     }
 
     /// Get the notify socket path (if initialized)
@@ -334,11 +415,25 @@ impl Manager {
                     return Err(ManagerError::Masked(name));
                 }
                 // Get just the filename from the symlink target
-                target
+                let target_name = target
                     .file_name()
                     .and_then(|f| f.to_str())
                     .map(|s| s.to_string())
-                    .unwrap_or(name.clone())
+                    .unwrap_or(name.clone());
+
+                // If the original name has an instance and the target is a template,
+                // substitute the instance into the target.
+                // e.g., autovt@tty2.service -> getty@.service becomes getty@tty2.service
+                if let Some(instance) = units::extract_instance(&name) {
+                    if units::is_bare_template(&target_name) {
+                        units::instantiate_template(&target_name, &instance)
+                            .unwrap_or(target_name)
+                    } else {
+                        target_name
+                    }
+                } else {
+                    target_name
+                }
             } else {
                 name.clone()
             }
@@ -539,6 +634,13 @@ impl Manager {
             // After= is ONLY an ordering constraint, not a dependency
             if let Some(unit) = self.units.get(&actual_name) {
                 let section = unit.unit_section();
+                // Debug: log dependencies being found
+                if !section.requires.is_empty() || !section.wants.is_empty() || !unit.wants_dir().is_empty() {
+                    log::debug!(
+                        "{}: Requires={:?}, Wants={:?}, wants_dir={:?}",
+                        actual_name, section.requires, section.wants, unit.wants_dir()
+                    );
+                }
                 // Requires= pulls units (hard dependency - fail if missing)
                 for dep in &section.requires {
                     if !loaded.contains(dep) {
@@ -593,6 +695,11 @@ impl Manager {
     /// Start a single unit (internal, assumes already loaded)
     async fn start_single(&mut self, name: &str) -> Result<(), ManagerError> {
         log::debug!("start_single({})", name);
+        // Debug: log when dbus-related units start
+        if name.contains("dbus") {
+            log::info!(">>> start_single({}) - socket_fds keys: {:?}", name,
+                self.socket_fds.keys().collect::<Vec<_>>());
+        }
 
         // Load if not already loaded (may resolve symlink to different name)
         let actual_name = if self.units.contains_key(name) {
@@ -624,6 +731,11 @@ impl Manager {
         // Handle timer units (schedule service activation)
         if let Some(timer) = unit.as_timer().cloned() {
             return self.start_timer(&actual_name, &timer).await;
+        }
+
+        // Handle path units (set up filesystem watches)
+        if let Some(path_unit) = unit.as_path().cloned() {
+            return self.start_path(&actual_name, &path_unit).await;
         }
 
         // Check conditions before starting
@@ -677,6 +789,9 @@ impl Manager {
         // DEBUG: Log socket FDs being passed
         if !socket_fds.is_empty() {
             log::info!("{}: passing socket FDs {:?} names {:?}", actual_name, socket_fds, socket_fd_names);
+        } else if !service.service.sockets.is_empty() {
+            log::warn!("{}: has Sockets={:?} but got NO socket FDs! socket_fds keys: {:?}",
+                actual_name, service.service.sockets, self.socket_fds.keys().collect::<Vec<_>>());
         }
 
         // M19: DynamicUser= - allocate ephemeral UID/GID
@@ -716,15 +831,32 @@ impl Manager {
             dynamic_uid,
             dynamic_gid,
             stored_fds,
+            user_environment: self.user_environment.clone(),
         };
 
+        // Debug: log NOTIFY_SOCKET for Type=notify services
+        if is_notify {
+            log::debug!(
+                "{}: Type=notify, NOTIFY_SOCKET={:?}",
+                actual_name,
+                options.notify_socket
+            );
+        }
+
         // Type=oneshot services run all ExecStart commands in sequence
+        // Commands are run asynchronously to avoid blocking socket activation
         if service.service.service_type == ServiceType::Oneshot {
             let num_commands = service.service.exec_start.len();
             log::info!("Starting oneshot {} ({} command{})", actual_name, num_commands,
                        if num_commands == 1 { "" } else { "s" });
 
-            // Set up cgroup once for all commands
+            // Spawn first command
+            let child = process::spawn_service_via_executor(service, &options, &self.executor_path, 0)?;
+            log::debug!("{}: spawn returned, getting PID", actual_name);
+            let pid = child.id().unwrap_or(0);
+            log::debug!("{}: PID is {}", actual_name, pid);
+
+            // Set up cgroup for the process
             let limits = CgroupLimits {
                 memory_max: service.service.memory_max,
                 cpu_quota: service.service.cpu_quota,
@@ -732,106 +864,61 @@ impl Manager {
             };
             let slice = service.service.slice.as_deref();
             let delegate = service.service.delegate;
-            let mut cgroup_path_for_cleanup: Option<std::path::PathBuf> = None;
 
-            // Run each ExecStart command in sequence
-            for (cmd_idx, _) in service.service.exec_start.iter().enumerate() {
-                let child = process::spawn_service_via_executor(service, &options, &self.executor_path, cmd_idx)?;
-                log::debug!("{}: spawn returned, getting PID", actual_name);
-                let pid = child.id().unwrap_or(0);
-                log::debug!("{}: PID is {}", actual_name, pid);
-
-                // Set up cgroup for the first command only, then reuse for subsequent
-                if cmd_idx == 0 {
-                    if let Some(ref cgroup_mgr) = self.cgroup_manager {
-                        match cgroup_mgr.setup_service_cgroup(&actual_name, pid, &limits, slice) {
-                            Ok(cgroup_path) => {
-                                log::debug!("Created cgroup {} for {}", cgroup_path.display(), actual_name);
-                                if delegate {
-                                    if let Err(e) = cgroup_mgr.enable_delegation(&cgroup_path) {
-                                        log::warn!("Failed to enable cgroup delegation for {}: {}", actual_name, e);
-                                    }
-                                }
-                                cgroup_path_for_cleanup = Some(cgroup_path.clone());
-                                self.cgroup_paths.insert(actual_name.to_string(), cgroup_path);
-                            }
-                            Err(e) => {
-                                log::warn!("Failed to set up cgroup for {}: {}", actual_name, e);
+            if let Some(ref cgroup_mgr) = self.cgroup_manager {
+                match cgroup_mgr.setup_service_cgroup(&actual_name, pid, &limits, slice) {
+                    Ok(cgroup_path) => {
+                        log::debug!("Created cgroup {} for {}", cgroup_path.display(), actual_name);
+                        log::info!("Created cgroup: {}", cgroup_path.display());
+                        if delegate {
+                            if let Err(e) = cgroup_mgr.enable_delegation(&cgroup_path) {
+                                log::warn!("Failed to enable cgroup delegation for {}: {}", actual_name, e);
                             }
                         }
-                    }
-                } else if let Some(ref cgroup_path) = cgroup_path_for_cleanup {
-                    // Move subsequent processes into the same cgroup
-                    if let Some(ref cgroup_mgr) = self.cgroup_manager {
-                        if let Err(e) = cgroup_mgr.add_pid(cgroup_path, pid) {
-                            log::warn!("Failed to add PID {} to cgroup for {}: {}", pid, actual_name, e);
-                        }
-                    }
-                }
-
-                log::info!("Started {} (PID {}), waiting for oneshot to complete", actual_name, pid);
-
-                // Wait for the command to complete
-                match child.wait_with_output().await {
-                    Ok(output) => {
-                        let exit_code = output.status.code().unwrap_or(-1);
-                        if exit_code != 0 {
-                            // Command failed - clean up and return error
-                            if let Some(cgroup_path) = cgroup_path_for_cleanup.take() {
-                                if let Some(ref cgroup_mgr) = self.cgroup_manager {
-                                    if let Err(e) = cgroup_mgr.remove_cgroup(&cgroup_path) {
-                                        log::warn!("Failed to remove cgroup for {}: {}", actual_name, e);
-                                    }
-                                }
-                                self.cgroup_paths.remove(&actual_name);
-                            }
-                            self.active_jobs = self.active_jobs.saturating_sub(1);
-                            if let Some(state) = self.states.get_mut(&actual_name) {
-                                state.set_failed(format!("exit code {}", exit_code));
-                            }
-                            log::warn!("Oneshot {} command {} failed with exit code {}", actual_name, cmd_idx, exit_code);
-                            return Err(ManagerError::StartFailed(format!(
-                                "{} command {} exited with code {}",
-                                actual_name, cmd_idx, exit_code
-                            )));
-                        }
-                        log::debug!("Oneshot {} command {} completed successfully", actual_name, cmd_idx);
+                        self.cgroup_paths.insert(actual_name.to_string(), cgroup_path);
                     }
                     Err(e) => {
-                        if let Some(cgroup_path) = cgroup_path_for_cleanup.take() {
-                            if let Some(ref cgroup_mgr) = self.cgroup_manager {
-                                let _ = cgroup_mgr.remove_cgroup(&cgroup_path);
-                            }
-                            self.cgroup_paths.remove(&actual_name);
-                        }
-                        self.active_jobs = self.active_jobs.saturating_sub(1);
-                        if let Some(state) = self.states.get_mut(&actual_name) {
-                            state.set_failed(e.to_string());
-                        }
-                        log::error!("Failed to wait for oneshot {} command {}: {}", actual_name, cmd_idx, e);
-                        return Err(ManagerError::StartFailed(e.to_string()));
+                        log::warn!("Failed to set up cgroup for {}: {}", actual_name, e);
                     }
                 }
             }
 
-            // All commands completed successfully
-            if let Some(cgroup_path) = cgroup_path_for_cleanup {
-                if let Some(ref cgroup_mgr) = self.cgroup_manager {
-                    if let Err(e) = cgroup_mgr.remove_cgroup(&cgroup_path) {
-                        log::warn!("Failed to remove cgroup for {}: {}", actual_name, e);
+            log::info!("Started {} (PID {})", actual_name, pid);
+
+            // Spawn async task to wait for command completion
+            // This allows the manager lock to be released so socket activation can proceed
+            let service_name_clone = actual_name.clone();
+            let total_cmds = num_commands;
+            let remain_after_exit = service.service.remain_after_exit;
+            let tx = self.oneshot_completion_tx.clone();
+
+            tokio::spawn(async move {
+                let result = child.wait_with_output().await;
+                let (exit_code, error) = match result {
+                    Ok(output) => {
+                        let code = output.status.code().unwrap_or(-1);
+                        if code == 0 {
+                            (Some(0), None)
+                        } else {
+                            (Some(code), Some(format!("exit code {}", code)))
+                        }
                     }
-                }
-                self.cgroup_paths.remove(&actual_name);
-            }
-            self.active_jobs = self.active_jobs.saturating_sub(1);
-            if let Some(state) = self.states.get_mut(&actual_name) {
-                if service.service.remain_after_exit {
-                    state.set_exited();
-                } else {
-                    state.set_inactive();
-                }
-            }
-            log::info!("Oneshot {} completed successfully (exit 0)", actual_name);
+                    Err(e) => (None, Some(e.to_string())),
+                };
+
+                let _ = tx
+                    .send(OneshotCompletion {
+                        service_name: service_name_clone,
+                        cmd_idx: 0,
+                        total_cmds,
+                        exit_code,
+                        error,
+                        remain_after_exit,
+                    })
+                    .await;
+            });
+
+            // Service is now activating - completion will be handled by background task
             return Ok(());
         }
 
@@ -1394,6 +1481,39 @@ impl Manager {
             }
         }
         Err(ManagerError::NotFound("default.target".to_string()))
+    }
+
+    /// Import environment variables (for user session management)
+    pub fn import_environment(&mut self, vars: Vec<(String, String)>) {
+        for (key, value) in vars {
+            self.user_environment.insert(key, value);
+        }
+        log::info!("Imported {} environment variables", self.user_environment.len());
+    }
+
+    /// Unset environment variables
+    pub fn unset_environment(&mut self, names: &[String]) {
+        for name in names {
+            self.user_environment.remove(name);
+        }
+        log::info!("Unset {} environment variables", names.len());
+    }
+
+    /// Get imported environment variables (to be passed to spawned services)
+    pub fn get_user_environment(&self) -> &HashMap<String, String> {
+        &self.user_environment
+    }
+
+    /// Reset failed state of all units
+    pub fn reset_failed(&mut self) {
+        for (name, state) in self.states.iter_mut() {
+            if state.active == ActiveState::Failed {
+                log::info!("Resetting failed state of {}", name);
+                state.active = ActiveState::Inactive;
+                state.sub = SubState::Dead;
+                state.error = None;
+            }
+        }
     }
 }
 

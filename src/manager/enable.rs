@@ -176,7 +176,7 @@ impl Manager {
         target: &str,
         unit_path: &PathBuf,
     ) -> Result<PathBuf, ManagerError> {
-        let wants_dir = PathBuf::from("/etc/systemd/system").join(format!("{}.wants", target));
+        let wants_dir = self.enable_dir().join(format!("{}.wants", target));
         std::fs::create_dir_all(&wants_dir).map_err(|e| ManagerError::Io(e.to_string()))?;
 
         let link_path = wants_dir.join(unit_name);
@@ -197,8 +197,7 @@ impl Manager {
         target: &str,
         unit_path: &PathBuf,
     ) -> Result<PathBuf, ManagerError> {
-        let requires_dir =
-            PathBuf::from("/etc/systemd/system").join(format!("{}.requires", target));
+        let requires_dir = self.enable_dir().join(format!("{}.requires", target));
         std::fs::create_dir_all(&requires_dir).map_err(|e| ManagerError::Io(e.to_string()))?;
 
         let link_path = requires_dir.join(unit_name);
@@ -218,7 +217,8 @@ impl Manager {
         unit_name: &str,
         target: &str,
     ) -> Result<Option<PathBuf>, ManagerError> {
-        let link_path = PathBuf::from("/etc/systemd/system")
+        let link_path = self
+            .enable_dir()
             .join(format!("{}.wants", target))
             .join(unit_name);
 
@@ -236,7 +236,8 @@ impl Manager {
         unit_name: &str,
         target: &str,
     ) -> Result<Option<PathBuf>, ManagerError> {
-        let link_path = PathBuf::from("/etc/systemd/system")
+        let link_path = self
+            .enable_dir()
             .join(format!("{}.requires", target))
             .join(unit_name);
 
@@ -254,7 +255,7 @@ impl Manager {
         alias: &str,
         unit_path: &PathBuf,
     ) -> Result<PathBuf, ManagerError> {
-        let link_path = PathBuf::from("/etc/systemd/system").join(alias);
+        let link_path = self.enable_dir().join(alias);
 
         // Remove existing if present
         if link_path.exists() || link_path.is_symlink() {
@@ -269,7 +270,7 @@ impl Manager {
 
     /// Remove an alias symlink
     pub(super) fn remove_alias_link(&self, alias: &str) -> Result<Option<PathBuf>, ManagerError> {
-        let link_path = PathBuf::from("/etc/systemd/system").join(alias);
+        let link_path = self.enable_dir().join(alias);
 
         if link_path.exists() || link_path.is_symlink() {
             std::fs::remove_file(&link_path).map_err(|e| ManagerError::Io(e.to_string()))?;
