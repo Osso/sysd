@@ -108,6 +108,9 @@ fn setup_socket_fds(count: usize, names: &[String]) -> Result<(), String> {
     // Set LISTEN_FDS, LISTEN_PID, and LISTEN_FDNAMES environment variables
     let pid = std::process::id();
 
+    // Debug: log socket activation setup
+    eprintln!("sysd-executor: socket activation: count={}, names={:?}", count, names);
+
     unsafe {
         let listen_fds_key = CString::new("LISTEN_FDS").unwrap();
         let listen_fds_val = CString::new(count.to_string()).unwrap();
@@ -134,6 +137,9 @@ fn setup_socket_fds(count: usize, names: &[String]) -> Result<(), String> {
             let flags = libc::fcntl(fd, libc::F_GETFD);
             if flags >= 0 {
                 libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                eprintln!("sysd-executor: socket fd {} is valid (flags={})", fd, flags);
+            } else {
+                eprintln!("sysd-executor: socket fd {} is INVALID: {}", fd, std::io::Error::last_os_error());
             }
         }
     }
@@ -145,6 +151,18 @@ fn setup_environment(
     env: &HashMap<String, String>,
     unset: &[String],
 ) -> Result<(), String> {
+    // Debug: log NOTIFY_SOCKET if present
+    if let Some(notify_socket) = env.get("NOTIFY_SOCKET") {
+        eprintln!("sysd-executor: NOTIFY_SOCKET={}", notify_socket);
+        // Check if socket exists
+        let path = std::path::Path::new(notify_socket);
+        if path.exists() {
+            eprintln!("sysd-executor: NOTIFY_SOCKET exists");
+        } else {
+            eprintln!("sysd-executor: NOTIFY_SOCKET does NOT exist");
+        }
+    }
+
     // Set environment variables
     for (key, value) in env {
         std::env::set_var(key, value);

@@ -36,6 +36,9 @@ enum Command {
     Start {
         /// Unit name (e.g., "docker" or "docker.service")
         name: String,
+        /// Wait for the unit to exit (become inactive or failed)
+        #[arg(long)]
+        wait: bool,
     },
 
     /// Stop a unit
@@ -103,6 +106,18 @@ enum Command {
 
     /// Ping the daemon
     Ping,
+
+    /// Import environment variables to the service manager
+    ImportEnvironment,
+
+    /// Unset environment variables in the service manager
+    UnsetEnvironment {
+        /// Variable names to unset
+        names: Vec<String>,
+    },
+
+    /// Reset failed state of all units
+    ResetFailed,
 }
 
 fn main() {
@@ -117,7 +132,13 @@ fn main() {
 
     let request = match args.command {
         Command::List { user: list_user, unit_type } => Request::List { user: list_user || user_mode, unit_type },
-        Command::Start { name } => Request::Start { name },
+        Command::Start { name, wait } => {
+            if wait {
+                Request::StartAndWait { name }
+            } else {
+                Request::Start { name }
+            }
+        }
         Command::Stop { name } => Request::Stop { name },
         Command::Restart { name } => Request::Restart { name },
         Command::Enable { name } => Request::Enable { name },
@@ -130,6 +151,13 @@ fn main() {
         Command::Sync => Request::SyncUnits,
         Command::SwitchTarget { target } => Request::SwitchTarget { target },
         Command::Ping => Request::Ping,
+        Command::ImportEnvironment => {
+            // Collect all environment variables from current process
+            let vars: Vec<(String, String)> = std::env::vars().collect();
+            Request::ImportEnvironment { vars }
+        }
+        Command::UnsetEnvironment { names } => Request::UnsetEnvironment { names },
+        Command::ResetFailed => Request::ResetFailed,
         Command::Parse { .. } => unreachable!(),
     };
 
