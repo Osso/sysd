@@ -71,6 +71,16 @@ create_initramfs() {
     cp "$SYSD_BIN" "$initrd_dir/bin/sysd"
     chmod +x "$initrd_dir/bin/sysd"
 
+    # Copy sysd-executor (required for spawning services)
+    local EXECUTOR_BIN="${PROJECT_DIR}/target/release/sysd-executor"
+    if [[ -f "$EXECUTOR_BIN" ]]; then
+        cp "$EXECUTOR_BIN" "$initrd_dir/bin/sysd-executor"
+        chmod +x "$initrd_dir/bin/sysd-executor"
+    else
+        err "sysd-executor not found at $EXECUTOR_BIN"
+        exit 1
+    fi
+
     # Copy required glibc libraries for dynamically linked binary
     # ld-linux goes in /lib64, other libs in /usr/lib (matching host paths)
     cp /lib64/ld-linux-x86-64.so.2 "$initrd_dir/lib64/"
