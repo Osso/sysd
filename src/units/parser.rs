@@ -161,10 +161,11 @@ fn parse_section(lines: &[&str]) -> ParsedSection {
 
         let vec = entries.entry(name).or_default();
         for v in values {
-            if !v.is_empty() {
-                vec.push((entry_number, v));
-                entry_number += 1;
-            }
+            // Keep ALL values including empty ones.
+            // Empty values (Key=) signal "clear all previous values" in systemd drop-ins.
+            // The merge function will handle the reset logic.
+            vec.push((entry_number, v));
+            entry_number += 1;
         }
     }
 
@@ -330,8 +331,11 @@ ExecStart=
 "#;
         let parsed = parse_file(content).unwrap();
         let service = &parsed["[Service]"];
-        // Empty value should result in empty vec
-        assert!(service.get("EXECSTART").map_or(true, |v| v.is_empty()));
+        // Empty values are now preserved (for drop-in reset convention)
+        // Key= is used in drop-ins to clear all previous values
+        let values = service.get("EXECSTART").unwrap();
+        assert_eq!(values.len(), 1);
+        assert!(values[0].1.is_empty());
     }
 
     #[test]

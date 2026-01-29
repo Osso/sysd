@@ -26,6 +26,9 @@ pub struct SpawnOptions {
     /// M19: Stored FDs from previous run (FileDescriptorStoreMax=)
     /// These are passed via LISTEN_FDS along with socket_fds
     pub stored_fds: Vec<RawFd>,
+    /// Imported user environment (for user session management)
+    /// If provided, these are merged with inherited environment
+    pub user_environment: HashMap<String, String>,
 }
 
 /// Spawn a process for a service (convenience wrapper)
@@ -126,6 +129,7 @@ pub fn spawn_service_with_options(
         // No socket activation - use cmd.env() normally
         cmd.env_clear();
         cmd.envs(std::env::vars()); // Inherit current env
+        cmd.envs(&options.user_environment); // Add imported user environment
         cmd.envs(&extra_env);
         for var in &unset_vars {
             cmd.env_remove(var);
@@ -592,6 +596,11 @@ pub fn build_exec_config(
     // Build environment
     let mut environment: HashMap<String, String> = std::env::vars().collect();
 
+    // Add imported user environment
+    for (key, value) in &options.user_environment {
+        environment.insert(key.clone(), value.clone());
+    }
+
     // Service-defined environment
     for (key, value) in &service.service.environment {
         environment.insert(key.clone(), value.clone());
@@ -634,6 +643,15 @@ pub fn build_exec_config(
     for _ in 0..options.stored_fds.len() {
         socket_fd_names.push("stored".to_string());
     }
+
+    // Debug: log sandbox settings for services
+    log::debug!(
+        "{}: sandbox: protect_system={:?}, private_tmp={}, private_devices={}",
+        service.name,
+        service.service.protect_system,
+        service.service.private_tmp,
+        service.service.private_devices
+    );
 
     // Build sandbox config
     let sandbox = SandboxConfig {
@@ -741,6 +759,7 @@ pub fn spawn_service_via_executor(
     // Serialize to memfd
     let memfd = crate::executor::serialize_to_memfd(&config)
         .map_err(|e| SpawnError::Spawn(format!("Failed to serialize config: {}", e)))?;
+    log::debug!("{}: memfd created at fd {}", service.name, memfd);
 
     // Combine socket FDs
     let mut all_fds = options.socket_fds.clone();
@@ -812,9 +831,10 @@ pub fn spawn_service_via_executor(
     }
 
     log::debug!(
-        "Spawning via executor: {} -> {}",
+        "Spawning via executor: {} -> {} {}",
         executor_path,
-        config.program
+        config.program,
+        config.args.join(" ")
     );
 
     let result = cmd.spawn().map_err(|e| {

@@ -95,32 +95,61 @@ impl Manager {
 
         // Process collected messages
         for msg in messages {
+            // Log all incoming notify messages for debugging
+            log::debug!(
+                "Notify message from PID {}: {:?}",
+                msg.pid,
+                msg.fields
+            );
+
             // Validate NotifyAccess policy before processing
             if !self.validate_notify_access(&msg) {
                 continue;
             }
 
             if msg.is_ready() {
+                log::debug!(
+                    "READY received: sender_pid={}, main_pid={:?}, waiting_ready={:?}",
+                    msg.pid,
+                    msg.main_pid(),
+                    self.waiting_ready
+                );
+
                 // Find which service this PID belongs to
-                // First check waiting_ready map, then fall back to process map
-                let service_name = if let Some(pid) = msg.main_pid() {
-                    self.waiting_ready.remove(&pid)
-                } else {
-                    // Try to find by iterating processes
-                    let mut found = None;
-                    for (name, child) in &self.processes {
-                        if let Some(pid) = child.id() {
-                            if self.waiting_ready.contains_key(&pid) {
-                                found = Some((pid, name.clone()));
-                                break;
-                            }
-                        }
-                    }
-                    if let Some((pid, name)) = found {
-                        self.waiting_ready.remove(&pid);
+                // Strategy:
+                // 1. If MAINPID is provided, try to find service by MAINPID first
+                // 2. Then try sender PID (msg.pid) - handles forking launchers
+                // 3. Fall back to matching any process in waiting_ready
+                let service_name = if let Some(main_pid) = msg.main_pid() {
+                    // Try MAINPID first
+                    if let Some(name) = self.waiting_ready.remove(&main_pid) {
                         Some(name)
                     } else {
-                        None
+                        // MAINPID not in waiting_ready, try sender PID
+                        // This handles the case where launcher sends READY with MAINPID=child
+                        self.waiting_ready.remove(&msg.pid)
+                    }
+                } else {
+                    // No MAINPID, try sender PID first
+                    if let Some(name) = self.waiting_ready.remove(&msg.pid) {
+                        Some(name)
+                    } else {
+                        // Try to find by iterating processes
+                        let mut found = None;
+                        for (name, child) in &self.processes {
+                            if let Some(pid) = child.id() {
+                                if self.waiting_ready.contains_key(&pid) {
+                                    found = Some((pid, name.clone()));
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some((pid, name)) = found {
+                            self.waiting_ready.remove(&pid);
+                            Some(name)
+                        } else {
+                            None
+                        }
                     }
                 };
 
@@ -142,6 +171,12 @@ impl Manager {
                                 .insert(name.clone(), std::time::Instant::now() + wd);
                         }
                     }
+                } else {
+                    log::warn!(
+                        "READY message from PID {} (main_pid={:?}) could not be matched to any service",
+                        msg.pid,
+                        msg.main_pid()
+                    );
                 }
             }
 
@@ -597,6 +632,172 @@ impl Manager {
                 }
             }
         }
+    }
+
+    /// Take the oneshot completion receiver (for use in background task)
+    pub fn take_oneshot_completion_rx(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::Receiver<super::OneshotCompletion>> {
+        self.oneshot_completion_rx.take()
+    }
+
+    /// Process oneshot completion messages
+    pub async fn handle_oneshot_completion(&mut self, completion: super::OneshotCompletion) {
+        let service_name = &completion.service_name;
+        log::debug!(
+            "Oneshot {} command {} completed (exit={:?}, error={:?})",
+            service_name,
+            completion.cmd_idx,
+            completion.exit_code,
+            completion.error
+        );
+
+        // Check if it failed
+        if let Some(ref error) = completion.error {
+            // Clean up cgroup
+            if let Some(cgroup_path) = self.cgroup_paths.remove(service_name) {
+                if let Some(ref cgroup_mgr) = self.cgroup_manager {
+                    if let Err(e) = cgroup_mgr.remove_cgroup(&cgroup_path) {
+                        log::warn!("Failed to remove cgroup for {}: {}", service_name, e);
+                    }
+                    log::info!("Removed cgroup: {}", cgroup_path.display());
+                }
+            }
+            self.active_jobs = self.active_jobs.saturating_sub(1);
+            if let Some(state) = self.states.get_mut(service_name) {
+                state.set_failed(error.clone());
+            }
+            self.pending_oneshot_cmds.remove(service_name);
+            log::warn!("Oneshot {} failed: {}", service_name, error);
+            return;
+        }
+
+        // Check if there are more commands to run
+        if completion.cmd_idx + 1 < completion.total_cmds {
+            // Start next command
+            let next_idx = completion.cmd_idx + 1;
+            log::debug!(
+                "Oneshot {} starting command {} of {}",
+                service_name,
+                next_idx + 1,
+                completion.total_cmds
+            );
+
+            // Store pending state for next command
+            self.pending_oneshot_cmds.insert(
+                service_name.clone(),
+                (next_idx, completion.total_cmds, completion.remain_after_exit),
+            );
+
+            // Start next command
+            if let Err(e) = self.start_oneshot_command(service_name, next_idx).await {
+                // Clean up cgroup
+                if let Some(cgroup_path) = self.cgroup_paths.remove(service_name) {
+                    if let Some(ref cgroup_mgr) = self.cgroup_manager {
+                        let _ = cgroup_mgr.remove_cgroup(&cgroup_path);
+                        log::info!("Removed cgroup: {}", cgroup_path.display());
+                    }
+                }
+                self.active_jobs = self.active_jobs.saturating_sub(1);
+                if let Some(state) = self.states.get_mut(service_name) {
+                    state.set_failed(format!("Command {} failed: {}", next_idx, e));
+                }
+                self.pending_oneshot_cmds.remove(service_name);
+                log::warn!("Oneshot {} command {} failed to start: {}", service_name, next_idx, e);
+            }
+        } else {
+            // All commands completed successfully
+            if let Some(cgroup_path) = self.cgroup_paths.remove(service_name) {
+                if let Some(ref cgroup_mgr) = self.cgroup_manager {
+                    if let Err(e) = cgroup_mgr.remove_cgroup(&cgroup_path) {
+                        log::warn!("Failed to remove cgroup for {}: {}", service_name, e);
+                    }
+                    log::info!("Removed cgroup: {}", cgroup_path.display());
+                }
+            }
+            self.active_jobs = self.active_jobs.saturating_sub(1);
+            if let Some(state) = self.states.get_mut(service_name) {
+                if completion.remain_after_exit {
+                    state.set_exited();
+                } else {
+                    state.set_inactive();
+                }
+            }
+            self.pending_oneshot_cmds.remove(service_name);
+            log::info!("Oneshot {} completed successfully (exit 0)", service_name);
+        }
+    }
+
+    /// Start a specific command of a oneshot service (used for multi-command oneshots)
+    async fn start_oneshot_command(
+        &mut self,
+        service_name: &str,
+        cmd_idx: usize,
+    ) -> Result<(), super::ManagerError> {
+        let service = self
+            .units
+            .get(service_name)
+            .and_then(|u| u.as_service())
+            .ok_or_else(|| super::ManagerError::NotFound(service_name.to_string()))?
+            .clone();
+
+        let total_cmds = service.service.exec_start.len();
+        let remain_after_exit = service.service.remain_after_exit;
+
+        // Build spawn options
+        let options = super::SpawnOptions::default();
+
+        // Spawn the command
+        let child = super::process::spawn_service_via_executor(
+            &service,
+            &options,
+            &self.executor_path,
+            cmd_idx,
+        )?;
+
+        let pid = child.id().unwrap_or(0);
+        log::info!("Oneshot {} command {} started (PID {})", service_name, cmd_idx, pid);
+
+        // Add to existing cgroup if available
+        if let Some(ref cgroup_path) = self.cgroup_paths.get(service_name) {
+            if let Some(ref cgroup_mgr) = self.cgroup_manager {
+                if let Err(e) = cgroup_mgr.add_pid(cgroup_path, pid) {
+                    log::warn!("Failed to add PID {} to cgroup for {}: {}", pid, service_name, e);
+                }
+            }
+        }
+
+        // Spawn task to wait for completion
+        let service_name_clone = service_name.to_string();
+        let tx = self.oneshot_completion_tx.clone();
+
+        tokio::spawn(async move {
+            let result = child.wait_with_output().await;
+            let (exit_code, error) = match result {
+                Ok(output) => {
+                    let code = output.status.code().unwrap_or(-1);
+                    if code == 0 {
+                        (Some(0), None)
+                    } else {
+                        (Some(code), Some(format!("exit code {}", code)))
+                    }
+                }
+                Err(e) => (None, Some(e.to_string())),
+            };
+
+            let _ = tx
+                .send(super::OneshotCompletion {
+                    service_name: service_name_clone,
+                    cmd_idx,
+                    total_cmds,
+                    exit_code,
+                    error,
+                    remain_after_exit,
+                })
+                .await;
+        });
+
+        Ok(())
     }
 
     /// Check if any Type=dbus services have acquired their bus name

@@ -693,21 +693,36 @@ async fn load_dropins(unit_path: &Path, parsed: &mut ParsedFile) {
 }
 
 /// Merge a drop-in ParsedFile into the main ParsedFile
-/// Drop-in values are appended to base values (for list directives like After=)
-/// or replace them (for scalar directives, the last value wins during conversion)
+/// Implements systemd's reset convention: an empty value (Key=) clears all previous values.
+/// After a reset, subsequent non-empty values are added fresh.
 fn merge_parsed_files(base: &mut ParsedFile, dropin: &ParsedFile) {
     for (section_name, section_values) in dropin {
         let base_section = base.entry(section_name.clone()).or_default();
 
         for (key, values) in section_values {
-            // Append all values from drop-in
-            // Note: For scalar directives, parse_service uses .first() so the last
-            // value from the base takes precedence (systemd uses last value instead)
-            // For list directives (After=, Wants=, etc.), all values are collected
-            base_section
-                .entry(key.clone())
-                .or_default()
-                .extend(values.clone());
+            // Check if drop-in contains a reset (empty value)
+            // In systemd, Key= (empty) clears all previous values for that key
+            let has_reset = values.iter().any(|(_, v)| v.is_empty());
+
+            if has_reset {
+                // Clear existing values first
+                base_section.remove(key);
+                // Then add only non-empty values from drop-in
+                let non_empty: Vec<_> = values
+                    .iter()
+                    .filter(|(_, v)| !v.is_empty())
+                    .cloned()
+                    .collect();
+                if !non_empty.is_empty() {
+                    base_section.insert(key.clone(), non_empty);
+                }
+            } else {
+                // No reset, just append values
+                base_section
+                    .entry(key.clone())
+                    .or_default()
+                    .extend(values.clone());
+            }
         }
     }
 }
@@ -1871,8 +1886,7 @@ Environment=FOO=bar
 
     #[test]
     fn test_merge_dropins_append() {
-        // Test that drop-in values are appended
-        // Note: Reset via empty value (ExecStart=) is not supported by the parser
+        // Test that drop-in values are appended (when no reset)
         let base_content = r#"
 [Service]
 ExecStart=/usr/bin/main
@@ -1899,6 +1913,68 @@ ExecStartPre=/usr/bin/setup
         let exec_pre = svc_section.get("EXECSTARTPRE").unwrap();
         assert_eq!(exec_pre.len(), 1);
         assert!(exec_pre[0].1.contains("/usr/bin/setup"));
+    }
+
+    #[test]
+    fn test_merge_dropins_reset() {
+        // Test that Key= (empty value) clears previous values
+        let base_content = r#"
+[Service]
+ExecStart=/usr/bin/original --with-audit
+Environment=OLD=value
+"#;
+        let mut base = parse_file(base_content).unwrap();
+
+        // Drop-in that resets ExecStart and sets new value
+        let dropin_content = r#"
+[Service]
+ExecStart=
+ExecStart=/usr/bin/replacement --no-audit
+"#;
+        let dropin = parse_file(dropin_content).unwrap();
+
+        merge_parsed_files(&mut base, &dropin);
+
+        let svc_section = base.get("[Service]").unwrap();
+
+        // ExecStart should be replaced (original cleared by reset)
+        let exec_start = svc_section.get("EXECSTART").unwrap();
+        assert_eq!(exec_start.len(), 1);
+        assert_eq!(exec_start[0].1, "/usr/bin/replacement --no-audit");
+        assert!(!exec_start[0].1.contains("original"));
+
+        // Environment should still exist (not reset)
+        let env = svc_section.get("ENVIRONMENT").unwrap();
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].1, "OLD=value");
+    }
+
+    #[test]
+    fn test_merge_dropins_reset_to_empty() {
+        // Test that Key= with no following values removes the key entirely
+        let base_content = r#"
+[Service]
+ExecStart=/usr/bin/original
+ProtectSystem=full
+"#;
+        let mut base = parse_file(base_content).unwrap();
+
+        // Drop-in that clears ProtectSystem entirely
+        let dropin_content = r#"
+[Service]
+ProtectSystem=
+"#;
+        let dropin = parse_file(dropin_content).unwrap();
+
+        merge_parsed_files(&mut base, &dropin);
+
+        let svc_section = base.get("[Service]").unwrap();
+
+        // ExecStart should still exist
+        assert!(svc_section.get("EXECSTART").is_some());
+
+        // ProtectSystem should be removed (reset with no new value)
+        assert!(svc_section.get("PROTECTSYSTEM").is_none());
     }
 
     #[test]

@@ -62,6 +62,8 @@ impl Manager {
         }
 
         // Store the FDs
+        log::debug!("{}: storing socket FDs {:?} (total sockets with FDs: {})",
+            name, fds, self.socket_fds.len() + 1);
         self.socket_fds.insert(name.to_string(), fds.clone());
 
         // Spawn socket watcher task for activation
@@ -118,11 +120,10 @@ impl Manager {
                         // Filesystem socket
                         let unix_listener = UnixListener::bind(&listener.address)?;
 
-                        // Set socket mode if specified
-                        if let Some(mode) = socket.socket.socket_mode {
-                            let perms = std::fs::Permissions::from_mode(mode);
-                            std::fs::set_permissions(&listener.address, perms)?;
-                        }
+                        // Set socket mode (default 0666 per systemd spec)
+                        let mode = socket.socket.socket_mode.unwrap_or(0o666);
+                        let perms = std::fs::Permissions::from_mode(mode);
+                        std::fs::set_permissions(&listener.address, perms)?;
 
                         let fd = unix_listener.as_raw_fd();
                         // Prevent FD from being closed when UnixListener drops
@@ -242,11 +243,10 @@ impl Manager {
 
         let sock = UnixDatagram::bind(path)?;
 
-        // Set permissions
-        if let Some(mode) = socket.socket.socket_mode {
-            let perms = std::fs::Permissions::from_mode(mode);
-            std::fs::set_permissions(path, perms)?;
-        }
+        // Set permissions (default 0666 per systemd spec)
+        let mode = socket.socket.socket_mode.unwrap_or(0o666);
+        let perms = std::fs::Permissions::from_mode(mode);
+        std::fs::set_permissions(path, perms)?;
 
         let fd = sock.as_raw_fd();
         std::mem::forget(sock);
@@ -419,11 +419,20 @@ impl Manager {
         // Check if service has explicit Sockets= directive
         if let Some(service) = self.units.get(service_name).and_then(|u| u.as_service()) {
             if !service.service.sockets.is_empty() {
+                log::debug!(
+                    "{}: has Sockets={:?}, available socket_fds keys: {:?}",
+                    service_name,
+                    service.service.sockets,
+                    self.socket_fds.keys().collect::<Vec<_>>()
+                );
                 // Collect FDs from all named sockets
                 let mut fds = Vec::new();
                 for socket_name in &service.service.sockets {
                     if let Some(socket_fds) = self.socket_fds.get(socket_name) {
+                        log::debug!("{}: found FDs {:?} from {}", service_name, socket_fds, socket_name);
                         fds.extend(socket_fds.iter().copied());
+                    } else {
+                        log::warn!("{}: socket {} not in socket_fds", service_name, socket_name);
                     }
                 }
                 if !fds.is_empty() {
@@ -514,18 +523,38 @@ impl Manager {
             activation.socket_name
         );
 
-        // Check if service is already running
-        if let Some(state) = self.states.get(&activation.service_name) {
+        // Resolve alias to canonical name before checking state
+        // The service_name might be an alias (e.g., "dbus.service" -> "dbus-broker.service")
+        let canonical_name = if self.units.contains_key(&activation.service_name) {
+            activation.service_name.clone()
+        } else {
+            // Try to load to resolve alias - if already loaded under different name, returns canonical
+            match self.load(&activation.service_name).await {
+                Ok(name) => name,
+                Err(_) => activation.service_name.clone(),
+            }
+        };
+
+        // Check if service is already running under canonical name
+        if let Some(state) = self.states.get(&canonical_name) {
             if state.is_active() {
                 log::debug!(
                     "{} already running, skipping activation",
-                    activation.service_name
+                    canonical_name
                 );
                 return Ok(());
             }
         }
 
-        // Start the service
-        self.start(&activation.service_name).await
+        // Start the service - use original name so it goes through normal start flow
+        match self.start(&activation.service_name).await {
+            Ok(()) => Ok(()),
+            // Treat AlreadyActive as success - service is running which is what we want
+            Err(ManagerError::AlreadyActive(name)) => {
+                log::debug!("{} already active during socket activation", name);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 }

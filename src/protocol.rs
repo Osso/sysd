@@ -33,6 +33,8 @@ pub enum Request {
     },
     /// Start a unit
     Start { name: String },
+    /// Start a unit and wait for it to exit (become inactive/failed)
+    StartAndWait { name: String },
     /// Stop a unit
     Stop { name: String },
     /// Restart a unit
@@ -59,6 +61,12 @@ pub enum Request {
     SwitchTarget { target: String },
     /// Ping (health check)
     Ping,
+    /// Import environment variables from the caller
+    ImportEnvironment { vars: Vec<(String, String)> },
+    /// Unset environment variables
+    UnsetEnvironment { names: Vec<String> },
+    /// Reset failed state of all units
+    ResetFailed,
 }
 
 /// Unit info returned by list/status
