@@ -16,7 +16,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORK_DIR="${PROJECT_DIR}/target/qemu-test"
-SYSD_BIN="${PROJECT_DIR}/target/release/sysd"
+
+# Use musl target if cargo config specifies it, otherwise use default release
+if [[ -f "${PROJECT_DIR}/.cargo/config.toml" ]] && grep -q 'target.*=.*musl' "${PROJECT_DIR}/.cargo/config.toml"; then
+    TARGET_DIR="${PROJECT_DIR}/target/x86_64-unknown-linux-musl/release"
+else
+    TARGET_DIR="${PROJECT_DIR}/target/release"
+fi
+SYSD_BIN="${TARGET_DIR}/sysd"
 
 # Colors
 RED='\033[0;31m'
@@ -72,7 +79,7 @@ create_initramfs() {
     chmod +x "$initrd_dir/bin/sysd"
 
     # Copy sysd-executor (required for spawning services)
-    local EXECUTOR_BIN="${PROJECT_DIR}/target/release/sysd-executor"
+    local EXECUTOR_BIN="${TARGET_DIR}/sysd-executor"
     if [[ -f "$EXECUTOR_BIN" ]]; then
         cp "$EXECUTOR_BIN" "$initrd_dir/bin/sysd-executor"
         chmod +x "$initrd_dir/bin/sysd-executor"

@@ -14,9 +14,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SYSD_BIN="${PROJECT_DIR}/target/release/sysd"
-SYSDCTL_BIN="${PROJECT_DIR}/target/release/sysdctl"
-EXECUTOR_BIN="${PROJECT_DIR}/target/release/sysd-executor"
+# Use musl target if cargo config specifies it, otherwise use default release
+if [[ -f "${PROJECT_DIR}/.cargo/config.toml" ]] && grep -q 'target.*=.*musl' "${PROJECT_DIR}/.cargo/config.toml"; then
+    TARGET_DIR="${PROJECT_DIR}/target/x86_64-unknown-linux-musl/release"
+else
+    TARGET_DIR="${PROJECT_DIR}/target/release"
+fi
+SYSD_BIN="${TARGET_DIR}/sysd"
+SYSDCTL_BIN="${TARGET_DIR}/sysdctl"
+EXECUTOR_BIN="${TARGET_DIR}/sysd-executor"
 
 # Colors
 RED='\033[0;31m'
