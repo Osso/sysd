@@ -1062,6 +1062,11 @@ impl Manager {
             return self.stop_timer(&name).await;
         }
 
+        // Handle path units
+        if self.units.get(&name).is_some_and(|u| u.is_path()) {
+            return self.stop_path(&name).await;
+        }
+
         let state = self
             .states
             .get_mut(&name)
