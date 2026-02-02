@@ -39,6 +39,9 @@ enum Command {
         /// Wait for the unit to exit (become inactive or failed)
         #[arg(long)]
         wait: bool,
+        /// Job mode (fail, replace, replace-irreversibly, isolate, ignore-dependencies)
+        #[arg(long, default_value = "replace")]
+        job_mode: String,
     },
 
     /// Stop a unit
@@ -141,7 +144,12 @@ fn main() {
 
     let request = match args.command {
         Command::List { user: list_user, unit_type } => Request::List { user: list_user || user_mode, unit_type },
-        Command::Start { name, wait } => {
+        Command::Start { name, wait, job_mode } => {
+            // job_mode is accepted for compatibility but not fully implemented
+            // replace-irreversibly is used by niri-session shutdown
+            if job_mode != "replace" && job_mode != "fail" {
+                log::debug!("job_mode={} (treated as replace)", job_mode);
+            }
             if wait {
                 Request::StartAndWait { name }
             } else {
