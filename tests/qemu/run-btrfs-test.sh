@@ -17,7 +17,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORK_DIR="${PROJECT_DIR}/target/qemu-btrfs-test"
-SYSD_BIN="${PROJECT_DIR}/target/release/sysd"
+
+# Use musl target if cargo config specifies it, otherwise use default release
+if [[ -f "${PROJECT_DIR}/.cargo/config.toml" ]] && grep -q 'target.*=.*musl' "${PROJECT_DIR}/.cargo/config.toml"; then
+    TARGET_DIR="${PROJECT_DIR}/target/x86_64-unknown-linux-musl/release"
+else
+    TARGET_DIR="${PROJECT_DIR}/target/release"
+fi
+SYSD_BIN="${TARGET_DIR}/sysd"
 DISK_IMG="${WORK_DIR}/root.img"
 DISK_SIZE="256M"
 

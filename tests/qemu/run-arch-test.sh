@@ -25,7 +25,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORK_DIR="${PROJECT_DIR}/target/qemu-arch-test"
-SYSD_BIN="${PROJECT_DIR}/target/release/sysd"
+
+# Use musl target if cargo config specifies it, otherwise use default release
+if [[ -f "${PROJECT_DIR}/.cargo/config.toml" ]] && grep -q 'target.*=.*musl' "${PROJECT_DIR}/.cargo/config.toml"; then
+    TARGET_DIR="${PROJECT_DIR}/target/x86_64-unknown-linux-musl/release"
+else
+    TARGET_DIR="${PROJECT_DIR}/target/release"
+fi
+SYSD_BIN="${TARGET_DIR}/sysd"
 DISK_IMG="${WORK_DIR}/arch-root.img"
 DISK_SIZE="2G"
 SSH_PORT=2223
@@ -155,7 +162,7 @@ create_disk_image() {
     cp "$SYSD_BIN" "$mnt/usr/bin/sysd"
     chmod +x "$mnt/usr/bin/sysd"
     # Copy executor (required for socket activation)
-    cp "${PROJECT_DIR}/target/release/sysd-executor" "$mnt/usr/bin/sysd-executor"
+    cp "${TARGET_DIR}/sysd-executor" "$mnt/usr/bin/sysd-executor"
     chmod +x "$mnt/usr/bin/sysd-executor"
 
     # Create sysd symlink as init
@@ -916,7 +923,7 @@ main() {
         mkdir -p "$mnt"
         mount "$LOOP_PART" "$mnt"
         cp "$SYSD_BIN" "$mnt/usr/bin/sysd"
-        cp "${PROJECT_DIR}/target/release/sysd-executor" "$mnt/usr/bin/sysd-executor"
+        cp "${TARGET_DIR}/sysd-executor" "$mnt/usr/bin/sysd-executor"
         sync
         umount "$mnt"
         losetup -d "$LOOP_DEV"

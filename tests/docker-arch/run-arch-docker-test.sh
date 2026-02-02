@@ -40,9 +40,14 @@ build_binaries() {
     log "Building sysd binaries..."
     cargo build --release --manifest-path "$PROJECT_DIR/Cargo.toml" 2>&1 | tail -5
 
-    local target_dir="$PROJECT_DIR/target/release"
-    if [[ ! -f "$target_dir/sysd" ]] || [[ ! -f "$target_dir/sysdctl" ]] || [[ ! -f "$target_dir/sysd-executor" ]]; then
-        err "sysd/sysdctl/sysd-executor binaries not found"
+    # Use musl target if cargo config specifies it, otherwise use default release
+    if [[ -f "${PROJECT_DIR}/.cargo/config.toml" ]] && grep -q 'target.*=.*musl' "${PROJECT_DIR}/.cargo/config.toml"; then
+        TARGET_DIR="${PROJECT_DIR}/target/x86_64-unknown-linux-musl/release"
+    else
+        TARGET_DIR="${PROJECT_DIR}/target/release"
+    fi
+    if [[ ! -f "$TARGET_DIR/sysd" ]] || [[ ! -f "$TARGET_DIR/sysdctl" ]] || [[ ! -f "$TARGET_DIR/sysd-executor" ]]; then
+        err "sysd/sysdctl/sysd-executor binaries not found in $TARGET_DIR"
         exit 1
     fi
     log "Binaries built successfully"
@@ -52,12 +57,10 @@ build_binaries() {
 build_image() {
     log "Building Docker image..."
 
-    local target_dir="$PROJECT_DIR/target/release"
-
-    # Copy binaries to docker context
-    cp "$target_dir/sysd" "$SCRIPT_DIR/sysd"
-    cp "$target_dir/sysdctl" "$SCRIPT_DIR/sysdctl"
-    cp "$target_dir/sysd-executor" "$SCRIPT_DIR/sysd-executor"
+    # Copy binaries to docker context (TARGET_DIR set by build_binaries)
+    cp "$TARGET_DIR/sysd" "$SCRIPT_DIR/sysd"
+    cp "$TARGET_DIR/sysdctl" "$SCRIPT_DIR/sysdctl"
+    cp "$TARGET_DIR/sysd-executor" "$SCRIPT_DIR/sysd-executor"
 
     DOCKER_BUILDKIT=0 docker build -t "$IMAGE_NAME" "$SCRIPT_DIR"
 

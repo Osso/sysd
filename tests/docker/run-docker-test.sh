@@ -33,7 +33,13 @@ build_binaries() {
 
     cargo build --release --manifest-path "$PROJECT_DIR/Cargo.toml" 2>&1 | tail -5
 
-    local target_dir="$PROJECT_DIR/target/release"
+    # Use musl target if cargo config specifies it, otherwise use default release
+    # Note: target_dir is used by build_image(), so don't declare as local
+    if [[ -f "${PROJECT_DIR}/.cargo/config.toml" ]] && grep -q 'target.*=.*musl' "${PROJECT_DIR}/.cargo/config.toml"; then
+        target_dir="${PROJECT_DIR}/target/x86_64-unknown-linux-musl/release"
+    else
+        target_dir="${PROJECT_DIR}/target/release"
+    fi
 
     if [[ ! -f "$target_dir/sysd" ]]; then
         err "sysd binary not found at $target_dir/sysd"
@@ -52,9 +58,7 @@ build_binaries() {
 build_image() {
     log "Building Docker image..."
 
-    local target_dir="$PROJECT_DIR/target/release"
-
-    # Copy binaries to docker context
+    # Copy binaries to docker context (target_dir set by build_binaries)
     cp "$target_dir/sysd" "$SCRIPT_DIR/sysd"
     cp "$target_dir/sysdctl" "$SCRIPT_DIR/sysdctl"
 
