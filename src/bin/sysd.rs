@@ -774,5 +774,16 @@ async fn handle_request(request: Request, manager: &SharedManager) -> Response {
             mgr.reset_failed();
             Response::Ok
         }
+
+        Request::IsActive { name } => {
+            let mgr = manager.read().await;
+            match mgr.status(&name) {
+                Some(state) => {
+                    let active_state = format!("{:?}", state.active).to_lowercase();
+                    Response::ActiveState(active_state)
+                }
+                None => Response::ActiveState("unknown".to_string()),
+            }
+        }
     }
 }

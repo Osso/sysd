@@ -67,6 +67,8 @@ pub enum Request {
     UnsetEnvironment { names: Vec<String> },
     /// Reset failed state of all units
     ResetFailed,
+    /// Check if unit is active
+    IsActive { name: String },
 }
 
 /// Unit info returned by list/status
@@ -95,6 +97,8 @@ pub enum Response {
     BootPlan(Vec<String>),
     /// Enabled state (enabled, disabled, static, etc.)
     EnabledState(String),
+    /// Active state (active, inactive, failed, etc.)
+    ActiveState(String),
     /// Error with message
     Error(String),
     /// Pong (response to ping)

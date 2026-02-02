@@ -118,6 +118,15 @@ enum Command {
 
     /// Reset failed state of all units
     ResetFailed,
+
+    /// Check if a unit is active (exit 0 if active, 3 if inactive/failed)
+    IsActive {
+        /// Unit name
+        name: String,
+        /// Quiet mode - no output, just exit code
+        #[arg(short, long)]
+        quiet: bool,
+    },
 }
 
 fn main() {
@@ -158,6 +167,41 @@ fn main() {
         }
         Command::UnsetEnvironment { names } => Request::UnsetEnvironment { names },
         Command::ResetFailed => Request::ResetFailed,
+        Command::IsActive { name, quiet } => {
+            // IsActive needs special handling for exit codes
+            let sock_path = socket_path(user_mode);
+            match Client::call(&sock_path, &Request::IsActive { name: name.clone() }) {
+                Ok(Response::ActiveState(state)) => {
+                    if !quiet {
+                        println!("{}", state);
+                    }
+                    // Exit codes match systemctl: 0=active, 3=inactive/failed/unknown
+                    if state == "active" || state == "Active" {
+                        std::process::exit(0);
+                    } else {
+                        std::process::exit(3);
+                    }
+                }
+                Ok(Response::Error(msg)) => {
+                    if !quiet {
+                        eprintln!("error: {}", msg);
+                    }
+                    std::process::exit(3);
+                }
+                Ok(_) => {
+                    if !quiet {
+                        eprintln!("unexpected response");
+                    }
+                    std::process::exit(3);
+                }
+                Err(e) => {
+                    if !quiet {
+                        eprintln!("sysdctl: {}", e);
+                    }
+                    std::process::exit(1);
+                }
+            }
+        }
         Command::Parse { .. } => unreachable!(),
     };
 
@@ -238,6 +282,13 @@ fn print_response(response: Response) {
             // Exit with code 1 if disabled (like systemctl)
             if state == "disabled" {
                 std::process::exit(1);
+            }
+        }
+        Response::ActiveState(state) => {
+            // Normally handled in Command::IsActive, but print if reached here
+            println!("{}", state);
+            if state != "active" {
+                std::process::exit(3);
             }
         }
     }

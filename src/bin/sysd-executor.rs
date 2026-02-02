@@ -189,7 +189,7 @@ fn setup_rlimits(config: &ExecConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn set_rlimit(resource: libc::__rlimit_resource_t, limit: u64) -> Result<(), String> {
+fn set_rlimit(resource: libc::c_int, limit: u64) -> Result<(), String> {
     let rlim = libc::rlimit {
         rlim_cur: limit,
         rlim_max: limit,
