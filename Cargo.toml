@@ -17,6 +17,10 @@ path = "src/bin/sysdctl.rs"
 name = "sysd-executor"
 path = "src/bin/sysd-executor.rs"
 
+[[bin]]
+name = "systemctl"
+path = "src/bin/systemctl-compat.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.48", features = ["full", "signal"] }
