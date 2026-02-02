@@ -324,31 +324,22 @@ inject_sysd() {
     sudo cp "$SYSD_BIN" "$IMAGE_MOUNT/usr/bin/sysd"
     sudo cp "$SYSDCTL_BIN" "$IMAGE_MOUNT/usr/bin/sysdctl"
     sudo cp "$EXECUTOR_BIN" "$IMAGE_MOUNT/usr/bin/sysd-executor"
-    sudo chmod +x "$IMAGE_MOUNT/usr/bin/sysd" "$IMAGE_MOUNT/usr/bin/sysdctl" "$IMAGE_MOUNT/usr/bin/sysd-executor"
+    # Copy systemctl compat wrapper (allows niri-session to work unmodified)
+    sudo cp "${TARGET_DIR}/systemctl" "$IMAGE_MOUNT/usr/bin/systemctl"
+    sudo chmod +x "$IMAGE_MOUNT/usr/bin/sysd" "$IMAGE_MOUNT/usr/bin/sysdctl" "$IMAGE_MOUNT/usr/bin/sysd-executor" "$IMAGE_MOUNT/usr/bin/systemctl"
 
     # Create /sbin/init symlink (initramfs switch_root expects this)
     sudo ln -sf /usr/bin/sysd "$IMAGE_MOUNT/sbin/init"
 
     # Copy session wrapper scripts
     sudo mkdir -p "$IMAGE_MOUNT/usr/local/bin"
-    if [[ -f /usr/local/bin/niri-sysd ]]; then
-        sudo cp /usr/local/bin/niri-sysd "$IMAGE_MOUNT/usr/local/bin/niri-sysd"
-        sudo chmod +x "$IMAGE_MOUNT/usr/local/bin/niri-sysd"
-    else
-        # Create niri-sysd wrapper in-place if not on host
-        cat <<'NIRISYSD' | sudo tee "$IMAGE_MOUNT/usr/local/bin/niri-sysd" > /dev/null
+    # Create niri-sysd wrapper that starts sysd --user and then runs real niri-session
+    cat <<'NIRISYSD' | sudo tee "$IMAGE_MOUNT/usr/local/bin/niri-sysd" > /dev/null
 #!/bin/sh
-# niri-sysd - Launch niri session via sysd user service manager
+# niri-sysd - Start sysd --user and launch niri-session
+# This wrapper ensures sysd --user is running before niri-session starts.
+# niri-session will then use the 'systemctl' compat wrapper which calls sysdctl.
 set -e
-
-# Re-exec through login shell for proper environment
-if [ -n "$SHELL" ] && grep -q "$SHELL" /etc/shells 2>/dev/null; then
-    if [ "$1" != '-l' ]; then
-        exec bash -c "exec -l '$SHELL' -c '$0 -l $*'"
-    else
-        shift
-    fi
-fi
 
 # Ensure HOME is set
 [ -z "$HOME" ] && export HOME=$(getent passwd "$(id -u)" | cut -d: -f6)
@@ -360,8 +351,9 @@ export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
-# Ensure runtime dir exists
+# Ensure runtime dir exists with proper permissions
 mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
 
 # Start sysd --user if not running
 if ! sysdctl --user ping >/dev/null 2>&1; then
@@ -371,22 +363,16 @@ if ! sysdctl --user ping >/dev/null 2>&1; then
         sysdctl --user ping >/dev/null 2>&1 && break
         sleep 0.1
     done
+    if ! sysdctl --user ping >/dev/null 2>&1; then
+        echo "Failed to start sysd --user"
+        exit 1
+    fi
 fi
 
-# Reset failed state
-sysdctl --user reset-failed 2>/dev/null || true
-
-# Import environment
-sysdctl --user import-environment 2>/dev/null || true
-
-# Update D-Bus activation environment
-dbus-update-activation-environment --all 2>/dev/null || true
-
-# Start niri and wait
-sysdctl --user start --wait niri.service
+# Now run the real niri-session which will use systemctl (our compat wrapper)
+exec niri-session "$@"
 NIRISYSD
-        sudo chmod +x "$IMAGE_MOUNT/usr/local/bin/niri-sysd"
-    fi
+    sudo chmod +x "$IMAGE_MOUNT/usr/local/bin/niri-sysd"
 
     if [[ -f /usr/local/bin/hyprland-sysd ]]; then
         sudo cp /usr/local/bin/hyprland-sysd "$IMAGE_MOUNT/usr/local/bin/hyprland-sysd"
