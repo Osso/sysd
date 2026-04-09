@@ -96,11 +96,7 @@ impl Manager {
         // Process collected messages
         for msg in messages {
             // Log all incoming notify messages for debugging
-            log::debug!(
-                "Notify message from PID {}: {:?}",
-                msg.pid,
-                msg.fields
-            );
+            log::debug!("Notify message from PID {}: {:?}", msg.pid, msg.fields);
 
             // Validate NotifyAccess policy before processing
             if !self.validate_notify_access(&msg) {
@@ -272,12 +268,7 @@ impl Manager {
                 );
                 unsafe { libc::close(*fd) };
             } else {
-                log::debug!(
-                    "{}: Storing FD {} as '{}'",
-                    service_name,
-                    fd,
-                    fd_name
-                );
+                log::debug!("{}: Storing FD {} as '{}'", service_name, fd, fd_name);
                 store.push((fd_name.clone(), *fd));
             }
         }
@@ -480,7 +471,8 @@ impl Manager {
                     state.is_restart_rate_limited(start_limit_burst, start_limit_interval_sec);
 
                 // Final decision: policy wants restart AND not prevented by exit status AND not rate limited
-                let should_restart = policy_wants_restart && !exit_prevents_restart && !rate_limited;
+                let should_restart =
+                    policy_wants_restart && !exit_prevents_restart && !rate_limited;
 
                 if code == 0 {
                     // Clean exit
@@ -508,11 +500,7 @@ impl Manager {
                             start_limit_burst.unwrap_or(0),
                             start_limit_interval_sec.unwrap_or(std::time::Duration::from_secs(10))
                         ));
-                        log::error!(
-                            "{} start limit hit, not restarting (exit {})",
-                            name,
-                            code
-                        );
+                        log::error!("{} start limit hit, not restarting (exit {})", name, code);
                     } else if exit_prevents_restart {
                         state.set_stopped(code);
                         log::info!(
@@ -599,13 +587,13 @@ impl Manager {
 
         // Stop each bound unit
         for name in units_to_stop {
-            log::info!(
-                "Stopping {} (BindsTo={} which stopped)",
-                name,
-                stopped_unit
-            );
+            log::info!("Stopping {} (BindsTo={} which stopped)", name, stopped_unit);
             if let Err(e) = self.stop(&name).await {
-                log::warn!("Failed to stop {} after BindsTo dependency stopped: {}", name, e);
+                log::warn!(
+                    "Failed to stop {} after BindsTo dependency stopped: {}",
+                    name,
+                    e
+                );
             }
         }
     }
@@ -686,7 +674,11 @@ impl Manager {
             // Store pending state for next command
             self.pending_oneshot_cmds.insert(
                 service_name.clone(),
-                (next_idx, completion.total_cmds, completion.remain_after_exit),
+                (
+                    next_idx,
+                    completion.total_cmds,
+                    completion.remain_after_exit,
+                ),
             );
 
             // Start next command
@@ -703,7 +695,12 @@ impl Manager {
                     state.set_failed(format!("Command {} failed: {}", next_idx, e));
                 }
                 self.pending_oneshot_cmds.remove(service_name);
-                log::warn!("Oneshot {} command {} failed to start: {}", service_name, next_idx, e);
+                log::warn!(
+                    "Oneshot {} command {} failed to start: {}",
+                    service_name,
+                    next_idx,
+                    e
+                );
             }
         } else {
             // All commands completed successfully
@@ -756,13 +753,23 @@ impl Manager {
         )?;
 
         let pid = child.id().unwrap_or(0);
-        log::info!("Oneshot {} command {} started (PID {})", service_name, cmd_idx, pid);
+        log::info!(
+            "Oneshot {} command {} started (PID {})",
+            service_name,
+            cmd_idx,
+            pid
+        );
 
         // Add to existing cgroup if available
         if let Some(ref cgroup_path) = self.cgroup_paths.get(service_name) {
             if let Some(ref cgroup_mgr) = self.cgroup_manager {
                 if let Err(e) = cgroup_mgr.add_pid(cgroup_path, pid) {
-                    log::warn!("Failed to add PID {} to cgroup for {}: {}", pid, service_name, e);
+                    log::warn!(
+                        "Failed to add PID {} to cgroup for {}: {}",
+                        pid,
+                        service_name,
+                        e
+                    );
                 }
             }
         }

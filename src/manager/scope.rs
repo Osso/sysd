@@ -119,12 +119,9 @@ impl ScopeManager {
                 .map_err(|e| ManagerError::StartFailed(e.to_string()))?;
 
             let server = conn.object_server();
-            let _: bool = server
-                .at(obj_path.clone(), unit_iface)
-                .await
-                .map_err(|e| {
-                    ManagerError::StartFailed(format!("Failed to register Unit interface: {}", e))
-                })?;
+            let _: bool = server.at(obj_path.clone(), unit_iface).await.map_err(|e| {
+                ManagerError::StartFailed(format!("Failed to register Unit interface: {}", e))
+            })?;
             let _: bool = server.at(obj_path, scope_iface).await.map_err(|e| {
                 ManagerError::StartFailed(format!("Failed to register Scope interface: {}", e))
             })?;
@@ -198,7 +195,8 @@ mod tests {
         assert!(mgr.get_cgroup_path("session-1.scope").is_none());
 
         let path = PathBuf::from("/sys/fs/cgroup/user.slice/session-1.scope");
-        mgr.scopes.insert("session-1.scope".to_string(), path.clone());
+        mgr.scopes
+            .insert("session-1.scope".to_string(), path.clone());
         assert_eq!(mgr.get_cgroup_path("session-1.scope"), Some(&path));
     }
 

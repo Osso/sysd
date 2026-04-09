@@ -265,7 +265,11 @@ impl CgroupManager {
 
     /// Clean up a service cgroup (remove if empty)
     /// If slice is None, defaults to system.slice
-    pub fn cleanup_service_cgroup(&self, service_name: &str, slice: Option<&str>) -> io::Result<()> {
+    pub fn cleanup_service_cgroup(
+        &self,
+        service_name: &str,
+        slice: Option<&str>,
+    ) -> io::Result<()> {
         let slice = slice.unwrap_or(SYSTEM_SLICE);
         let cgroup_path = self.root.join(slice).join(service_name);
 

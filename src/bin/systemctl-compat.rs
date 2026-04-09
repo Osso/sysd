@@ -15,7 +15,7 @@
 
 use std::env;
 use std::os::unix::process::CommandExt;
-use std::process::{Command, exit};
+use std::process::{exit, Command};
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -173,9 +173,7 @@ fn main() {
     }
 
     // Execute sysdctl
-    let err = Command::new("sysdctl")
-        .args(&sysdctl_args)
-        .exec();
+    let err = Command::new("sysdctl").args(&sysdctl_args).exec();
 
     // exec() only returns on error
     eprintln!("systemctl-compat: failed to exec sysdctl: {}", err);

@@ -155,10 +155,10 @@ impl RuntimeDirectoryPreserve {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum ProtectSystem {
     #[default]
-    No,      // No protection (default)
-    Yes,     // /usr and /boot read-only
-    Full,    // /usr, /boot, and /etc read-only
-    Strict,  // Entire filesystem read-only except /dev, /proc, /sys
+    No, // No protection (default)
+    Yes,    // /usr and /boot read-only
+    Full,   // /usr, /boot, and /etc read-only
+    Strict, // Entire filesystem read-only except /dev, /proc, /sys
 }
 
 impl ProtectSystem {
@@ -177,7 +177,7 @@ impl ProtectSystem {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum ProtectHome {
     #[default]
-    No,       // No protection (default)
+    No, // No protection (default)
     Yes,      // /home, /root, /run/user inaccessible
     ReadOnly, // /home, /root, /run/user read-only
     Tmpfs,    // /home, /root, /run/user as empty tmpfs
@@ -199,10 +199,10 @@ impl ProtectHome {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum ProtectProc {
     #[default]
-    Default,     // Normal /proc visibility
-    Invisible,   // Hide processes of other users
-    Ptraceable,  // Only show ptraceable processes
-    NoAccess,    // /proc completely inaccessible
+    Default, // Normal /proc visibility
+    Invisible,  // Hide processes of other users
+    Ptraceable, // Only show ptraceable processes
+    NoAccess,   // /proc completely inaccessible
 }
 
 impl ProtectProc {
@@ -336,26 +336,26 @@ pub struct ServiceSection {
     pub limit_core: Option<u64>,   // LimitCORE= (core dump size, 0=disabled)
 
     // M17: Auto-created directories
-    pub state_directory: Vec<String>,         // StateDirectory= (/var/lib/<name>)
-    pub runtime_directory: Vec<String>,       // RuntimeDirectory= (/run/<name>)
+    pub state_directory: Vec<String>, // StateDirectory= (/var/lib/<name>)
+    pub runtime_directory: Vec<String>, // RuntimeDirectory= (/run/<name>)
     pub configuration_directory: Vec<String>, // ConfigurationDirectory= (/etc/<name>)
-    pub logs_directory: Vec<String>,          // LogsDirectory= (/var/log/<name>)
-    pub cache_directory: Vec<String>,         // CacheDirectory= (/var/cache/<name>)
+    pub logs_directory: Vec<String>,  // LogsDirectory= (/var/log/<name>)
+    pub cache_directory: Vec<String>, // CacheDirectory= (/var/cache/<name>)
     pub runtime_directory_preserve: RuntimeDirectoryPreserve, // RuntimeDirectoryPreserve=
-    pub dynamic_user: bool,                   // DynamicUser= (allocate ephemeral UID/GID)
+    pub dynamic_user: bool,           // DynamicUser= (allocate ephemeral UID/GID)
 
     // OOM killer
     pub oom_score_adjust: Option<i32>, // OOMScoreAdjust= (-1000 to 1000)
 
     // Security sandboxing
-    pub no_new_privileges: bool,              // NoNewPrivileges=
-    pub protect_system: ProtectSystem,        // ProtectSystem=
-    pub protect_home: ProtectHome,            // ProtectHome=
-    pub private_tmp: bool,                    // PrivateTmp=
-    pub private_devices: bool,                // PrivateDevices=
-    pub private_network: bool,                // PrivateNetwork=
-    pub protect_kernel_modules: bool,         // ProtectKernelModules=
-    pub protect_proc: ProtectProc,            // ProtectProc=
+    pub no_new_privileges: bool,       // NoNewPrivileges=
+    pub protect_system: ProtectSystem, // ProtectSystem=
+    pub protect_home: ProtectHome,     // ProtectHome=
+    pub private_tmp: bool,             // PrivateTmp=
+    pub private_devices: bool,         // PrivateDevices=
+    pub private_network: bool,         // PrivateNetwork=
+    pub protect_kernel_modules: bool,  // ProtectKernelModules=
+    pub protect_proc: ProtectProc,     // ProtectProc=
 
     // Capabilities
     pub capability_bounding_set: Vec<String>, // CapabilityBoundingSet=
@@ -370,35 +370,35 @@ pub struct ServiceSection {
     pub inaccessible_paths: Vec<PathBuf>, // InaccessiblePaths=
 
     // Seccomp
-    pub system_call_filter: Vec<String>,          // SystemCallFilter=
-    pub system_call_error_number: Option<i32>,    // SystemCallErrorNumber= (errno for blocked calls)
-    pub system_call_architectures: Vec<String>,   // SystemCallArchitectures= (native, x86, etc.)
+    pub system_call_filter: Vec<String>, // SystemCallFilter=
+    pub system_call_error_number: Option<i32>, // SystemCallErrorNumber= (errno for blocked calls)
+    pub system_call_architectures: Vec<String>, // SystemCallArchitectures= (native, x86, etc.)
 
     // Device access control (mount namespace isolation)
     pub device_policy: DevicePolicy, // DevicePolicy= (auto, closed, strict)
     pub device_allow: Vec<String>,   // DeviceAllow= (format: "/dev/null rw" or "char-pts r")
 
     // M16: Extended security hardening
-    pub restrict_realtime: bool,           // RestrictRealtime= - block realtime scheduling
-    pub protect_control_groups: bool,      // ProtectControlGroups= - /sys/fs/cgroup read-only
-    pub memory_deny_write_execute: bool,   // MemoryDenyWriteExecute= - block W+X memory
-    pub lock_personality: bool,            // LockPersonality= - lock execution domain
-    pub protect_kernel_tunables: bool,     // ProtectKernelTunables= - /proc/sys, /sys read-only
-    pub protect_kernel_logs: bool,         // ProtectKernelLogs= - block /dev/kmsg
-    pub protect_clock: bool,               // ProtectClock= - block clock_settime, etc.
-    pub protect_hostname: bool,            // ProtectHostname= - block sethostname
-    pub ignore_sigpipe: bool,              // IgnoreSIGPIPE= - set SIG_IGN for SIGPIPE
-    pub restrict_suid_sgid: bool,          // RestrictSUIDSGID= - block setuid/setgid files
+    pub restrict_realtime: bool, // RestrictRealtime= - block realtime scheduling
+    pub protect_control_groups: bool, // ProtectControlGroups= - /sys/fs/cgroup read-only
+    pub memory_deny_write_execute: bool, // MemoryDenyWriteExecute= - block W+X memory
+    pub lock_personality: bool,  // LockPersonality= - lock execution domain
+    pub protect_kernel_tunables: bool, // ProtectKernelTunables= - /proc/sys, /sys read-only
+    pub protect_kernel_logs: bool, // ProtectKernelLogs= - block /dev/kmsg
+    pub protect_clock: bool,     // ProtectClock= - block clock_settime, etc.
+    pub protect_hostname: bool,  // ProtectHostname= - block sethostname
+    pub ignore_sigpipe: bool,    // IgnoreSIGPIPE= - set SIG_IGN for SIGPIPE
+    pub restrict_suid_sgid: bool, // RestrictSUIDSGID= - block setuid/setgid files
     pub restrict_address_families: Option<Vec<String>>, // RestrictAddressFamilies=
 
     // M18: Process control & dependencies
-    pub start_limit_burst: Option<u32>,       // StartLimitBurst= - max restarts in interval
+    pub start_limit_burst: Option<u32>, // StartLimitBurst= - max restarts in interval
     pub start_limit_interval_sec: Option<Duration>, // StartLimitIntervalSec= - rate limit window
-    pub sockets: Vec<String>,                 // Sockets= - associated socket units
-    pub send_sighup: bool,                    // SendSIGHUP= - send SIGHUP before SIGTERM
-    pub slice: Option<String>,                // Slice= - explicit cgroup slice
-    pub delegate: bool,                       // Delegate= - allow service to manage own cgroup
-    pub exec_stop_post: Vec<String>,          // ExecStopPost= - post-stop commands
+    pub sockets: Vec<String>,           // Sockets= - associated socket units
+    pub send_sighup: bool,              // SendSIGHUP= - send SIGHUP before SIGTERM
+    pub slice: Option<String>,          // Slice= - explicit cgroup slice
+    pub delegate: bool,                 // Delegate= - allow service to manage own cgroup
+    pub exec_stop_post: Vec<String>,    // ExecStopPost= - post-stop commands
     pub file_descriptor_store_max: Option<u32>, // FileDescriptorStoreMax= - FD store size
     pub restart_prevent_exit_status: Vec<i32>, // RestartPreventExitStatus= - don't restart on these
 }
@@ -629,15 +629,21 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
     } else if let Some(n) = s.strip_suffix("sec") {
         n.parse().ok().map(Duration::from_secs)
     } else if let Some(n) = s.strip_suffix("week") {
-        n.parse::<u64>().ok().map(|w| Duration::from_secs(w * 7 * 86400))
+        n.parse::<u64>()
+            .ok()
+            .map(|w| Duration::from_secs(w * 7 * 86400))
     } else if let Some(n) = s.strip_suffix('s') {
         n.parse().ok().map(Duration::from_secs)
     } else if let Some(n) = s.strip_suffix('h') {
         n.parse::<u64>().ok().map(|h| Duration::from_secs(h * 3600))
     } else if let Some(n) = s.strip_suffix('d') {
-        n.parse::<u64>().ok().map(|d| Duration::from_secs(d * 86400))
+        n.parse::<u64>()
+            .ok()
+            .map(|d| Duration::from_secs(d * 86400))
     } else if let Some(n) = s.strip_suffix('w') {
-        n.parse::<u64>().ok().map(|w| Duration::from_secs(w * 7 * 86400))
+        n.parse::<u64>()
+            .ok()
+            .map(|w| Duration::from_secs(w * 7 * 86400))
     } else {
         // Bare number = seconds
         s.parse().ok().map(Duration::from_secs)
@@ -677,7 +683,10 @@ mod tests {
         assert_eq!(ServiceType::parse("forking"), Some(ServiceType::Forking));
         assert_eq!(ServiceType::parse("notify"), Some(ServiceType::Notify));
         // notify-reload is used by dbus-broker - treat as Notify
-        assert_eq!(ServiceType::parse("notify-reload"), Some(ServiceType::Notify));
+        assert_eq!(
+            ServiceType::parse("notify-reload"),
+            Some(ServiceType::Notify)
+        );
         assert_eq!(ServiceType::parse("dbus"), Some(ServiceType::Dbus));
         assert_eq!(ServiceType::parse("oneshot"), Some(ServiceType::Oneshot));
         assert_eq!(ServiceType::parse("invalid"), None);

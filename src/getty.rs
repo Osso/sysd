@@ -58,8 +58,12 @@ impl ConsoleParam {
 
         // Unit section
         svc.unit.description = Some(format!("Getty on {}", self.tty));
-        svc.unit.after.push("systemd-user-sessions.service".to_string());
-        svc.unit.after.push("plymouth-quit-wait.service".to_string());
+        svc.unit
+            .after
+            .push("systemd-user-sessions.service".to_string());
+        svc.unit
+            .after
+            .push("plymouth-quit-wait.service".to_string());
 
         // For serial consoles, also wait for dev node
         if self.is_serial() {
@@ -76,9 +80,15 @@ impl ConsoleParam {
         // Build agetty command
         let exec_start = if self.is_serial() {
             if let Some(baud) = self.baud {
-                format!("/sbin/agetty -o '-p -- \\\\u' --keep-baud {} {} $TERM", baud, self.tty)
+                format!(
+                    "/sbin/agetty -o '-p -- \\\\u' --keep-baud {} {} $TERM",
+                    baud, self.tty
+                )
             } else {
-                format!("/sbin/agetty -o '-p -- \\\\u' --keep-baud 115200,57600,38400,9600 {} $TERM", self.tty)
+                format!(
+                    "/sbin/agetty -o '-p -- \\\\u' --keep-baud 115200,57600,38400,9600 {} $TERM",
+                    self.tty
+                )
             }
         } else {
             format!("/sbin/agetty -o '-p -- \\\\u' --noclear {} $TERM", self.tty)
@@ -128,7 +138,10 @@ fn parse_console_param(value: &str) -> Option<ConsoleParam> {
 
     let (baud, options) = if let Some(baud_str) = parts.get(1) {
         // Parse baud rate (may have trailing options like 'n8')
-        let baud_part: String = baud_str.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let baud_part: String = baud_str
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         let baud = baud_part.parse().ok();
         let opts = if baud_part.len() < baud_str.len() {
             Some(baud_str[baud_part.len()..].to_string())
@@ -154,10 +167,7 @@ pub fn generate_getty_services(cmdline_path: &Path) -> std::io::Result<Vec<Servi
     let cmdline = std::fs::read_to_string(cmdline_path)?;
     let consoles = parse_cmdline(&cmdline);
 
-    let services: Vec<Service> = consoles
-        .into_iter()
-        .map(|c| c.to_service())
-        .collect();
+    let services: Vec<Service> = consoles.into_iter().map(|c| c.to_service()).collect();
 
     Ok(services)
 }
@@ -285,9 +295,9 @@ mod tests {
             ("ttyS0", true),
             ("ttyS1", true),
             ("ttyUSB0", true),
-            ("ttyAMA0", true),  // Raspberry Pi
-            ("ttyO0", true),    // OMAP
-            ("ttymxc0", true),  // i.MX
+            ("ttyAMA0", true), // Raspberry Pi
+            ("ttyO0", true),   // OMAP
+            ("ttymxc0", true), // i.MX
             ("tty0", false),
             ("tty1", false),
             ("pts/0", false),

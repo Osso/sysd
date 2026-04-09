@@ -147,7 +147,6 @@ fn apply_no_new_privileges() -> Result<(), String> {
 
 /// Linux capabilities
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub enum Capability {
     Chown = 0,
     DacOverride = 1,
@@ -295,8 +294,13 @@ fn apply_ambient_capabilities(caps: &[String]) -> Result<(), String> {
     for cap_str in caps {
         if let Some(cap) = Capability::from_name(cap_str) {
             unsafe {
-                if libc::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, cap as libc::c_ulong, 0, 0)
-                    != 0
+                if libc::prctl(
+                    PR_CAP_AMBIENT,
+                    PR_CAP_AMBIENT_RAISE,
+                    cap as libc::c_ulong,
+                    0,
+                    0,
+                ) != 0
                 {
                     log::warn!("Failed to raise ambient capability {:?}", cap);
                 }
@@ -1003,9 +1007,7 @@ fn add_lock_personality_rules(rules: &mut BTreeMap<i64, Vec<SeccompRule>>) -> Re
 }
 
 /// Add seccomp rules for RestrictSUIDSGID
-fn add_restrict_suid_sgid_rules(
-    rules: &mut BTreeMap<i64, Vec<SeccompRule>>,
-) -> Result<(), String> {
+fn add_restrict_suid_sgid_rules(rules: &mut BTreeMap<i64, Vec<SeccompRule>>) -> Result<(), String> {
     // Block chmod/fchmod/fchmodat with S_ISUID or S_ISGID bits
     // This is complex - we'd need to check the mode argument
     // For now, we block the syscalls entirely when they try to set SUID/SGID
@@ -1149,7 +1151,10 @@ fn add_restrict_address_families_rules(
         // Deny list - block specified families
         for family_str in families {
             let name = family_str.strip_prefix('~').unwrap_or(family_str);
-            if let Some((_, af)) = family_map.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+            if let Some((_, af)) = family_map
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            {
                 // Block socket(af, ..., ...)
                 if let Ok(cond) = SeccompCondition::new(
                     0, // arg0 = domain/family
@@ -1295,7 +1300,6 @@ fn syscall_name_to_nr(name: &str) -> Option<i64> {
 
 // PR_SET_MDWE constants (not in older libc)
 const PR_SET_MDWE: libc::c_int = 65;
-#[allow(dead_code)]
 const PR_MDWE_REFUSE_EXEC_GAIN: libc::c_ulong = 1;
 
 /// RestrictRealtime=yes - block realtime scheduling via seccomp

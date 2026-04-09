@@ -34,9 +34,7 @@ fn kernel_available() -> bool {
 /// Check if sysd release binary exists
 fn sysd_binary_exists() -> bool {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    Path::new(manifest_dir)
-        .join("target/release/sysd")
-        .exists()
+    Path::new(manifest_dir).join("target/release/sysd").exists()
 }
 
 /// Run the QEMU test script and return output

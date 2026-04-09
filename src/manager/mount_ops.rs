@@ -59,14 +59,20 @@ impl Manager {
 
         // Check if already mounted (via /proc/mounts)
         if is_mounted(mount_point) {
-            kmsg(&format!("{} already mounted at {}, skipping", name, mount_point));
+            kmsg(&format!(
+                "{} already mounted at {}, skipping",
+                name, mount_point
+            ));
             log::info!("{} already mounted at {}", name, mount_point);
             if let Some(state) = self.states.get_mut(name) {
                 state.set_running(0);
             }
             return Ok(());
         }
-        kmsg(&format!("{} NOT mounted, will mount at {}", name, mount_point));
+        kmsg(&format!(
+            "{} NOT mounted, will mount at {}",
+            name, mount_point
+        ));
 
         // Execute mount
         log::info!(
@@ -192,11 +198,7 @@ impl Manager {
     }
 
     /// Stop a mount unit (execute umount operation)
-    pub(super) async fn stop_mount(
-        &mut self,
-        name: &str,
-        mnt: &Mount,
-    ) -> Result<(), ManagerError> {
+    pub(super) async fn stop_mount(&mut self, name: &str, mnt: &Mount) -> Result<(), ManagerError> {
         let state = self
             .states
             .get_mut(name)

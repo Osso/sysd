@@ -74,8 +74,10 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
         }
         if let Some(vals) = unit.get("CONDITIONFIRSTBOOT") {
             if let Some((_, s)) = vals.first() {
-                svc.unit.condition_first_boot =
-                    Some(matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on"));
+                svc.unit.condition_first_boot = Some(matches!(
+                    s.to_lowercase().as_str(),
+                    "yes" | "true" | "1" | "on"
+                ));
             }
         }
         if let Some(vals) = unit.get("CONDITIONNEEDSUPDATE") {
@@ -195,7 +197,9 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
         if let Some(vals) = service.get("UNSETENVIRONMENT") {
             for (_, v) in vals {
                 // UnsetEnvironment can have space-separated variable names
-                svc.service.unset_environment.extend(v.split_whitespace().map(String::from));
+                svc.service
+                    .unset_environment
+                    .extend(v.split_whitespace().map(String::from));
             }
         }
 
@@ -380,16 +384,16 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
         // Capabilities (space-separated list, possibly with ~ prefix for drop)
         if let Some(vals) = service.get("CAPABILITYBOUNDINGSET") {
             for (_, v) in vals {
-                svc.service.capability_bounding_set.extend(
-                    v.split_whitespace().map(|s| s.to_string())
-                );
+                svc.service
+                    .capability_bounding_set
+                    .extend(v.split_whitespace().map(|s| s.to_string()));
             }
         }
         if let Some(vals) = service.get("AMBIENTCAPABILITIES") {
             for (_, v) in vals {
-                svc.service.ambient_capabilities.extend(
-                    v.split_whitespace().map(|s| s.to_string())
-                );
+                svc.service
+                    .ambient_capabilities
+                    .extend(v.split_whitespace().map(|s| s.to_string()));
             }
         }
 
@@ -405,9 +409,8 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
                     svc.service.restrict_namespaces = None;
                 } else {
                     // Space-separated list of allowed/denied namespaces
-                    svc.service.restrict_namespaces = Some(
-                        s.split_whitespace().map(|s| s.to_string()).collect()
-                    );
+                    svc.service.restrict_namespaces =
+                        Some(s.split_whitespace().map(|s| s.to_string()).collect());
                 }
             }
         }
@@ -415,32 +418,32 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
         // Path restrictions
         if let Some(vals) = service.get("READWRITEPATHS") {
             for (_, v) in vals {
-                svc.service.read_write_paths.extend(
-                    v.split_whitespace().map(|s| PathBuf::from(s))
-                );
+                svc.service
+                    .read_write_paths
+                    .extend(v.split_whitespace().map(|s| PathBuf::from(s)));
             }
         }
         if let Some(vals) = service.get("READONLYPATHS") {
             for (_, v) in vals {
-                svc.service.read_only_paths.extend(
-                    v.split_whitespace().map(|s| PathBuf::from(s))
-                );
+                svc.service
+                    .read_only_paths
+                    .extend(v.split_whitespace().map(|s| PathBuf::from(s)));
             }
         }
         if let Some(vals) = service.get("INACCESSIBLEPATHS") {
             for (_, v) in vals {
-                svc.service.inaccessible_paths.extend(
-                    v.split_whitespace().map(|s| PathBuf::from(s))
-                );
+                svc.service
+                    .inaccessible_paths
+                    .extend(v.split_whitespace().map(|s| PathBuf::from(s)));
             }
         }
 
         // Seccomp system call filter
         if let Some(vals) = service.get("SYSTEMCALLFILTER") {
             for (_, v) in vals {
-                svc.service.system_call_filter.extend(
-                    v.split_whitespace().map(|s| s.to_string())
-                );
+                svc.service
+                    .system_call_filter
+                    .extend(v.split_whitespace().map(|s| s.to_string()));
             }
         }
         if let Some(vals) = service.get("DEVICEPOLICY") {
@@ -550,7 +553,9 @@ pub fn parse_service(name: &str, parsed: &ParsedFile) -> Result<Service, ParseEr
         if let Some(vals) = service.get("SOCKETS") {
             // Split on whitespace: Sockets=foo.socket bar.socket
             for (_, v) in vals {
-                svc.service.sockets.extend(v.split_whitespace().map(String::from));
+                svc.service
+                    .sockets
+                    .extend(v.split_whitespace().map(String::from));
             }
         }
         if let Some(vals) = service.get("SENDSIGHUP") {
@@ -771,15 +776,18 @@ pub fn parse_target(name: &str, parsed: &ParsedFile) -> Result<Target, ParseErro
             target.unit.condition_capability = vals.iter().map(|(_, v)| v.clone()).collect();
         }
         if let Some(vals) = unit.get("CONDITIONKERNELCOMMANDLINE") {
-            target.unit.condition_kernel_command_line = vals.iter().map(|(_, v)| v.clone()).collect();
+            target.unit.condition_kernel_command_line =
+                vals.iter().map(|(_, v)| v.clone()).collect();
         }
         if let Some(vals) = unit.get("CONDITIONSECURITY") {
             target.unit.condition_security = vals.iter().map(|(_, v)| v.clone()).collect();
         }
         if let Some(vals) = unit.get("CONDITIONFIRSTBOOT") {
             if let Some((_, s)) = vals.first() {
-                target.unit.condition_first_boot =
-                    Some(matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on"));
+                target.unit.condition_first_boot = Some(matches!(
+                    s.to_lowercase().as_str(),
+                    "yes" | "true" | "1" | "on"
+                ));
             }
         }
         if let Some(vals) = unit.get("CONDITIONNEEDSUPDATE") {
@@ -881,7 +889,8 @@ pub fn parse_path_unit(name: &str, parsed: &ParsedFile) -> Result<path::Path, Pa
         if let Some(vals) = path_section.get("DIRECTORYMODE") {
             if let Some((_, s)) = vals.first() {
                 // Parse octal mode like "0755"
-                path_unit.path.directory_mode = u32::from_str_radix(s.trim_start_matches('0'), 8).ok();
+                path_unit.path.directory_mode =
+                    u32::from_str_radix(s.trim_start_matches('0'), 8).ok();
             }
         }
     }
@@ -964,15 +973,18 @@ pub fn parse_slice(name: &str, parsed: &ParsedFile) -> Result<Slice, ParseError>
             slice.unit.condition_capability = vals.iter().map(|(_, v)| v.clone()).collect();
         }
         if let Some(vals) = unit.get("CONDITIONKERNELCOMMANDLINE") {
-            slice.unit.condition_kernel_command_line = vals.iter().map(|(_, v)| v.clone()).collect();
+            slice.unit.condition_kernel_command_line =
+                vals.iter().map(|(_, v)| v.clone()).collect();
         }
         if let Some(vals) = unit.get("CONDITIONSECURITY") {
             slice.unit.condition_security = vals.iter().map(|(_, v)| v.clone()).collect();
         }
         if let Some(vals) = unit.get("CONDITIONFIRSTBOOT") {
             if let Some((_, s)) = vals.first() {
-                slice.unit.condition_first_boot =
-                    Some(matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on"));
+                slice.unit.condition_first_boot = Some(matches!(
+                    s.to_lowercase().as_str(),
+                    "yes" | "true" | "1" | "on"
+                ));
             }
         }
         if let Some(vals) = unit.get("CONDITIONNEEDSUPDATE") {
@@ -1026,8 +1038,7 @@ pub fn parse_mount(name: &str, parsed: &ParsedFile) -> Result<Mount, ParseError>
             mnt.unit.condition_path_exists = vals.iter().map(|(_, v)| v.clone()).collect();
         }
         if let Some(vals) = unit.get("CONDITIONDIRECTORYNOTEMPTY") {
-            mnt.unit.condition_directory_not_empty =
-                vals.iter().map(|(_, v)| v.clone()).collect();
+            mnt.unit.condition_directory_not_empty = vals.iter().map(|(_, v)| v.clone()).collect();
         }
         if let Some(vals) = unit.get("DEFAULTDEPENDENCIES") {
             if let Some((_, s)) = vals.first() {
@@ -1049,8 +1060,10 @@ pub fn parse_mount(name: &str, parsed: &ParsedFile) -> Result<Mount, ParseError>
         }
         if let Some(vals) = unit.get("CONDITIONFIRSTBOOT") {
             if let Some((_, s)) = vals.first() {
-                mnt.unit.condition_first_boot =
-                    Some(matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on"));
+                mnt.unit.condition_first_boot = Some(matches!(
+                    s.to_lowercase().as_str(),
+                    "yes" | "true" | "1" | "on"
+                ));
             }
         }
         if let Some(vals) = unit.get("CONDITIONNEEDSUPDATE") {
@@ -1175,8 +1188,7 @@ pub fn parse_socket(name: &str, parsed: &ParsedFile) -> Result<Socket, ParseErro
             sock.unit.condition_path_exists = vals.iter().map(|(_, v)| v.clone()).collect();
         }
         if let Some(vals) = unit.get("CONDITIONDIRECTORYNOTEMPTY") {
-            sock.unit.condition_directory_not_empty =
-                vals.iter().map(|(_, v)| v.clone()).collect();
+            sock.unit.condition_directory_not_empty = vals.iter().map(|(_, v)| v.clone()).collect();
         }
         if let Some(vals) = unit.get("DEFAULTDEPENDENCIES") {
             if let Some((_, s)) = vals.first() {
@@ -1198,8 +1210,10 @@ pub fn parse_socket(name: &str, parsed: &ParsedFile) -> Result<Socket, ParseErro
         }
         if let Some(vals) = unit.get("CONDITIONFIRSTBOOT") {
             if let Some((_, s)) = vals.first() {
-                sock.unit.condition_first_boot =
-                    Some(matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on"));
+                sock.unit.condition_first_boot = Some(matches!(
+                    s.to_lowercase().as_str(),
+                    "yes" | "true" | "1" | "on"
+                ));
             }
         }
         if let Some(vals) = unit.get("CONDITIONNEEDSUPDATE") {
@@ -1321,9 +1335,9 @@ pub fn parse_socket(name: &str, parsed: &ParsedFile) -> Result<Socket, ParseErro
         // Symlinks
         if let Some(vals) = socket.get("SYMLINKS") {
             for (_, v) in vals {
-                sock.socket.symlinks.extend(
-                    v.split_whitespace().map(|s| s.to_string())
-                );
+                sock.socket
+                    .symlinks
+                    .extend(v.split_whitespace().map(|s| s.to_string()));
             }
         }
 
@@ -1401,8 +1415,7 @@ pub fn parse_timer(name: &str, parsed: &ParsedFile) -> Result<Timer, ParseError>
             tmr.unit.condition_path_exists = vals.iter().map(|(_, v)| v.clone()).collect();
         }
         if let Some(vals) = unit.get("CONDITIONDIRECTORYNOTEMPTY") {
-            tmr.unit.condition_directory_not_empty =
-                vals.iter().map(|(_, v)| v.clone()).collect();
+            tmr.unit.condition_directory_not_empty = vals.iter().map(|(_, v)| v.clone()).collect();
         }
         if let Some(vals) = unit.get("DEFAULTDEPENDENCIES") {
             if let Some((_, s)) = vals.first() {
@@ -1424,8 +1437,10 @@ pub fn parse_timer(name: &str, parsed: &ParsedFile) -> Result<Timer, ParseError>
         }
         if let Some(vals) = unit.get("CONDITIONFIRSTBOOT") {
             if let Some((_, s)) = vals.first() {
-                tmr.unit.condition_first_boot =
-                    Some(matches!(s.to_lowercase().as_str(), "yes" | "true" | "1" | "on"));
+                tmr.unit.condition_first_boot = Some(matches!(
+                    s.to_lowercase().as_str(),
+                    "yes" | "true" | "1" | "on"
+                ));
             }
         }
         if let Some(vals) = unit.get("CONDITIONNEEDSUPDATE") {
@@ -2077,19 +2092,29 @@ SystemCallFilter=@system-service ~@privileged
         assert!(svc.service.protect_kernel_modules);
         assert_eq!(svc.service.protect_proc, ProtectProc::Invisible);
 
-        assert_eq!(svc.service.capability_bounding_set, vec![
-            "CAP_NET_BIND_SERVICE", "CAP_DAC_OVERRIDE"
-        ]);
-        assert_eq!(svc.service.ambient_capabilities, vec!["CAP_NET_BIND_SERVICE"]);
+        assert_eq!(
+            svc.service.capability_bounding_set,
+            vec!["CAP_NET_BIND_SERVICE", "CAP_DAC_OVERRIDE"]
+        );
+        assert_eq!(
+            svc.service.ambient_capabilities,
+            vec!["CAP_NET_BIND_SERVICE"]
+        );
 
         // RestrictNamespaces=yes means block all (empty vec)
         assert_eq!(svc.service.restrict_namespaces, Some(Vec::new()));
 
         assert_eq!(svc.service.read_write_paths.len(), 2);
-        assert_eq!(svc.service.read_only_paths, vec![PathBuf::from("/etc/myservice")]);
+        assert_eq!(
+            svc.service.read_only_paths,
+            vec![PathBuf::from("/etc/myservice")]
+        );
         assert_eq!(svc.service.inaccessible_paths, vec![PathBuf::from("/home")]);
 
-        assert_eq!(svc.service.system_call_filter, vec!["@system-service", "~@privileged"]);
+        assert_eq!(
+            svc.service.system_call_filter,
+            vec!["@system-service", "~@privileged"]
+        );
     }
 
     #[test]
@@ -2111,7 +2136,10 @@ Options=mode=1777,strictatime,nosuid,nodev,size=50%
         let parsed = parse_file(content).unwrap();
         let mnt = parse_mount("tmp.mount", &parsed).unwrap();
 
-        assert_eq!(mnt.unit.description, Some("Temporary Directory /tmp".into()));
+        assert_eq!(
+            mnt.unit.description,
+            Some("Temporary Directory /tmp".into())
+        );
         assert!(!mnt.unit.default_dependencies);
         assert!(mnt.unit.conflicts.contains(&"umount.target".into()));
         assert!(mnt.unit.before.contains(&"local-fs.target".into()));
@@ -2120,7 +2148,10 @@ Options=mode=1777,strictatime,nosuid,nodev,size=50%
         assert_eq!(mnt.mount.what, "tmpfs");
         assert_eq!(mnt.mount.r#where, "/tmp");
         assert_eq!(mnt.mount.fs_type, Some("tmpfs".into()));
-        assert_eq!(mnt.mount.options, Some("mode=1777,strictatime,nosuid,nodev,size=50%".into()));
+        assert_eq!(
+            mnt.mount.options,
+            Some("mode=1777,strictatime,nosuid,nodev,size=50%".into())
+        );
     }
 
     #[test]
@@ -2144,7 +2175,10 @@ Options=nosuid,nodev
         assert_eq!(mnt.mount.what, "hugetlbfs");
         assert_eq!(mnt.mount.r#where, "/dev/hugepages");
         assert_eq!(mnt.mount.fs_type, Some("hugetlbfs".into()));
-        assert!(mnt.unit.condition_path_exists.contains(&"/sys/kernel/mm/hugepages".into()));
+        assert!(mnt
+            .unit
+            .condition_path_exists
+            .contains(&"/sys/kernel/mm/hugepages".into()));
     }
 
     #[test]
@@ -2183,7 +2217,10 @@ Before=slices.target
         let slice = parse_slice("user.slice", &parsed).unwrap();
 
         assert_eq!(slice.name, "user.slice");
-        assert_eq!(slice.unit.description, Some("User and Session Slice".into()));
+        assert_eq!(
+            slice.unit.description,
+            Some("User and Session Slice".into())
+        );
         assert!(slice.unit.before.contains(&"slices.target".into()));
     }
 
@@ -2214,10 +2251,16 @@ DefaultDependencies=no
 
         // Nested slices
         let slice = Slice::new("user-1000.slice".to_string());
-        assert_eq!(slice.cgroup_path(), "/sys/fs/cgroup/user.slice/user-1000.slice");
+        assert_eq!(
+            slice.cgroup_path(),
+            "/sys/fs/cgroup/user.slice/user-1000.slice"
+        );
 
         let slice = Slice::new("system-systemd-cryptsetup.slice".to_string());
-        assert_eq!(slice.cgroup_path(), "/sys/fs/cgroup/system.slice/system-systemd-cryptsetup.slice");
+        assert_eq!(
+            slice.cgroup_path(),
+            "/sys/fs/cgroup/system.slice/system-systemd-cryptsetup.slice"
+        );
     }
 
     #[test]
@@ -2233,9 +2276,15 @@ ListenStream=/run/dbus/system_bus_socket
         let sock = parse_socket("dbus.socket", &parsed).unwrap();
 
         assert_eq!(sock.name, "dbus.socket");
-        assert_eq!(sock.unit.description, Some("D-Bus System Message Bus Socket".into()));
+        assert_eq!(
+            sock.unit.description,
+            Some("D-Bus System Message Bus Socket".into())
+        );
         assert_eq!(sock.socket.listeners.len(), 1);
-        assert_eq!(sock.socket.listeners[0].address, "/run/dbus/system_bus_socket");
+        assert_eq!(
+            sock.socket.listeners[0].address,
+            "/run/dbus/system_bus_socket"
+        );
         assert_eq!(sock.socket.listeners[0].listen_type, ListenType::Stream);
         assert!(!sock.socket.accept);
         assert_eq!(sock.service_name(), "dbus.service");
@@ -2332,7 +2381,10 @@ ListenDatagram=/run/systemd/journal/syslog
         let sock = parse_socket("syslog.socket", &parsed).unwrap();
 
         assert_eq!(sock.socket.listeners[0].listen_type, ListenType::Datagram);
-        assert_eq!(sock.socket.listeners[0].address, "/run/systemd/journal/syslog");
+        assert_eq!(
+            sock.socket.listeners[0].address,
+            "/run/systemd/journal/syslog"
+        );
     }
 
     #[test]
@@ -2350,9 +2402,18 @@ OnUnitActiveSec=1d
         let tmr = parse_timer("systemd-tmpfiles-clean.timer", &parsed).unwrap();
 
         assert_eq!(tmr.name, "systemd-tmpfiles-clean.timer");
-        assert_eq!(tmr.unit.description, Some("Daily Cleanup of Temporary Directories".into()));
-        assert_eq!(tmr.timer.on_boot_sec, Some(std::time::Duration::from_secs(15 * 60)));
-        assert_eq!(tmr.timer.on_unit_active_sec, Some(std::time::Duration::from_secs(86400)));
+        assert_eq!(
+            tmr.unit.description,
+            Some("Daily Cleanup of Temporary Directories".into())
+        );
+        assert_eq!(
+            tmr.timer.on_boot_sec,
+            Some(std::time::Duration::from_secs(15 * 60))
+        );
+        assert_eq!(
+            tmr.timer.on_unit_active_sec,
+            Some(std::time::Duration::from_secs(86400))
+        );
         assert_eq!(tmr.service_name(), "systemd-tmpfiles-clean.service");
     }
 
@@ -2378,7 +2439,10 @@ WantedBy=timers.target
         assert!(tmr.timer.on_calendar[0].is_weekly());
         assert_eq!(tmr.timer.accuracy_sec, std::time::Duration::from_secs(3600));
         assert!(tmr.timer.persistent);
-        assert_eq!(tmr.timer.randomized_delay_sec, Some(std::time::Duration::from_secs(6000)));
+        assert_eq!(
+            tmr.timer.randomized_delay_sec,
+            Some(std::time::Duration::from_secs(6000))
+        );
         assert!(tmr.install.wanted_by.contains(&"timers.target".into()));
     }
 
@@ -2397,7 +2461,10 @@ Persistent=true
         let tmr = parse_timer("shadow.timer", &parsed).unwrap();
 
         assert!(tmr.timer.on_calendar[0].is_daily());
-        assert_eq!(tmr.timer.accuracy_sec, std::time::Duration::from_secs(12 * 3600));
+        assert_eq!(
+            tmr.timer.accuracy_sec,
+            std::time::Duration::from_secs(12 * 3600)
+        );
         assert!(tmr.timer.persistent);
     }
 
@@ -2442,12 +2509,22 @@ Unit=my-special.service
         assert!(matches!(CalendarSpec::parse("monthly"), CalendarSpec::Named(s) if s == "monthly"));
 
         // Day of week
-        assert!(matches!(CalendarSpec::parse("Sat"), CalendarSpec::DayOfWeek(_)));
-        assert!(matches!(CalendarSpec::parse("Sun"), CalendarSpec::DayOfWeek(_)));
+        assert!(matches!(
+            CalendarSpec::parse("Sat"),
+            CalendarSpec::DayOfWeek(_)
+        ));
+        assert!(matches!(
+            CalendarSpec::parse("Sun"),
+            CalendarSpec::DayOfWeek(_)
+        ));
 
         // Time only
         match CalendarSpec::parse("4:10") {
-            CalendarSpec::Time { hour, minute, second } => {
+            CalendarSpec::Time {
+                hour,
+                minute,
+                second,
+            } => {
                 assert_eq!(hour, 4);
                 assert_eq!(minute, 10);
                 assert_eq!(second, 0);
@@ -2456,7 +2533,10 @@ Unit=my-special.service
         }
 
         // Full expression
-        assert!(matches!(CalendarSpec::parse("*-*-* *:00:00"), CalendarSpec::Full(_)));
+        assert!(matches!(
+            CalendarSpec::parse("*-*-* *:00:00"),
+            CalendarSpec::Full(_)
+        ));
     }
 
     #[test]
@@ -2542,7 +2622,10 @@ ExecStart=/bin/true
         let parsed = parse_file(content).unwrap();
         let svc = parse_service("debug.service", &parsed).unwrap();
 
-        assert_eq!(svc.unit.condition_kernel_command_line, vec!["debug", "!quiet"]);
+        assert_eq!(
+            svc.unit.condition_kernel_command_line,
+            vec!["debug", "!quiet"]
+        );
     }
 
     #[test]
@@ -2668,8 +2751,14 @@ WantedBy=multi-user.target
 
         assert_eq!(path_unit.name, "cups.path");
         assert_eq!(path_unit.unit.description, Some("CUPS Scheduler".into()));
-        assert_eq!(path_unit.path.path_exists, vec!["/var/cache/cups/org.cups.cupsd"]);
-        assert!(path_unit.install.wanted_by.contains(&"multi-user.target".into()));
+        assert_eq!(
+            path_unit.path.path_exists,
+            vec!["/var/cache/cups/org.cups.cupsd"]
+        );
+        assert!(path_unit
+            .install
+            .wanted_by
+            .contains(&"multi-user.target".into()));
         assert_eq!(path_unit.activated_unit(), "cups.service");
     }
 
@@ -2691,9 +2780,15 @@ MakeDirectory=yes
         assert_eq!(path_unit.name, "systemd-ask-password-wall.path");
         assert!(!path_unit.unit.default_dependencies);
         assert!(path_unit.unit.before.contains(&"paths.target".into()));
-        assert_eq!(path_unit.path.directory_not_empty, vec!["/run/systemd/ask-password"]);
+        assert_eq!(
+            path_unit.path.directory_not_empty,
+            vec!["/run/systemd/ask-password"]
+        );
         assert!(path_unit.path.make_directory);
-        assert_eq!(path_unit.activated_unit(), "systemd-ask-password-wall.service");
+        assert_eq!(
+            path_unit.activated_unit(),
+            "systemd-ask-password-wall.service"
+        );
     }
 
     #[test]
@@ -2730,7 +2825,10 @@ Sockets=systemd-journald.socket systemd-journald-dev-log.socket
         let svc = parse_service("systemd-journald.service", &parsed).unwrap();
 
         assert_eq!(svc.service.sockets.len(), 2);
-        assert!(svc.service.sockets.contains(&"systemd-journald.socket".to_string()));
+        assert!(svc
+            .service
+            .sockets
+            .contains(&"systemd-journald.socket".to_string()));
         assert!(svc
             .service
             .sockets

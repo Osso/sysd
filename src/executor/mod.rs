@@ -262,6 +262,9 @@ mod tests {
         assert_eq!(config.program, config2.program);
         assert_eq!(config.args, config2.args);
         assert_eq!(config.uid, config2.uid);
-        assert_eq!(config.sandbox.no_new_privileges, config2.sandbox.no_new_privileges);
+        assert_eq!(
+            config.sandbox.no_new_privileges,
+            config2.sandbox.no_new_privileges
+        );
     }
 }

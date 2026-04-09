@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Warning: failed to load fstab: {}", e);
     }
     let plan = mgr.get_boot_plan(&target).await?;
-    
+
     // Check what dbus units are loaded
     eprintln!("Loaded dbus units:");
     for (name, unit, _) in mgr.list_units() {
@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     eprintln!();
-    
+
     for unit in &plan {
         println!("{}", unit);
     }

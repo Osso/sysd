@@ -77,4 +77,3 @@ pub async fn watch_socket(
         }
     }
 }
-

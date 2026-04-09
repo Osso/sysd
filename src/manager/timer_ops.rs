@@ -124,8 +124,8 @@ impl Manager {
         if let Some(unit) = self.units.get(timer_name).cloned() {
             if let Some(timer) = unit.as_timer() {
                 // Check for repeating timer conditions (OnUnitActiveSec, OnCalendar)
-                let should_repeat = timer.timer.on_unit_active_sec.is_some()
-                    || !timer.timer.on_calendar.is_empty();
+                let should_repeat =
+                    timer.timer.on_unit_active_sec.is_some() || !timer.timer.on_calendar.is_empty();
 
                 if should_repeat {
                     if let Some(delay) =

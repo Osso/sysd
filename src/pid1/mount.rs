@@ -181,7 +181,10 @@ fn mount_one(mp: &MountPoint) -> Result<(), MountError> {
 
     // Mount the filesystem
     mount(Some(mp.source), target, Some(mp.fstype), mp.flags, mp.data).map_err(|e| {
-        kmsg(&format!("FAILED to mount {} on {}: {}", mp.fstype, mp.target, e));
+        kmsg(&format!(
+            "FAILED to mount {} on {}: {}",
+            mp.fstype, mp.target, e
+        ));
         MountError::Mount {
             target: mp.target.to_string(),
             fstype: mp.fstype.to_string(),

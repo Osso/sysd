@@ -143,8 +143,18 @@ fn main() {
     }
 
     let request = match args.command {
-        Command::List { user: list_user, unit_type } => Request::List { user: list_user || user_mode, unit_type },
-        Command::Start { name, wait, job_mode } => {
+        Command::List {
+            user: list_user,
+            unit_type,
+        } => Request::List {
+            user: list_user || user_mode,
+            unit_type,
+        },
+        Command::Start {
+            name,
+            wait,
+            job_mode,
+        } => {
             // job_mode is accepted for compatibility but not fully implemented
             // replace-irreversibly is used by niri-session shutdown
             if job_mode != "replace" && job_mode != "fail" {

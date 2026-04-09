@@ -117,8 +117,7 @@ fn next_calendar_trigger(spec: &CalendarSpec) -> Option<Duration> {
                         .and_then(|d| d.with_month(1))
                         .and_then(|d| d.with_day(1))
                 } else {
-                    now.with_month(now.month() + 1)
-                        .and_then(|d| d.with_day(1))
+                    now.with_month(now.month() + 1).and_then(|d| d.with_day(1))
                 };
                 next_month.map(|next| {
                     let next = next
@@ -167,7 +166,11 @@ fn next_calendar_trigger(spec: &CalendarSpec) -> Option<Duration> {
                 secs_until_midnight + (days_until as u64 - 1) * 86400,
             ))
         }
-        CalendarSpec::Time { hour, minute, second } => {
+        CalendarSpec::Time {
+            hour,
+            minute,
+            second,
+        } => {
             // Today or tomorrow at the specified time
             let target_secs = (*hour * 3600 + *minute * 60 + *second) as u64;
             let now_secs = (now.hour() * 3600 + now.minute() * 60 + now.second()) as u64;
@@ -214,11 +217,7 @@ pub async fn watch_timer(
     delay: Duration,
     tx: mpsc::Sender<TimerFired>,
 ) {
-    log::debug!(
-        "{}: scheduling to fire in {:?}",
-        timer_name,
-        delay
-    );
+    log::debug!("{}: scheduling to fire in {:?}", timer_name, delay);
 
     sleep(delay).await;
 

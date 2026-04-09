@@ -109,7 +109,10 @@ fn setup_socket_fds(count: usize, names: &[String]) -> Result<(), String> {
     let pid = std::process::id();
 
     // Debug: log socket activation setup
-    eprintln!("sysd-executor: socket activation: count={}, names={:?}", count, names);
+    eprintln!(
+        "sysd-executor: socket activation: count={}, names={:?}",
+        count, names
+    );
 
     unsafe {
         let listen_fds_key = CString::new("LISTEN_FDS").unwrap();
@@ -123,7 +126,12 @@ fn setup_socket_fds(count: usize, names: &[String]) -> Result<(), String> {
         // Set LISTEN_FDNAMES (colon-separated list of names)
         // If names is shorter than count, pad with "unknown"
         let fd_names: Vec<String> = (0..count)
-            .map(|i| names.get(i).cloned().unwrap_or_else(|| "unknown".to_string()))
+            .map(|i| {
+                names
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string())
+            })
             .collect();
         let fd_names_str = fd_names.join(":");
         let listen_fdnames_key = CString::new("LISTEN_FDNAMES").unwrap();
@@ -139,7 +147,11 @@ fn setup_socket_fds(count: usize, names: &[String]) -> Result<(), String> {
                 libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
                 eprintln!("sysd-executor: socket fd {} is valid (flags={})", fd, flags);
             } else {
-                eprintln!("sysd-executor: socket fd {} is INVALID: {}", fd, std::io::Error::last_os_error());
+                eprintln!(
+                    "sysd-executor: socket fd {} is INVALID: {}",
+                    fd,
+                    std::io::Error::last_os_error()
+                );
             }
         }
     }
@@ -147,10 +159,7 @@ fn setup_socket_fds(count: usize, names: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn setup_environment(
-    env: &HashMap<String, String>,
-    unset: &[String],
-) -> Result<(), String> {
+fn setup_environment(env: &HashMap<String, String>, unset: &[String]) -> Result<(), String> {
     // Debug: log NOTIFY_SOCKET if present
     if let Some(notify_socket) = env.get("NOTIFY_SOCKET") {
         eprintln!("sysd-executor: NOTIFY_SOCKET={}", notify_socket);
@@ -327,8 +336,7 @@ fn setup_tty(config: &ExecConfig) -> Result<(), String> {
 }
 
 fn exec_program(program: &str, args: &[String]) -> Result<(), String> {
-    let program_c =
-        CString::new(program).map_err(|_| "Invalid program path (contains null)")?;
+    let program_c = CString::new(program).map_err(|_| "Invalid program path (contains null)")?;
 
     let mut argv: Vec<CString> = Vec::with_capacity(args.len() + 1);
     argv.push(program_c.clone());
@@ -349,10 +357,7 @@ fn exec_program(program: &str, args: &[String]) -> Result<(), String> {
     }
 
     // If we get here, exec failed
-    Err(format!(
-        "execv failed: {}",
-        std::io::Error::last_os_error()
-    ))
+    Err(format!("execv failed: {}", std::io::Error::last_os_error()))
 }
 
 // ============================================================================
@@ -581,8 +586,16 @@ fn apply_ambient_capabilities(caps: &[String]) -> Result<(), String> {
     };
     // We need 2 CapUserData structs for 64-bit capability set (caps 0-31 and 32-63)
     let mut data = [
-        CapUserData { effective: 0, permitted: 0, inheritable: 0 },
-        CapUserData { effective: 0, permitted: 0, inheritable: 0 },
+        CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        },
+        CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        },
     ];
 
     unsafe {

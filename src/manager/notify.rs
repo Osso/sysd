@@ -132,7 +132,12 @@ impl AsyncNotifyListener {
                 match result {
                     Ok((len, pid, fds)) => {
                         if let Ok(msg) = std::str::from_utf8(&buf[..len]) {
-                            log::info!("NOTIFY_RAW: pid={}, len={}, msg={:?}", pid, len, msg.trim());
+                            log::info!(
+                                "NOTIFY_RAW: pid={}, len={}, msg={:?}",
+                                pid,
+                                len,
+                                msg.trim()
+                            );
                             let notify_msg = parse_notify_message(msg, pid, fds);
                             if tx.send(notify_msg).await.is_err() {
                                 break; // Channel closed
@@ -189,12 +194,13 @@ fn recv_with_creds(
 ) -> std::io::Result<(usize, u32, Vec<RawFd>)> {
     let mut iov = [IoSliceMut::new(buf)];
 
-    let msg = recvmsg::<()>(fd.as_raw_fd(), &mut iov, Some(cmsg_buf), MsgFlags::empty())
-        .map_err(|e| {
+    let msg = recvmsg::<()>(fd.as_raw_fd(), &mut iov, Some(cmsg_buf), MsgFlags::empty()).map_err(
+        |e| {
             // Convert nix::Errno to std::io::Error preserving the raw OS error code
             // This is critical for EAGAIN/EWOULDBLOCK handling in the caller
             std::io::Error::from_raw_os_error(e as i32)
-        })?;
+        },
+    )?;
 
     // Extract PID from SCM_CREDENTIALS and FDs from SCM_RIGHTS
     let mut sender_pid = 0u32;

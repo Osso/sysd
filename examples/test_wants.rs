@@ -1,5 +1,5 @@
-use sysd::units;
 use std::path::Path;
+use sysd::units;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

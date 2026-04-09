@@ -53,15 +53,14 @@ fn setup_logging(user_mode: bool) {
         .chain(std::io::stderr());
 
     // Try to add file output
-    if let Ok(file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
+    if let Ok(file) = OpenOptions::new().create(true).append(true).open(&log_path) {
         dispatch = dispatch.chain(file);
         eprintln!("sysd: Logging to {}", log_path);
     } else {
-        eprintln!("sysd: Could not open log file {}, logging to stderr only", log_path);
+        eprintln!(
+            "sysd: Could not open log file {}, logging to stderr only",
+            log_path
+        );
     }
 
     if let Err(e) = dispatch.apply() {
@@ -306,7 +305,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         log::debug!(
                             "D-Bus not ready yet (attempt {}): {}, retrying in {:?}",
-                            attempts, e, delay
+                            attempts,
+                            e,
+                            delay
                         );
                         tokio::time::sleep(delay).await;
                         // Exponential backoff, max 5 seconds
@@ -333,7 +334,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 match DbusServer::new_session(Arc::clone(&manager_dbus)).await {
                     Ok(_server) => {
-                        info!("D-Bus interface available on session bus at org.freedesktop.systemd1");
+                        info!(
+                            "D-Bus interface available on session bus at org.freedesktop.systemd1"
+                        );
                         // Keep server alive
                         std::future::pending::<()>().await;
                     }
@@ -342,14 +345,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if attempts >= max_attempts {
                             log::warn!(
                                 "Failed to start D-Bus server on session bus after {} attempts: {}",
-                                attempts, e
+                                attempts,
+                                e
                             );
                             log::info!("User mode will continue without D-Bus interface");
                             break;
                         }
                         log::debug!(
                             "Session D-Bus not ready yet (attempt {}): {}, retrying in {:?}",
-                            attempts, e, delay
+                            attempts,
+                            e,
+                            delay
                         );
                         tokio::time::sleep(delay).await;
                         delay = std::cmp::min(delay * 2, std::time::Duration::from_secs(3));
@@ -438,7 +444,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Determine socket path based on mode
     let sock_path = socket_path(user_mode);
     let server = Server::bind(&sock_path)?;
-    info!("sysd{} listening on {}", if user_mode { " (user)" } else { "" }, sock_path);
+    info!(
+        "sysd{} listening on {}",
+        if user_mode { " (user)" } else { "" },
+        sock_path
+    );
 
     // Boot to default target if requested
     if should_boot {
@@ -738,7 +748,11 @@ async fn handle_request(request: Request, manager: &SharedManager) -> Response {
                     if restarted.is_empty() {
                         info!("All units in sync");
                     } else {
-                        info!("Restarted {} changed units: {:?}", restarted.len(), restarted);
+                        info!(
+                            "Restarted {} changed units: {:?}",
+                            restarted.len(),
+                            restarted
+                        );
                     }
                     Response::BootPlan(restarted) // Reuse BootPlan for list of unit names
                 }

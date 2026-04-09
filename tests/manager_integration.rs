@@ -461,7 +461,10 @@ TimeoutStopSec=1
 
     // Verify service is now running
     let state = manager.status("test-activation.service").unwrap();
-    assert!(state.is_active(), "service should be active after activation");
+    assert!(
+        state.is_active(),
+        "service should be active after activation"
+    );
     assert!(state.main_pid.is_some(), "service should have a PID");
 
     // Cleanup: kill process directly to avoid stop timeout

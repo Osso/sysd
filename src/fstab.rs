@@ -51,7 +51,9 @@ impl FstabEntry {
 
     /// Check if this is a bind mount
     pub fn is_bind(&self) -> bool {
-        self.options.split(',').any(|o| o.trim() == "bind" || o.trim() == "rbind")
+        self.options
+            .split(',')
+            .any(|o| o.trim() == "bind" || o.trim() == "rbind")
     }
 
     /// Convert to a Mount unit
@@ -229,7 +231,10 @@ server:/export  /mnt/nfs  nfs  defaults,_netdev  0  0
         let root = entries.iter().find(|e| e.mount_point == "/").unwrap();
         assert!(root.is_auto());
 
-        let usb = entries.iter().find(|e| e.mount_point == "/mnt/usb").unwrap();
+        let usb = entries
+            .iter()
+            .find(|e| e.mount_point == "/mnt/usb")
+            .unwrap();
         assert!(!usb.is_auto());
     }
 
@@ -237,7 +242,10 @@ server:/export  /mnt/nfs  nfs  defaults,_netdev  0  0
     fn test_is_network() {
         let entries = parse_fstab_content(SAMPLE_FSTAB);
 
-        let nfs = entries.iter().find(|e| e.mount_point == "/mnt/nfs").unwrap();
+        let nfs = entries
+            .iter()
+            .find(|e| e.mount_point == "/mnt/nfs")
+            .unwrap();
         assert!(nfs.is_network());
 
         let root = entries.iter().find(|e| e.mount_point == "/").unwrap();
@@ -248,7 +256,10 @@ server:/export  /mnt/nfs  nfs  defaults,_netdev  0  0
     fn test_is_bind() {
         let entries = parse_fstab_content(SAMPLE_FSTAB);
 
-        let bind = entries.iter().find(|e| e.mount_point == "/srv/data").unwrap();
+        let bind = entries
+            .iter()
+            .find(|e| e.mount_point == "/srv/data")
+            .unwrap();
         assert!(bind.is_bind());
 
         let root = entries.iter().find(|e| e.mount_point == "/").unwrap();
@@ -284,24 +295,42 @@ server:/export  /mnt/nfs  nfs  defaults,_netdev  0  0
     #[test]
     fn test_to_mount_unit_nfs() {
         let entries = parse_fstab_content(SAMPLE_FSTAB);
-        let nfs = entries.iter().find(|e| e.mount_point == "/mnt/nfs").unwrap();
+        let nfs = entries
+            .iter()
+            .find(|e| e.mount_point == "/mnt/nfs")
+            .unwrap();
         let unit = nfs.to_mount_unit();
 
         assert_eq!(unit.name, "mnt-nfs.mount");
-        assert!(unit.unit.after.contains(&"network-online.target".to_string()));
-        assert!(unit.unit.wants.contains(&"network-online.target".to_string()));
+        assert!(unit
+            .unit
+            .after
+            .contains(&"network-online.target".to_string()));
+        assert!(unit
+            .unit
+            .wants
+            .contains(&"network-online.target".to_string()));
     }
 
     #[test]
     fn test_to_mount_unit_bind() {
         let entries = parse_fstab_content(SAMPLE_FSTAB);
-        let bind = entries.iter().find(|e| e.mount_point == "/srv/data").unwrap();
+        let bind = entries
+            .iter()
+            .find(|e| e.mount_point == "/srv/data")
+            .unwrap();
         let unit = bind.to_mount_unit();
 
         assert_eq!(unit.name, "srv-data.mount");
         // Bind mounts require the source to be mounted
-        assert!(unit.unit.requires.contains(&"home-user-data.mount".to_string()));
-        assert!(unit.unit.after.contains(&"home-user-data.mount".to_string()));
+        assert!(unit
+            .unit
+            .requires
+            .contains(&"home-user-data.mount".to_string()));
+        assert!(unit
+            .unit
+            .after
+            .contains(&"home-user-data.mount".to_string()));
     }
 
     #[test]
@@ -314,7 +343,9 @@ server:/export  /mnt/nfs  nfs  defaults,_netdev  0  0
         let units = generate_mount_units(&fstab_path).unwrap();
 
         // Should exclude swap and noauto
-        assert!(!units.iter().any(|u| u.mount.fs_type == Some("swap".to_string())));
+        assert!(!units
+            .iter()
+            .any(|u| u.mount.fs_type == Some("swap".to_string())));
         assert!(!units.iter().any(|u| u.name == "mnt-usb.mount"));
 
         // Should include others

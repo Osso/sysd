@@ -107,7 +107,9 @@ impl ManagerInterface {
                             // Set ownership
                             unsafe {
                                 libc::chown(
-                                    std::ffi::CString::new(runtime_dir.as_str()).unwrap().as_ptr(),
+                                    std::ffi::CString::new(runtime_dir.as_str())
+                                        .unwrap()
+                                        .as_ptr(),
                                     uid,
                                     uid,
                                 );
@@ -143,7 +145,13 @@ impl ManagerInterface {
                         if !std::path::Path::new(&bus_path).exists() {
                             let address = format!("unix:path={}", bus_path);
                             match std::process::Command::new("dbus-daemon")
-                                .args(["--session", "--address", &address, "--nofork", "--nopidfile"])
+                                .args([
+                                    "--session",
+                                    "--address",
+                                    &address,
+                                    "--nofork",
+                                    "--nopidfile",
+                                ])
                                 .uid(uid)
                                 .gid(uid)
                                 .env("XDG_RUNTIME_DIR", &runtime_dir)
@@ -155,12 +163,18 @@ impl ManagerInterface {
                                 Ok(child) => {
                                     log::info!(
                                         "Started user D-Bus daemon for uid {} (PID {}) at {}",
-                                        uid, child.id(), bus_path
+                                        uid,
+                                        child.id(),
+                                        bus_path
                                     );
                                     std::thread::sleep(std::time::Duration::from_millis(100));
                                 }
                                 Err(e) => {
-                                    log::error!("Failed to start user D-Bus for uid {}: {}", uid, e);
+                                    log::error!(
+                                        "Failed to start user D-Bus for uid {}: {}",
+                                        uid,
+                                        e
+                                    );
                                     return;
                                 }
                             }
@@ -183,7 +197,9 @@ impl ManagerInterface {
                                 let pid = child.id();
                                 log::info!(
                                     "Started user sysd for uid {} (PID {}) at {}",
-                                    uid, pid, sysd_socket
+                                    uid,
+                                    pid,
+                                    sysd_socket
                                 );
                                 // Give sysd a moment to start
                                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -214,7 +230,9 @@ impl ManagerInterface {
             // Emit JobRemoved signal
             log::info!(
                 "Emitting JobRemoved for StartUnit: id={}, unit={}, result={}",
-                job_id, unit_name, job_result
+                job_id,
+                unit_name,
+                job_result
             );
             if let Ok(ctx) = SignalEmitter::new(&conn, "/org/freedesktop/systemd1") {
                 if let Err(e) = ManagerInterface::job_removed(
@@ -340,7 +358,10 @@ impl ManagerInterface {
                 {
                     log::warn!("Failed to emit JobRemoved signal: {}", e);
                 } else {
-                    log::info!("Scope {} created, JobRemoved emitted successfully", unit_name);
+                    log::info!(
+                        "Scope {} created, JobRemoved emitted successfully",
+                        unit_name
+                    );
                 }
             } else {
                 log::error!("Failed to create SignalEmitter for JobRemoved");
@@ -444,11 +465,19 @@ fn parse_scope_properties(
                         if let Ok(fd) = v.downcast_ref::<zbus::zvariant::Fd>() {
                             match pidfd_to_pid(fd.as_raw_fd()) {
                                 Ok(pid) => {
-                                    log::info!("PIDFDs: converted fd {} to pid {}", fd.as_raw_fd(), pid);
+                                    log::info!(
+                                        "PIDFDs: converted fd {} to pid {}",
+                                        fd.as_raw_fd(),
+                                        pid
+                                    );
                                     pids.push(pid);
                                 }
                                 Err(e) => {
-                                    log::warn!("PIDFDs: failed to convert fd {}: {}", fd.as_raw_fd(), e);
+                                    log::warn!(
+                                        "PIDFDs: failed to convert fd {}: {}",
+                                        fd.as_raw_fd(),
+                                        e
+                                    );
                                 }
                             }
                         }

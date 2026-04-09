@@ -171,7 +171,12 @@ impl Unit {
     pub fn wants_dir(&self) -> &[String] {
         match self {
             Unit::Target(t) => &t.wants_dir,
-            Unit::Service(_) | Unit::Mount(_) | Unit::Slice(_) | Unit::Socket(_) | Unit::Timer(_) | Unit::Path(_) => &[],
+            Unit::Service(_)
+            | Unit::Mount(_)
+            | Unit::Slice(_)
+            | Unit::Socket(_)
+            | Unit::Timer(_)
+            | Unit::Path(_) => &[],
         }
     }
 

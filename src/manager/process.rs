@@ -31,12 +31,6 @@ pub struct SpawnOptions {
     pub user_environment: HashMap<String, String>,
 }
 
-/// Spawn a process for a service (convenience wrapper)
-#[allow(dead_code)]
-pub fn spawn_service(service: &Service) -> Result<Child, SpawnError> {
-    spawn_service_with_options(service, &SpawnOptions::default())
-}
-
 /// Spawn a process for a service with options
 pub fn spawn_service_with_options(
     service: &Service,
@@ -84,7 +78,11 @@ pub fn spawn_service_with_options(
         for &fd in &socket_fds {
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
             if flags < 0 {
-                log::error!("Socket fd {} is invalid: {}", fd, std::io::Error::last_os_error());
+                log::error!(
+                    "Socket fd {} is invalid: {}",
+                    fd,
+                    std::io::Error::last_os_error()
+                );
             } else {
                 log::debug!("Socket fd {} is valid (flags={})", fd, flags);
             }
@@ -145,9 +143,13 @@ pub fn spawn_service_with_options(
     let uid = options
         .dynamic_uid
         .or_else(|| service.service.user.as_ref().and_then(|u| resolve_user(u)));
-    let gid = options
-        .dynamic_gid
-        .or_else(|| service.service.group.as_ref().and_then(|g| resolve_group(g)));
+    let gid = options.dynamic_gid.or_else(|| {
+        service
+            .service
+            .group
+            .as_ref()
+            .and_then(|g| resolve_group(g))
+    });
     let limit_nofile = service.service.limit_nofile;
     let limit_nproc = service.service.limit_nproc;
     let limit_core = service.service.limit_core;
@@ -218,7 +220,9 @@ pub fn spawn_service_with_options(
                             return Err(std::io::Error::last_os_error());
                         }
                         // Close original if it's not in the target range
-                        if fd >= SD_LISTEN_FDS_START + socket_fds.len() as RawFd || fd < SD_LISTEN_FDS_START {
+                        if fd >= SD_LISTEN_FDS_START + socket_fds.len() as RawFd
+                            || fd < SD_LISTEN_FDS_START
+                        {
                             libc::close(fd);
                         }
                     }
@@ -356,9 +360,9 @@ pub fn spawn_service_with_options(
 
     // Spawn the process
     log::debug!("Spawning: {} {:?}", program, args);
-    let child = cmd.spawn().map_err(|e| {
-        SpawnError::Spawn(format!("{}: {} {:?}", e, program, args))
-    })?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| SpawnError::Spawn(format!("{}: {} {:?}", e, program, args)))?;
 
     Ok(child)
 }
@@ -497,7 +501,9 @@ fn create_service_directories(
     use std::path::Path;
 
     // Extract base name from service name (remove .service suffix)
-    let base_name = service_name.strip_suffix(".service").unwrap_or(service_name);
+    let base_name = service_name
+        .strip_suffix(".service")
+        .unwrap_or(service_name);
 
     // Helper to create a directory with correct ownership
     let create_dir = |base: &str, name: &str| -> std::io::Result<()> {
@@ -533,7 +539,11 @@ fn create_service_directories(
     for name in &service.configuration_directory {
         let dir_name = if name.is_empty() { base_name } else { name };
         if let Err(e) = create_dir("/etc", dir_name) {
-            log::warn!("Failed to create configuration directory {}: {}", dir_name, e);
+            log::warn!(
+                "Failed to create configuration directory {}: {}",
+                dir_name,
+                e
+            );
         }
     }
 
@@ -629,9 +639,13 @@ pub fn build_exec_config(
     let uid = options
         .dynamic_uid
         .or_else(|| service.service.user.as_ref().and_then(|u| resolve_user(u)));
-    let gid = options
-        .dynamic_gid
-        .or_else(|| service.service.group.as_ref().and_then(|g| resolve_group(g)));
+    let gid = options.dynamic_gid.or_else(|| {
+        service
+            .service
+            .group
+            .as_ref()
+            .and_then(|g| resolve_group(g))
+    });
 
     // Socket FD count and names
     let mut all_fds = options.socket_fds.clone();
@@ -837,9 +851,9 @@ pub fn spawn_service_via_executor(
         config.args.join(" ")
     );
 
-    let result = cmd.spawn().map_err(|e| {
-        SpawnError::Spawn(format!("Failed to spawn executor: {}", e))
-    });
+    let result = cmd
+        .spawn()
+        .map_err(|e| SpawnError::Spawn(format!("Failed to spawn executor: {}", e)));
 
     // Close memfd in parent - child has its own copy after fork
     // This prevents FD leak on repeated spawns (especially during service restarts)

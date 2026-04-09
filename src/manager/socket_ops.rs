@@ -62,8 +62,12 @@ impl Manager {
         }
 
         // Store the FDs
-        log::debug!("{}: storing socket FDs {:?} (total sockets with FDs: {})",
-            name, fds, self.socket_fds.len() + 1);
+        log::debug!(
+            "{}: storing socket FDs {:?} (total sockets with FDs: {})",
+            name,
+            fds,
+            self.socket_fds.len() + 1
+        );
         self.socket_fds.insert(name.to_string(), fds.clone());
 
         // Spawn socket watcher task for activation
@@ -146,7 +150,7 @@ impl Manager {
                 }
             }
             ListenType::Fifo => self.create_fifo(&listener.address, socket),
-            ListenType::Netlink => self.create_netlink_socket(&listener.address)
+            ListenType::Netlink => self.create_netlink_socket(&listener.address),
         }
     }
 
@@ -265,9 +269,8 @@ impl Manager {
         }
 
         let mode = socket.socket.socket_mode.unwrap_or(0o644);
-        let c_path = CString::new(path).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid path")
-        })?;
+        let c_path = CString::new(path)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid path"))?;
 
         unsafe {
             if libc::mkfifo(c_path.as_ptr(), mode) < 0 {
@@ -429,7 +432,12 @@ impl Manager {
                 let mut fds = Vec::new();
                 for socket_name in &service.service.sockets {
                     if let Some(socket_fds) = self.socket_fds.get(socket_name) {
-                        log::debug!("{}: found FDs {:?} from {}", service_name, socket_fds, socket_name);
+                        log::debug!(
+                            "{}: found FDs {:?} from {}",
+                            service_name,
+                            socket_fds,
+                            socket_name
+                        );
                         fds.extend(socket_fds.iter().copied());
                     } else {
                         log::warn!("{}: socket {} not in socket_fds", service_name, socket_name);
@@ -460,13 +468,17 @@ impl Manager {
         // Helper to get fd_name for a socket, with fallback to socket name
         let get_fd_name = |socket_name: &str| -> String {
             if let Some(socket) = self.units.get(socket_name).and_then(|u| u.as_socket()) {
-                socket
-                    .socket
-                    .fd_name
-                    .clone()
-                    .unwrap_or_else(|| socket_name.strip_suffix(".socket").unwrap_or(socket_name).to_string())
+                socket.socket.fd_name.clone().unwrap_or_else(|| {
+                    socket_name
+                        .strip_suffix(".socket")
+                        .unwrap_or(socket_name)
+                        .to_string()
+                })
             } else {
-                socket_name.strip_suffix(".socket").unwrap_or(socket_name).to_string()
+                socket_name
+                    .strip_suffix(".socket")
+                    .unwrap_or(socket_name)
+                    .to_string()
             }
         };
 
@@ -538,10 +550,7 @@ impl Manager {
         // Check if service is already running under canonical name
         if let Some(state) = self.states.get(&canonical_name) {
             if state.is_active() {
-                log::debug!(
-                    "{} already running, skipping activation",
-                    canonical_name
-                );
+                log::debug!("{} already running, skipping activation", canonical_name);
                 return Ok(());
             }
         }

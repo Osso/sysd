@@ -9,6 +9,8 @@ mod enable;
 mod generators;
 mod mount_ops;
 mod notify;
+mod path_ops;
+mod path_watcher;
 mod process;
 mod runtime;
 pub mod sandbox;
@@ -19,8 +21,6 @@ mod socket_watcher;
 mod state;
 mod timer_ops;
 mod timer_scheduler;
-mod path_ops;
-mod path_watcher;
 mod virtualization;
 
 pub use deps::{CycleError, DepGraph};
@@ -426,8 +426,7 @@ impl Manager {
                 // e.g., autovt@tty2.service -> getty@.service becomes getty@tty2.service
                 if let Some(instance) = units::extract_instance(&name) {
                     if units::is_bare_template(&target_name) {
-                        units::instantiate_template(&target_name, &instance)
-                            .unwrap_or(target_name)
+                        units::instantiate_template(&target_name, &instance).unwrap_or(target_name)
                     } else {
                         target_name
                     }
@@ -464,7 +463,8 @@ impl Manager {
         }
 
         // Initialize state under the canonical name
-        self.states.insert(canonical_name.clone(), ServiceState::new());
+        self.states
+            .insert(canonical_name.clone(), ServiceState::new());
         self.units.insert(canonical_name.clone(), unit);
 
         Ok(canonical_name)
@@ -635,10 +635,16 @@ impl Manager {
             if let Some(unit) = self.units.get(&actual_name) {
                 let section = unit.unit_section();
                 // Debug: log dependencies being found
-                if !section.requires.is_empty() || !section.wants.is_empty() || !unit.wants_dir().is_empty() {
+                if !section.requires.is_empty()
+                    || !section.wants.is_empty()
+                    || !unit.wants_dir().is_empty()
+                {
                     log::debug!(
                         "{}: Requires={:?}, Wants={:?}, wants_dir={:?}",
-                        actual_name, section.requires, section.wants, unit.wants_dir()
+                        actual_name,
+                        section.requires,
+                        section.wants,
+                        unit.wants_dir()
                     );
                 }
                 // Requires= pulls units (hard dependency - fail if missing)
@@ -697,8 +703,11 @@ impl Manager {
         log::debug!("start_single({})", name);
         // Debug: log when dbus-related units start
         if name.contains("dbus") {
-            log::info!(">>> start_single({}) - socket_fds keys: {:?}", name,
-                self.socket_fds.keys().collect::<Vec<_>>());
+            log::info!(
+                ">>> start_single({}) - socket_fds keys: {:?}",
+                name,
+                self.socket_fds.keys().collect::<Vec<_>>()
+            );
         }
 
         // Load if not already loaded (may resolve symlink to different name)
@@ -741,7 +750,10 @@ impl Manager {
         // Check conditions before starting
         if let Some(reason) = self.check_conditions(unit) {
             log::info!("{}: condition failed: {}", actual_name, reason);
-            return Err(ManagerError::ConditionFailed(actual_name.to_string(), reason));
+            return Err(ManagerError::ConditionFailed(
+                actual_name.to_string(),
+                reason,
+            ));
         }
 
         // Handle mount units
@@ -788,10 +800,19 @@ impl Manager {
 
         // DEBUG: Log socket FDs being passed
         if !socket_fds.is_empty() {
-            log::info!("{}: passing socket FDs {:?} names {:?}", actual_name, socket_fds, socket_fd_names);
+            log::info!(
+                "{}: passing socket FDs {:?} names {:?}",
+                actual_name,
+                socket_fds,
+                socket_fd_names
+            );
         } else if !service.service.sockets.is_empty() {
-            log::warn!("{}: has Sockets={:?} but got NO socket FDs! socket_fds keys: {:?}",
-                actual_name, service.service.sockets, self.socket_fds.keys().collect::<Vec<_>>());
+            log::warn!(
+                "{}: has Sockets={:?} but got NO socket FDs! socket_fds keys: {:?}",
+                actual_name,
+                service.service.sockets,
+                self.socket_fds.keys().collect::<Vec<_>>()
+            );
         }
 
         // M19: DynamicUser= - allocate ephemeral UID/GID
@@ -847,11 +868,16 @@ impl Manager {
         // Commands are run asynchronously to avoid blocking socket activation
         if service.service.service_type == ServiceType::Oneshot {
             let num_commands = service.service.exec_start.len();
-            log::info!("Starting oneshot {} ({} command{})", actual_name, num_commands,
-                       if num_commands == 1 { "" } else { "s" });
+            log::info!(
+                "Starting oneshot {} ({} command{})",
+                actual_name,
+                num_commands,
+                if num_commands == 1 { "" } else { "s" }
+            );
 
             // Spawn first command
-            let child = process::spawn_service_via_executor(service, &options, &self.executor_path, 0)?;
+            let child =
+                process::spawn_service_via_executor(service, &options, &self.executor_path, 0)?;
             log::debug!("{}: spawn returned, getting PID", actual_name);
             let pid = child.id().unwrap_or(0);
             log::debug!("{}: PID is {}", actual_name, pid);
@@ -868,14 +894,23 @@ impl Manager {
             if let Some(ref cgroup_mgr) = self.cgroup_manager {
                 match cgroup_mgr.setup_service_cgroup(&actual_name, pid, &limits, slice) {
                     Ok(cgroup_path) => {
-                        log::debug!("Created cgroup {} for {}", cgroup_path.display(), actual_name);
+                        log::debug!(
+                            "Created cgroup {} for {}",
+                            cgroup_path.display(),
+                            actual_name
+                        );
                         log::info!("Created cgroup: {}", cgroup_path.display());
                         if delegate {
                             if let Err(e) = cgroup_mgr.enable_delegation(&cgroup_path) {
-                                log::warn!("Failed to enable cgroup delegation for {}: {}", actual_name, e);
+                                log::warn!(
+                                    "Failed to enable cgroup delegation for {}: {}",
+                                    actual_name,
+                                    e
+                                );
                             }
                         }
-                        self.cgroup_paths.insert(actual_name.to_string(), cgroup_path);
+                        self.cgroup_paths
+                            .insert(actual_name.to_string(), cgroup_path);
                     }
                     Err(e) => {
                         log::warn!("Failed to set up cgroup for {}: {}", actual_name, e);
@@ -935,9 +970,8 @@ impl Manager {
             cpu_quota: service.service.cpu_quota,
             tasks_max: service.service.tasks_max,
         };
-        let has_resource_limits = limits.memory_max.is_some()
-            || limits.cpu_quota.is_some()
-            || limits.tasks_max.is_some();
+        let has_resource_limits =
+            limits.memory_max.is_some() || limits.cpu_quota.is_some() || limits.tasks_max.is_some();
 
         // M18: Slice= - explicit cgroup slice placement
         let slice = service.service.slice.as_deref();
@@ -948,16 +982,25 @@ impl Manager {
         if let Some(ref cgroup_mgr) = self.cgroup_manager {
             match cgroup_mgr.setup_service_cgroup(&actual_name, pid, &limits, slice) {
                 Ok(cgroup_path) => {
-                    log::debug!("Created cgroup {} for {}", cgroup_path.display(), actual_name);
+                    log::debug!(
+                        "Created cgroup {} for {}",
+                        cgroup_path.display(),
+                        actual_name
+                    );
 
                     // M19: Enable delegation if requested
                     if delegate {
                         if let Err(e) = cgroup_mgr.enable_delegation(&cgroup_path) {
-                            log::warn!("Failed to enable cgroup delegation for {}: {}", actual_name, e);
+                            log::warn!(
+                                "Failed to enable cgroup delegation for {}: {}",
+                                actual_name,
+                                e
+                            );
                         }
                     }
 
-                    self.cgroup_paths.insert(actual_name.to_string(), cgroup_path);
+                    self.cgroup_paths
+                        .insert(actual_name.to_string(), cgroup_path);
                 }
                 Err(e) => {
                     if has_resource_limits {
@@ -994,7 +1037,8 @@ impl Manager {
         } else if is_dbus {
             // Type=dbus: wait for BusName to appear on D-Bus
             if let Some(ref bn) = bus_name {
-                self.waiting_bus_name.insert(bn.clone(), actual_name.to_string());
+                self.waiting_bus_name
+                    .insert(bn.clone(), actual_name.to_string());
                 log::info!(
                     "Started {} (PID {}), waiting for D-Bus name {}",
                     actual_name,
@@ -1305,9 +1349,13 @@ impl Manager {
         description: Option<&str>,
         pids: &[u32],
     ) -> Result<PathBuf, ManagerError> {
-        let path = self.scope_manager.register(name, slice, description, pids).await?;
+        let path = self
+            .scope_manager
+            .register(name, slice, description, pids)
+            .await?;
         // Track in states for list/status queries
-        self.states.insert(name.to_string(), ServiceState::running_scope());
+        self.states
+            .insert(name.to_string(), ServiceState::running_scope());
         Ok(path)
     }
 
@@ -1443,8 +1491,11 @@ impl Manager {
         let target = self.normalize_name(target);
 
         // Get all units needed by the target
-        let needed: std::collections::HashSet<String> =
-            self.resolve_start_order(&target).await?.into_iter().collect();
+        let needed: std::collections::HashSet<String> = self
+            .resolve_start_order(&target)
+            .await?
+            .into_iter()
+            .collect();
 
         // Find running units not in the needed set
         let to_stop: Vec<String> = self
@@ -1493,7 +1544,10 @@ impl Manager {
         for (key, value) in vars {
             self.user_environment.insert(key, value);
         }
-        log::info!("Imported {} environment variables", self.user_environment.len());
+        log::info!(
+            "Imported {} environment variables",
+            self.user_environment.len()
+        );
     }
 
     /// Unset environment variables
@@ -1535,11 +1589,19 @@ fn cleanup_runtime_directories(service: &crate::units::ServiceSection, service_n
         .unwrap_or(service_name);
 
     for name in &service.runtime_directory {
-        let dir_name = if name.is_empty() { base_name } else { name.as_str() };
+        let dir_name = if name.is_empty() {
+            base_name
+        } else {
+            name.as_str()
+        };
         let path = std::path::Path::new("/run").join(dir_name);
         if path.exists() {
             if let Err(e) = std::fs::remove_dir_all(&path) {
-                log::warn!("Failed to remove runtime directory {}: {}", path.display(), e);
+                log::warn!(
+                    "Failed to remove runtime directory {}: {}",
+                    path.display(),
+                    e
+                );
             } else {
                 log::debug!("Removed runtime directory: {}", path.display());
             }

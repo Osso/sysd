@@ -62,13 +62,23 @@ impl Manager {
         if !trigger_conditions.is_empty() {
             let any_pass = trigger_conditions.iter().any(|(path, negated)| {
                 let exists = std::path::Path::new(path).exists();
-                if *negated { !exists } else { exists }
+                if *negated {
+                    !exists
+                } else {
+                    exists
+                }
             });
             if !any_pass {
                 // Build a descriptive error message
                 let failed: Vec<_> = trigger_conditions
                     .iter()
-                    .map(|(p, n)| if *n { format!("|!{}", p) } else { format!("|{}", p) })
+                    .map(|(p, n)| {
+                        if *n {
+                            format!("|!{}", p)
+                        } else {
+                            format!("|{}", p)
+                        }
+                    })
                     .collect();
                 return Some(format!(
                     "ConditionPathExists={} failed (no trigger condition matched)",
@@ -119,7 +129,10 @@ impl Manager {
                 "no" | "false" => detected.is_none(),
                 "vm" => detected.as_ref().map(|v| v.is_vm()).unwrap_or(false),
                 "container" => detected.as_ref().map(|v| v.is_container()).unwrap_or(false),
-                specific => detected.as_ref().map(|v| v.matches(specific)).unwrap_or(false),
+                specific => detected
+                    .as_ref()
+                    .map(|v| v.matches(specific))
+                    .unwrap_or(false),
             };
 
             if negated && matches {
@@ -417,9 +430,9 @@ impl Manager {
                 std::path::Path::new("/sys/firmware/efi/efivars/SecureBoot-*").exists()
                     || std::fs::read_dir("/sys/firmware/efi/efivars")
                         .map(|entries| {
-                            entries.filter_map(|e| e.ok()).any(|e| {
-                                e.file_name().to_string_lossy().starts_with("SecureBoot-")
-                            })
+                            entries
+                                .filter_map(|e| e.ok())
+                                .any(|e| e.file_name().to_string_lossy().starts_with("SecureBoot-"))
                         })
                         .unwrap_or(false)
             }

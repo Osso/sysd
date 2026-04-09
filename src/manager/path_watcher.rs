@@ -248,24 +248,24 @@ pub async fn watch_paths(
                         "{}: inotify event {:?} on {} (watching {})",
                         path_name,
                         event.mask,
-                        event.name.as_ref().map(|n| n.to_string_lossy()).unwrap_or_default(),
+                        event
+                            .name
+                            .as_ref()
+                            .map(|n| n.to_string_lossy())
+                            .unwrap_or_default(),
                         watched_path
                     );
 
                     // Check if the condition is now satisfied
                     let triggered = match watch_type {
                         WatchType::Exists => Path::new(watched_path).exists(),
-                        WatchType::ExistsGlob => {
-                            glob::glob(watched_path)
-                                .map(|paths| paths.into_iter().any(|p| p.is_ok()))
-                                .unwrap_or(false)
-                        }
+                        WatchType::ExistsGlob => glob::glob(watched_path)
+                            .map(|paths| paths.into_iter().any(|p| p.is_ok()))
+                            .unwrap_or(false),
                         WatchType::Changed | WatchType::Modified => true,
-                        WatchType::DirectoryNotEmpty => {
-                            std::fs::read_dir(watched_path)
-                                .map(|mut entries| entries.next().is_some())
-                                .unwrap_or(false)
-                        }
+                        WatchType::DirectoryNotEmpty => std::fs::read_dir(watched_path)
+                            .map(|mut entries| entries.next().is_some())
+                            .unwrap_or(false),
                     };
 
                     if triggered {

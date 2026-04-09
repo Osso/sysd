@@ -62,7 +62,8 @@ impl CalendarSpec {
 
     /// Check if this is a daily schedule at a specific time
     pub fn is_daily(&self) -> bool {
-        matches!(self, CalendarSpec::Named(s) if s == "daily") || matches!(self, CalendarSpec::Time { .. })
+        matches!(self, CalendarSpec::Named(s) if s == "daily")
+            || matches!(self, CalendarSpec::Time { .. })
     }
 
     /// Check if this is a weekly schedule

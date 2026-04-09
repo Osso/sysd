@@ -27,7 +27,8 @@ impl DepGraph {
     /// Register an alias (symlink name -> canonical name)
     pub fn add_alias(&mut self, alias: &str, canonical: &str) {
         if alias != canonical {
-            self.aliases.insert(alias.to_string(), canonical.to_string());
+            self.aliases
+                .insert(alias.to_string(), canonical.to_string());
         }
     }
 
@@ -38,7 +39,10 @@ impl DepGraph {
 
     /// Resolve a name through aliases to get canonical name
     fn resolve(&self, name: &str) -> String {
-        self.aliases.get(name).cloned().unwrap_or_else(|| name.to_string())
+        self.aliases
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
     }
 
     /// Add a service to the graph, extracting its dependencies

@@ -106,10 +106,10 @@ const SINGLE_VALUE_KEYS: &[&str] = &[
     "EXECCONDITION",
     "DESCRIPTION",
     "DOCUMENTATION",
-    "OPTIONS",        // Mount options (comma-separated inside)
-    "WHAT",           // Mount What=
-    "WHERE",          // Mount Where=
-    "TYPE",           // Mount Type=
+    "OPTIONS", // Mount options (comma-separated inside)
+    "WHAT",    // Mount What=
+    "WHERE",   // Mount Where=
+    "TYPE",    // Mount Type=
     "WORKINGDIRECTORY",
     "ROOTDIRECTORY",
     "PIDFILE",
