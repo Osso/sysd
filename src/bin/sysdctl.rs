@@ -136,13 +136,28 @@ fn main() {
     let args = Args::parse();
     let user_mode = args.user;
 
-    // Parse is local-only
     if let Command::Parse { path } = args.command {
         parse_local(&path);
         return;
     }
 
-    let request = match args.command {
+    let Some(request) = build_request_or_exit(args.command, user_mode) else {
+        return;
+    };
+
+    send_request_or_exit(user_mode, request);
+}
+
+fn build_request_or_exit(command: Command, user_mode: bool) -> Option<Request> {
+    match command {
+        Command::IsActive { name, quiet } => handle_is_active_or_exit(user_mode, name, quiet),
+        Command::Parse { .. } => unreachable!(),
+        command => Some(build_regular_request(command, user_mode)),
+    }
+}
+
+fn build_regular_request(command: Command, user_mode: bool) -> Request {
+    match command {
         Command::List {
             user: list_user,
             unit_type,
@@ -154,18 +169,7 @@ fn main() {
             name,
             wait,
             job_mode,
-        } => {
-            // job_mode is accepted for compatibility but not fully implemented
-            // replace-irreversibly is used by niri-session shutdown
-            if job_mode != "replace" && job_mode != "fail" {
-                log::debug!("job_mode={} (treated as replace)", job_mode);
-            }
-            if wait {
-                Request::StartAndWait { name }
-            } else {
-                Request::Start { name }
-            }
-        }
+        } => start_request(name, wait, &job_mode),
         Command::Stop { name } => Request::Stop { name },
         Command::Restart { name } => Request::Restart { name },
         Command::Enable { name } => Request::Enable { name },
@@ -178,165 +182,186 @@ fn main() {
         Command::Sync => Request::SyncUnits,
         Command::SwitchTarget { target } => Request::SwitchTarget { target },
         Command::Ping => Request::Ping,
-        Command::ImportEnvironment => {
-            // Collect all environment variables from current process
-            let vars: Vec<(String, String)> = std::env::vars().collect();
-            Request::ImportEnvironment { vars }
-        }
+        Command::ImportEnvironment => Request::ImportEnvironment {
+            vars: std::env::vars().collect(),
+        },
         Command::UnsetEnvironment { names } => Request::UnsetEnvironment { names },
         Command::ResetFailed => Request::ResetFailed,
-        Command::IsActive { name, quiet } => {
-            // IsActive needs special handling for exit codes
-            let sock_path = socket_path(user_mode);
-            match Client::call(&sock_path, &Request::IsActive { name: name.clone() }) {
-                Ok(Response::ActiveState(state)) => {
-                    if !quiet {
-                        println!("{}", state);
-                    }
-                    // Exit codes match systemctl: 0=active, 3=inactive/failed/unknown
-                    if state == "active" || state == "Active" {
-                        std::process::exit(0);
-                    } else {
-                        std::process::exit(3);
-                    }
-                }
-                Ok(Response::Error(msg)) => {
-                    if !quiet {
-                        eprintln!("error: {}", msg);
-                    }
-                    std::process::exit(3);
-                }
-                Ok(_) => {
-                    if !quiet {
-                        eprintln!("unexpected response");
-                    }
-                    std::process::exit(3);
-                }
-                Err(e) => {
-                    if !quiet {
-                        eprintln!("sysdctl: {}", e);
-                    }
-                    std::process::exit(1);
-                }
-            }
-        }
-        Command::Parse { .. } => unreachable!(),
-    };
+        Command::IsActive { .. } | Command::Parse { .. } => unreachable!(),
+    }
+}
 
-    // Use appropriate socket path based on --user flag
+fn start_request(name: String, wait: bool, job_mode: &str) -> Request {
+    if job_mode != "replace" && job_mode != "fail" {
+        log::debug!("job_mode={} (treated as replace)", job_mode);
+    }
+    if wait {
+        Request::StartAndWait { name }
+    } else {
+        Request::Start { name }
+    }
+}
+
+fn handle_is_active_or_exit(user_mode: bool, name: String, quiet: bool) -> Option<Request> {
     let sock_path = socket_path(user_mode);
-
-    match Client::call(&sock_path, &request) {
-        Ok(response) => print_response(response),
-        Err(e) => {
-            if e.to_string().contains("connect") || e.to_string().contains("No such file") {
-                if user_mode {
-                    eprintln!("sysdctl: user daemon not running");
-                    eprintln!("  start with: sysd --user");
-                } else {
-                    eprintln!("sysdctl: daemon not running");
-                    eprintln!("  start with: sudo sysd");
-                }
-            } else {
-                eprintln!("sysdctl: {}", e);
+    let result = Client::call(&sock_path, &Request::IsActive { name: name.clone() });
+    match result {
+        Ok(Response::ActiveState(state)) => {
+            if !quiet {
+                println!("{}", state);
+            }
+            if state == "active" || state == "Active" {
+                std::process::exit(0);
+            }
+            std::process::exit(3);
+        }
+        Ok(Response::Error(msg)) => {
+            if !quiet {
+                eprintln!("error: {}", msg);
+            }
+            std::process::exit(3);
+        }
+        Ok(_) => {
+            if !quiet {
+                eprintln!("unexpected response");
+            }
+            std::process::exit(3);
+        }
+        Err(error) => {
+            if !quiet {
+                eprintln!("sysdctl: {}", error);
             }
             std::process::exit(1);
         }
     }
+}
+
+fn send_request_or_exit(user_mode: bool, request: Request) {
+    let sock_path = socket_path(user_mode);
+    match Client::call(&sock_path, &request) {
+        Ok(response) => print_response(response),
+        Err(error) => handle_daemon_error(user_mode, &error.to_string()),
+    }
+}
+
+fn handle_daemon_error(user_mode: bool, message: &str) {
+    if message.contains("connect") || message.contains("No such file") {
+        if user_mode {
+            eprintln!("sysdctl: user daemon not running");
+            eprintln!("  start with: sysd --user");
+        } else {
+            eprintln!("sysdctl: daemon not running");
+            eprintln!("  start with: sudo sysd");
+        }
+    } else {
+        eprintln!("sysdctl: {}", message);
+    }
+    std::process::exit(1);
 }
 
 fn print_response(response: Response) {
     match response {
         Response::Ok => {} // Silent success
         Response::Pong => println!("pong"),
-        Response::Error(msg) => {
-            eprintln!("error: {}", msg);
-            std::process::exit(1);
-        }
-        Response::Units(units) => {
-            if units.is_empty() {
-                println!("No units loaded");
-                return;
-            }
-            println!("{:<40} {:>10} {:>12}", "UNIT", "TYPE", "STATE");
-            for unit in units {
-                println!(
-                    "{:<40} {:>10} {:>12}",
-                    unit.name, unit.unit_type, unit.state
-                );
-            }
-        }
-        Response::Status(unit) => {
-            println!("● {}", unit.name);
-            println!("     Type: {}", unit.unit_type);
-            println!("    State: {}", unit.state);
-            if let Some(desc) = unit.description {
-                println!("    Desc:  {}", desc);
-            }
-        }
-        Response::Deps(deps) => {
-            if deps.is_empty() {
-                println!("No dependencies");
-            } else {
-                for dep in deps {
-                    println!("  {}", dep);
-                }
-            }
-        }
-        Response::BootTarget(target) => {
-            println!("{}", target);
-        }
-        Response::BootPlan(units) => {
-            if units.is_empty() {
-                println!("Nothing to start");
-            } else {
-                for unit in units {
-                    println!("  → {}", unit);
-                }
-            }
-        }
-        Response::EnabledState(state) => {
-            println!("{}", state);
-            // Exit with code 1 if disabled (like systemctl)
-            if state == "disabled" {
-                std::process::exit(1);
-            }
-        }
-        Response::ActiveState(state) => {
-            // Normally handled in Command::IsActive, but print if reached here
-            println!("{}", state);
-            if state != "active" {
-                std::process::exit(3);
-            }
-        }
+        Response::Error(msg) => print_error_and_exit(&msg),
+        Response::Units(units) => print_units(units),
+        Response::Status(unit) => print_status(unit),
+        Response::Deps(deps) => print_deps(deps),
+        Response::BootTarget(target) => println!("{}", target),
+        Response::BootPlan(units) => print_boot_plan(units),
+        Response::EnabledState(state) => print_enabled_state(&state),
+        Response::ActiveState(state) => print_active_state(&state),
+    }
+}
+
+fn print_error_and_exit(message: &str) {
+    eprintln!("error: {}", message);
+    std::process::exit(1);
+}
+
+fn print_units(units: Vec<sysd::protocol::UnitInfo>) {
+    if units.is_empty() {
+        println!("No units loaded");
+        return;
+    }
+    println!("{:<40} {:>10} {:>12}", "UNIT", "TYPE", "STATE");
+    for unit in units {
+        println!(
+            "{:<40} {:>10} {:>12}",
+            unit.name, unit.unit_type, unit.state
+        );
+    }
+}
+
+fn print_status(unit: sysd::protocol::UnitInfo) {
+    println!("● {}", unit.name);
+    println!("     Type: {}", unit.unit_type);
+    println!("    State: {}", unit.state);
+    if let Some(desc) = unit.description {
+        println!("    Desc:  {}", desc);
+    }
+}
+
+fn print_deps(deps: Vec<String>) {
+    if deps.is_empty() {
+        println!("No dependencies");
+        return;
+    }
+    for dep in deps {
+        println!("  {}", dep);
+    }
+}
+
+fn print_boot_plan(units: Vec<String>) {
+    if units.is_empty() {
+        println!("Nothing to start");
+        return;
+    }
+    for unit in units {
+        println!("  → {}", unit);
+    }
+}
+
+fn print_enabled_state(state: &str) {
+    println!("{}", state);
+    if state == "disabled" {
+        std::process::exit(1);
+    }
+}
+
+fn print_active_state(state: &str) {
+    println!("{}", state);
+    if state != "active" {
+        std::process::exit(3);
     }
 }
 
 fn parse_local(path: &PathBuf) {
-    // Use tokio runtime for async parsing
     let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        match sysd::units::load_unit(path).await {
-            Ok(unit) => {
-                println!("Name: {}", unit.name());
-                let section = unit.unit_section();
-                if let Some(desc) = &section.description {
-                    println!("Description: {}", desc);
-                }
-                if !section.after.is_empty() {
-                    println!("After: {}", section.after.join(", "));
-                }
-                if !section.requires.is_empty() {
-                    println!("Requires: {}", section.requires.join(", "));
-                }
-                if !section.wants.is_empty() {
-                    println!("Wants: {}", section.wants.join(", "));
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to parse: {}", e);
-                std::process::exit(1);
-            }
+    let result = rt.block_on(sysd::units::load_unit(path));
+    match result {
+        Ok(unit) => print_parsed_unit(&unit),
+        Err(error) => {
+            eprintln!("Failed to parse: {}", error);
+            std::process::exit(1);
         }
-    });
+    }
+}
+
+fn print_parsed_unit(unit: &sysd::units::Unit) {
+    println!("Name: {}", unit.name());
+    let section = unit.unit_section();
+    if let Some(desc) = &section.description {
+        println!("Description: {}", desc);
+    }
+    print_non_empty("After", &section.after);
+    print_non_empty("Requires", &section.requires);
+    print_non_empty("Wants", &section.wants);
+}
+
+fn print_non_empty(label: &str, values: &[String]) {
+    if values.is_empty() {
+        return;
+    }
+    println!("{}: {}", label, values.join(", "));
 }

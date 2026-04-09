@@ -23,6 +23,50 @@ use sysd::executor::{
     SandboxConfig, StdInputConfig,
 };
 
+const CAPABILITY_TABLE: &[(&str, u32)] = &[
+    ("CHOWN", 0),
+    ("DAC_OVERRIDE", 1),
+    ("DAC_READ_SEARCH", 2),
+    ("FOWNER", 3),
+    ("FSETID", 4),
+    ("KILL", 5),
+    ("SETGID", 6),
+    ("SETUID", 7),
+    ("SETPCAP", 8),
+    ("LINUX_IMMUTABLE", 9),
+    ("NET_BIND_SERVICE", 10),
+    ("NET_BROADCAST", 11),
+    ("NET_ADMIN", 12),
+    ("NET_RAW", 13),
+    ("IPC_LOCK", 14),
+    ("IPC_OWNER", 15),
+    ("SYS_MODULE", 16),
+    ("SYS_RAWIO", 17),
+    ("SYS_CHROOT", 18),
+    ("SYS_PTRACE", 19),
+    ("SYS_PACCT", 20),
+    ("SYS_ADMIN", 21),
+    ("SYS_BOOT", 22),
+    ("SYS_NICE", 23),
+    ("SYS_RESOURCE", 24),
+    ("SYS_TIME", 25),
+    ("SYS_TTY_CONFIG", 26),
+    ("MKNOD", 27),
+    ("LEASE", 28),
+    ("AUDIT_WRITE", 29),
+    ("AUDIT_CONTROL", 30),
+    ("SETFCAP", 31),
+    ("MAC_OVERRIDE", 32),
+    ("MAC_ADMIN", 33),
+    ("SYSLOG", 34),
+    ("WAKE_ALARM", 35),
+    ("BLOCK_SUSPEND", 36),
+    ("AUDIT_READ", 37),
+    ("PERFMON", 38),
+    ("BPF", 39),
+    ("CHECKPOINT_RESTORE", 40),
+];
+
 fn main() {
     // Parse arguments
     let args: Vec<String> = std::env::args().collect();
@@ -104,59 +148,66 @@ fn setup_socket_fds(count: usize, names: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    // Socket FDs are already at positions 3, 4, 5, ... passed by parent
-    // Set LISTEN_FDS, LISTEN_PID, and LISTEN_FDNAMES environment variables
-    let pid = std::process::id();
-
     // Debug: log socket activation setup
     eprintln!(
         "sysd-executor: socket activation: count={}, names={:?}",
         count, names
     );
 
-    unsafe {
-        let listen_fds_key = CString::new("LISTEN_FDS").unwrap();
-        let listen_fds_val = CString::new(count.to_string()).unwrap();
-        libc::setenv(listen_fds_key.as_ptr(), listen_fds_val.as_ptr(), 1);
-
-        let listen_pid_key = CString::new("LISTEN_PID").unwrap();
-        let listen_pid_val = CString::new(pid.to_string()).unwrap();
-        libc::setenv(listen_pid_key.as_ptr(), listen_pid_val.as_ptr(), 1);
-
-        // Set LISTEN_FDNAMES (colon-separated list of names)
-        // If names is shorter than count, pad with "unknown"
-        let fd_names: Vec<String> = (0..count)
-            .map(|i| {
-                names
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_else(|| "unknown".to_string())
-            })
-            .collect();
-        let fd_names_str = fd_names.join(":");
-        let listen_fdnames_key = CString::new("LISTEN_FDNAMES").unwrap();
-        let listen_fdnames_val = CString::new(fd_names_str).unwrap();
-        libc::setenv(listen_fdnames_key.as_ptr(), listen_fdnames_val.as_ptr(), 1);
-
-        // Clear FD_CLOEXEC on socket FDs so they survive exec
-        const SD_LISTEN_FDS_START: RawFd = 3;
-        for i in 0..count {
-            let fd = SD_LISTEN_FDS_START + i as RawFd;
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags >= 0 {
-                libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-                eprintln!("sysd-executor: socket fd {} is valid (flags={})", fd, flags);
-            } else {
-                eprintln!(
-                    "sysd-executor: socket fd {} is INVALID: {}",
-                    fd,
-                    std::io::Error::last_os_error()
-                );
-            }
-        }
-    }
-
+    set_socket_activation_environment(count, names);
+    clear_socket_fd_cloexec(count);
     Ok(())
+}
+
+fn set_socket_activation_environment(count: usize, names: &[String]) {
+    let pid = std::process::id();
+    set_env_cstr("LISTEN_FDS", &count.to_string());
+    set_env_cstr("LISTEN_PID", &pid.to_string());
+    set_env_cstr("LISTEN_FDNAMES", &socket_fd_names(count, names));
+}
+
+fn set_env_cstr(key: &str, value: &str) {
+    let key = CString::new(key).unwrap();
+    let value = CString::new(value).unwrap();
+    unsafe {
+        libc::setenv(key.as_ptr(), value.as_ptr(), 1);
+    }
+}
+
+fn socket_fd_names(count: usize, names: &[String]) -> String {
+    (0..count)
+        .map(|i| {
+            names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn clear_socket_fd_cloexec(count: usize) {
+    const SD_LISTEN_FDS_START: RawFd = 3;
+    for i in 0..count {
+        let fd = SD_LISTEN_FDS_START + i as RawFd;
+        clear_fd_cloexec(fd);
+    }
+}
+
+fn clear_fd_cloexec(fd: RawFd) {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags < 0 {
+            eprintln!(
+                "sysd-executor: socket fd {} is INVALID: {}",
+                fd,
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+        eprintln!("sysd-executor: socket fd {} is valid (flags={})", fd, flags);
+    }
 }
 
 fn setup_environment(env: &HashMap<String, String>, unset: &[String]) -> Result<(), String> {
@@ -274,8 +325,6 @@ fn set_credentials(gid: Option<u32>, uid: Option<u32>, needs_caps: bool) -> Resu
 }
 
 fn setup_tty(config: &ExecConfig) -> Result<(), String> {
-    use std::os::unix::io::AsRawFd;
-
     if !matches!(
         config.std_input,
         StdInputConfig::Tty | StdInputConfig::TtyForce | StdInputConfig::TtyFail
@@ -288,7 +337,6 @@ fn setup_tty(config: &ExecConfig) -> Result<(), String> {
         None => return Ok(()),
     };
 
-    // Reset TTY if requested
     if config.tty_reset {
         let _ = std::fs::OpenOptions::new()
             .read(true)
@@ -296,43 +344,57 @@ fn setup_tty(config: &ExecConfig) -> Result<(), String> {
             .open(path);
     }
 
-    // Open the TTY
     let tty_file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path);
-
-    match tty_file {
-        Ok(f) => {
-            let fd = f.as_raw_fd();
-            unsafe {
-                // Make this our controlling terminal
-                if libc::ioctl(fd, libc::TIOCSCTTY, 0) < 0 {
-                    if matches!(config.std_input, StdInputConfig::TtyFail) {
-                        return Err(format!(
-                            "Failed to set controlling terminal: {}",
-                            std::io::Error::last_os_error()
-                        ));
-                    }
-                }
-                // Dup to stdin/stdout/stderr
-                libc::dup2(fd, 0);
-                libc::dup2(fd, 1);
-                libc::dup2(fd, 2);
-                if fd > 2 {
-                    libc::close(fd);
-                }
-            }
-            std::mem::forget(f);
+    let tty_file = match tty_file {
+        Ok(file) => file,
+        Err(error) if matches!(config.std_input, StdInputConfig::TtyFail) => {
+            return Err(format!("Failed to open TTY {:?}: {}", path, error));
         }
-        Err(e) => {
-            if matches!(config.std_input, StdInputConfig::TtyFail) {
-                return Err(format!("Failed to open TTY {:?}: {}", path, e));
-            }
+        Err(_) => return Ok(()),
+    };
+    configure_tty_fds(
+        tty_file,
+        matches!(config.std_input, StdInputConfig::TtyFail),
+    )
+}
+
+fn configure_tty_fds(tty_file: std::fs::File, fail_if_no_ctty: bool) -> Result<(), String> {
+    use std::os::unix::io::AsRawFd;
+
+    let fd = tty_file.as_raw_fd();
+    set_controlling_terminal(fd, fail_if_no_ctty)?;
+    dup_to_standard_streams(fd);
+    std::mem::forget(tty_file);
+    Ok(())
+}
+
+fn set_controlling_terminal(fd: RawFd, fail_if_no_ctty: bool) -> Result<(), String> {
+    unsafe {
+        if libc::ioctl(fd, libc::TIOCSCTTY, 0) >= 0 {
+            return Ok(());
         }
     }
+    if !fail_if_no_ctty {
+        return Ok(());
+    }
+    Err(format!(
+        "Failed to set controlling terminal: {}",
+        std::io::Error::last_os_error()
+    ))
+}
 
-    Ok(())
+fn dup_to_standard_streams(fd: RawFd) {
+    unsafe {
+        libc::dup2(fd, 0);
+        libc::dup2(fd, 1);
+        libc::dup2(fd, 2);
+        if fd > 2 {
+            libc::close(fd);
+        }
+    }
 }
 
 fn exec_program(program: &str, args: &[String]) -> Result<(), String> {
@@ -389,8 +451,15 @@ fn apply_sandbox_phase1(sandbox: &SandboxConfig) -> Result<(), String> {
         apply_ignore_sigpipe()?;
     }
 
-    // Mount namespace operations (require CAP_SYS_ADMIN - must be before setuid)
-    let needs_mount_ns = !matches!(sandbox.protect_system, ProtectSystemConfig::No)
+    if needs_mount_namespace(sandbox) {
+        apply_mount_namespace_settings(sandbox)?;
+    }
+
+    Ok(())
+}
+
+fn needs_mount_namespace(sandbox: &SandboxConfig) -> bool {
+    !matches!(sandbox.protect_system, ProtectSystemConfig::No)
         || !matches!(sandbox.protect_home, ProtectHomeConfig::No)
         || sandbox.private_tmp
         || sandbox.private_devices
@@ -401,44 +470,47 @@ fn apply_sandbox_phase1(sandbox: &SandboxConfig) -> Result<(), String> {
         || !sandbox.inaccessible_paths.is_empty()
         || sandbox.protect_control_groups
         || sandbox.protect_kernel_tunables
-        || sandbox.protect_kernel_logs;
+        || sandbox.protect_kernel_logs
+}
 
-    if needs_mount_ns {
-        create_mount_namespace()?;
-        apply_protect_system(&sandbox.protect_system)?;
-        apply_protect_home(&sandbox.protect_home)?;
-
-        if sandbox.private_tmp {
-            apply_private_tmp()?;
-        }
-
-        if !matches!(sandbox.device_policy, DevicePolicyConfig::Auto) {
-            apply_device_policy(&sandbox.device_policy, &sandbox.device_allow)?;
-        } else if sandbox.private_devices {
-            apply_private_devices()?;
-        }
-
-        apply_protect_proc(&sandbox.protect_proc)?;
-
-        if sandbox.protect_control_groups {
-            apply_protect_control_groups()?;
-        }
-
-        if sandbox.protect_kernel_tunables {
-            apply_protect_kernel_tunables()?;
-        }
-
-        if sandbox.protect_kernel_logs {
-            apply_protect_kernel_logs()?;
-        }
-
-        apply_path_restrictions(
-            &sandbox.read_write_paths,
-            &sandbox.read_only_paths,
-            &sandbox.inaccessible_paths,
-        )?;
+fn apply_mount_namespace_settings(sandbox: &SandboxConfig) -> Result<(), String> {
+    create_mount_namespace()?;
+    apply_protect_system(&sandbox.protect_system)?;
+    apply_protect_home(&sandbox.protect_home)?;
+    if sandbox.private_tmp {
+        apply_private_tmp()?;
     }
+    apply_device_isolation(sandbox)?;
+    apply_protect_proc(&sandbox.protect_proc)?;
+    apply_kernel_protections(sandbox)?;
+    apply_path_restrictions(
+        &sandbox.read_write_paths,
+        &sandbox.read_only_paths,
+        &sandbox.inaccessible_paths,
+    )?;
+    Ok(())
+}
 
+fn apply_device_isolation(sandbox: &SandboxConfig) -> Result<(), String> {
+    if !matches!(sandbox.device_policy, DevicePolicyConfig::Auto) {
+        return apply_device_policy(&sandbox.device_policy, &sandbox.device_allow);
+    }
+    if sandbox.private_devices {
+        return apply_private_devices();
+    }
+    Ok(())
+}
+
+fn apply_kernel_protections(sandbox: &SandboxConfig) -> Result<(), String> {
+    if sandbox.protect_control_groups {
+        apply_protect_control_groups()?;
+    }
+    if sandbox.protect_kernel_tunables {
+        apply_protect_kernel_tunables()?;
+    }
+    if sandbox.protect_kernel_logs {
+        apply_protect_kernel_logs()?;
+    }
     Ok(())
 }
 
@@ -508,51 +580,11 @@ fn apply_capability_bounding_set(caps: &[String]) -> Result<(), String> {
 }
 
 fn capability_name_to_num(name: &str) -> Option<u32> {
-    let name = name.strip_prefix("CAP_").unwrap_or(name);
-    match name.to_uppercase().as_str() {
-        "CHOWN" => Some(0),
-        "DAC_OVERRIDE" => Some(1),
-        "DAC_READ_SEARCH" => Some(2),
-        "FOWNER" => Some(3),
-        "FSETID" => Some(4),
-        "KILL" => Some(5),
-        "SETGID" => Some(6),
-        "SETUID" => Some(7),
-        "SETPCAP" => Some(8),
-        "LINUX_IMMUTABLE" => Some(9),
-        "NET_BIND_SERVICE" => Some(10),
-        "NET_BROADCAST" => Some(11),
-        "NET_ADMIN" => Some(12),
-        "NET_RAW" => Some(13),
-        "IPC_LOCK" => Some(14),
-        "IPC_OWNER" => Some(15),
-        "SYS_MODULE" => Some(16),
-        "SYS_RAWIO" => Some(17),
-        "SYS_CHROOT" => Some(18),
-        "SYS_PTRACE" => Some(19),
-        "SYS_PACCT" => Some(20),
-        "SYS_ADMIN" => Some(21),
-        "SYS_BOOT" => Some(22),
-        "SYS_NICE" => Some(23),
-        "SYS_RESOURCE" => Some(24),
-        "SYS_TIME" => Some(25),
-        "SYS_TTY_CONFIG" => Some(26),
-        "MKNOD" => Some(27),
-        "LEASE" => Some(28),
-        "AUDIT_WRITE" => Some(29),
-        "AUDIT_CONTROL" => Some(30),
-        "SETFCAP" => Some(31),
-        "MAC_OVERRIDE" => Some(32),
-        "MAC_ADMIN" => Some(33),
-        "SYSLOG" => Some(34),
-        "WAKE_ALARM" => Some(35),
-        "BLOCK_SUSPEND" => Some(36),
-        "AUDIT_READ" => Some(37),
-        "PERFMON" => Some(38),
-        "BPF" => Some(39),
-        "CHECKPOINT_RESTORE" => Some(40),
-        _ => None,
-    }
+    let normalized = name.strip_prefix("CAP_").unwrap_or(name).to_uppercase();
+    CAPABILITY_TABLE
+        .iter()
+        .find(|(cap, _)| *cap == normalized)
+        .map(|(_, num)| *num)
 }
 
 const PR_CAP_AMBIENT: libc::c_int = 47;
@@ -579,12 +611,18 @@ fn apply_ambient_capabilities(caps: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    // Get current capabilities
+    let (header, mut data) = current_cap_data();
+    add_inheritable_caps(caps, &mut data);
+    set_cap_data(&header, &data);
+    raise_ambient_caps(caps);
+    Ok(())
+}
+
+fn current_cap_data() -> (CapUserHeader, [CapUserData; 2]) {
     let mut header = CapUserHeader {
         version: _LINUX_CAPABILITY_VERSION_3,
-        pid: 0, // current process
+        pid: 0,
     };
-    // We need 2 CapUserData structs for 64-bit capability set (caps 0-31 and 32-63)
     let mut data = [
         CapUserData {
             effective: 0,
@@ -597,7 +635,6 @@ fn apply_ambient_capabilities(caps: &[String]) -> Result<(), String> {
             inheritable: 0,
         },
     ];
-
     unsafe {
         if libc::syscall(
             libc::SYS_capget,
@@ -609,28 +646,29 @@ fn apply_ambient_capabilities(caps: &[String]) -> Result<(), String> {
                 "sysd-executor: capget failed: {}",
                 std::io::Error::last_os_error()
             );
-            // Continue anyway - we'll try to raise ambient caps
         }
     }
+    (header, data)
+}
 
-    // Add each ambient capability to the inheritable set and raise to ambient
+fn add_inheritable_caps(caps: &[String], data: &mut [CapUserData; 2]) {
     for cap_str in caps {
-        if let Some(cap_num) = capability_name_to_num(cap_str) {
-            // Add to inheritable set
-            let cap_idx = (cap_num / 32) as usize;
-            let cap_bit = 1u32 << (cap_num % 32);
-
-            if cap_idx < 2 {
-                data[cap_idx].inheritable |= cap_bit;
-            }
+        let Some(cap_num) = capability_name_to_num(cap_str) else {
+            continue;
+        };
+        let cap_idx = (cap_num / 32) as usize;
+        let cap_bit = 1u32 << (cap_num % 32);
+        if cap_idx < 2 {
+            data[cap_idx].inheritable |= cap_bit;
         }
     }
+}
 
-    // Set the updated capabilities (with inheritable set)
+fn set_cap_data(header: &CapUserHeader, data: &[CapUserData; 2]) {
     unsafe {
         if libc::syscall(
             libc::SYS_capset,
-            &header as *const CapUserHeader,
+            header as *const CapUserHeader,
             data.as_ptr(),
         ) != 0
         {
@@ -638,33 +676,32 @@ fn apply_ambient_capabilities(caps: &[String]) -> Result<(), String> {
                 "sysd-executor: capset failed: {}",
                 std::io::Error::last_os_error()
             );
-            // Continue anyway - ambient caps might still work if already inheritable
         }
     }
+}
 
-    // Now raise each capability to ambient
+fn raise_ambient_caps(caps: &[String]) {
     for cap_str in caps {
-        if let Some(cap_num) = capability_name_to_num(cap_str) {
-            unsafe {
-                let ret = libc::prctl(
-                    PR_CAP_AMBIENT,
-                    PR_CAP_AMBIENT_RAISE,
-                    cap_num as libc::c_ulong,
-                    0,
-                    0,
+        let Some(cap_num) = capability_name_to_num(cap_str) else {
+            continue;
+        };
+        unsafe {
+            let ret = libc::prctl(
+                PR_CAP_AMBIENT,
+                PR_CAP_AMBIENT_RAISE,
+                cap_num as libc::c_ulong,
+                0,
+                0,
+            );
+            if ret != 0 {
+                eprintln!(
+                    "sysd-executor: failed to raise ambient cap {}: {}",
+                    cap_str,
+                    std::io::Error::last_os_error()
                 );
-                if ret != 0 {
-                    eprintln!(
-                        "sysd-executor: failed to raise ambient cap {}: {}",
-                        cap_str,
-                        std::io::Error::last_os_error()
-                    );
-                }
             }
         }
     }
-
-    Ok(())
 }
 
 fn apply_private_network() -> Result<(), String> {
@@ -744,30 +781,25 @@ fn apply_protect_system(mode: &ProtectSystemConfig) -> Result<(), String> {
 }
 
 fn apply_protect_home(mode: &ProtectHomeConfig) -> Result<(), String> {
-    let home_dirs = ["/home", "/root", "/run/user"];
-
     match mode {
         ProtectHomeConfig::No => {}
         ProtectHomeConfig::Yes => {
-            for dir in &home_dirs {
-                if std::path::Path::new(dir).exists() {
-                    make_inaccessible(dir)?;
-                }
-            }
+            for_existing_home_dir(make_inaccessible)?;
         }
         ProtectHomeConfig::ReadOnly => {
-            for dir in &home_dirs {
-                if std::path::Path::new(dir).exists() {
-                    bind_mount_ro(dir)?;
-                }
-            }
+            for_existing_home_dir(bind_mount_ro)?;
         }
         ProtectHomeConfig::Tmpfs => {
-            for dir in &home_dirs {
-                if std::path::Path::new(dir).exists() {
-                    mount_tmpfs(dir)?;
-                }
-            }
+            for_existing_home_dir(mount_tmpfs)?;
+        }
+    }
+    Ok(())
+}
+
+fn for_existing_home_dir(mut action: impl FnMut(&str) -> Result<(), String>) -> Result<(), String> {
+    for dir in ["/home", "/root", "/run/user"] {
+        if std::path::Path::new(dir).exists() {
+            action(dir)?;
         }
     }
     Ok(())
@@ -989,55 +1021,59 @@ fn mount_tmpfs(path: &str) -> Result<(), String> {
 fn make_inaccessible(path: &str) -> Result<(), String> {
     let path_c = CString::new(path).map_err(|e| e.to_string())?;
 
-    // Check if path is a directory or a file
     let metadata = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) => return Err(format!("Failed to stat {}: {}", path, e)),
     };
 
     if metadata.is_dir() {
-        // For directories, mount an empty tmpfs over it
-        let fstype = CString::new("tmpfs").unwrap();
-        let source = CString::new("tmpfs").unwrap();
+        return make_directory_inaccessible(path, &path_c);
+    }
 
-        unsafe {
-            if libc::mount(
-                source.as_ptr(),
-                path_c.as_ptr(),
-                fstype.as_ptr(),
-                libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
-                std::ptr::null(),
-            ) != 0
-            {
-                let errno = *libc::__errno_location();
-                return Err(format!(
-                    "Failed to make {} inaccessible (tmpfs mount): errno {}",
-                    path, errno
-                ));
-            }
-        }
-    } else {
-        // For files, bind-mount /dev/null over them
-        let dev_null = CString::new("/dev/null").unwrap();
+    make_file_inaccessible(path, &path_c)
+}
 
-        unsafe {
-            if libc::mount(
-                dev_null.as_ptr(),
-                path_c.as_ptr(),
-                std::ptr::null(),
-                libc::MS_BIND,
-                std::ptr::null(),
-            ) != 0
-            {
-                let errno = *libc::__errno_location();
-                return Err(format!(
-                    "Failed to make {} inaccessible (bind /dev/null): errno {}",
-                    path, errno
-                ));
-            }
+fn make_directory_inaccessible(path: &str, path_c: &CString) -> Result<(), String> {
+    let fstype = CString::new("tmpfs").unwrap();
+    let source = CString::new("tmpfs").unwrap();
+    unsafe {
+        if libc::mount(
+            source.as_ptr(),
+            path_c.as_ptr(),
+            fstype.as_ptr(),
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            std::ptr::null(),
+        ) == 0
+        {
+            return Ok(());
         }
     }
-    Ok(())
+    let errno = unsafe { *libc::__errno_location() };
+    Err(format!(
+        "Failed to make {} inaccessible (tmpfs mount): errno {}",
+        path, errno
+    ))
+}
+
+fn make_file_inaccessible(path: &str, path_c: &CString) -> Result<(), String> {
+    let dev_null = CString::new("/dev/null").unwrap();
+    unsafe {
+        if libc::mount(
+            dev_null.as_ptr(),
+            path_c.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND,
+            std::ptr::null(),
+        ) == 0
+        {
+            return Ok(());
+        }
+    }
+    let errno = unsafe { *libc::__errno_location() };
+    Err(format!(
+        "Failed to make {} inaccessible (bind /dev/null): errno {}",
+        path, errno
+    ))
 }
 
 fn remount_proc(options: &str) -> Result<(), String> {

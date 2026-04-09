@@ -1301,6 +1301,7 @@ fn syscall_name_to_nr(name: &str) -> Option<i64> {
 // PR_SET_MDWE constants (not in older libc)
 const PR_SET_MDWE: libc::c_int = 65;
 const PR_MDWE_REFUSE_EXEC_GAIN: libc::c_ulong = 1;
+const PERSONALITY_QUERY: libc::c_ulong = 0xffff_ffff;
 
 /// RestrictRealtime=yes - block realtime scheduling via seccomp
 /// (systemd uses seccomp to block sched_setscheduler with RT policies)
@@ -1333,7 +1334,7 @@ fn apply_memory_deny_write_execute() -> Result<(), String> {
 fn apply_lock_personality() -> Result<(), String> {
     unsafe {
         // First get the current personality
-        let current = libc::personality(0xffffffff_u64 as libc::c_ulong);
+        let current = libc::personality(PERSONALITY_QUERY);
         if current == -1 {
             return Err("Failed to get current personality".to_string());
         }

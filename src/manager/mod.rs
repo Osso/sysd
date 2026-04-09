@@ -33,7 +33,7 @@ pub use state::{ActiveState, ServiceState, SubState};
 pub use timer_scheduler::TimerFired;
 pub use virtualization::VirtualizationType;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::RawFd;
 use std::path::PathBuf;
@@ -235,26 +235,29 @@ impl Manager {
     /// Get unit search paths for user mode
     fn user_unit_paths() -> Vec<PathBuf> {
         let mut paths = Vec::new();
+        let mut seen = HashSet::new();
 
         // User-specific config directory (highest priority)
         if let Some(config_dir) = dirs::config_dir() {
-            paths.push(config_dir.join("systemd/user"));
+            push_unique_path(&mut paths, &mut seen, config_dir.join("systemd/user"));
         }
         // Also check XDG_CONFIG_HOME or fallback to ~/.config
         if let Ok(home) = std::env::var("HOME") {
             let user_config = PathBuf::from(&home).join(".config/systemd/user");
-            if !paths.contains(&user_config) {
-                paths.push(user_config);
-            }
+            push_unique_path(&mut paths, &mut seen, user_config);
         }
 
         // System-wide user unit directories
-        paths.push(PathBuf::from("/etc/systemd/user"));
-        paths.push(PathBuf::from("/usr/lib/systemd/user"));
+        push_unique_path(&mut paths, &mut seen, PathBuf::from("/etc/systemd/user"));
+        push_unique_path(
+            &mut paths,
+            &mut seen,
+            PathBuf::from("/usr/lib/systemd/user"),
+        );
 
         // XDG data directories for user units
         if let Some(data_dir) = dirs::data_dir() {
-            paths.push(data_dir.join("systemd/user"));
+            push_unique_path(&mut paths, &mut seen, data_dir.join("systemd/user"));
         }
 
         paths
@@ -601,9 +604,9 @@ impl Manager {
         // Collect all dependencies transitively
         // Also track symlink aliases (requested name -> canonical name)
         let mut to_load: Vec<String> = vec![name.to_string()];
-        let mut loaded: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut aliases: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
+        let mut queued: HashSet<String> = [name.to_string()].into_iter().collect();
+        let mut loaded: HashSet<String> = HashSet::new();
+        let mut aliases: HashMap<String, String> = HashMap::new();
 
         while let Some(unit_name) = to_load.pop() {
             if loaded.contains(&unit_name) || aliases.contains_key(&unit_name) {
@@ -649,21 +652,15 @@ impl Manager {
                 }
                 // Requires= pulls units (hard dependency - fail if missing)
                 for dep in &section.requires {
-                    if !loaded.contains(dep) {
-                        to_load.push(dep.clone());
-                    }
+                    queue_dependency(&mut to_load, &mut queued, dep);
                 }
                 // Wants= pulls units (soft dependency - continue if missing)
                 for dep in &section.wants {
-                    if !loaded.contains(dep) {
-                        to_load.push(dep.clone());
-                    }
+                    queue_dependency(&mut to_load, &mut queued, dep);
                 }
                 // .wants directory entries for targets
                 for dep in unit.wants_dir() {
-                    if !loaded.contains(dep) {
-                        to_load.push(dep.clone());
-                    }
+                    queue_dependency(&mut to_load, &mut queued, dep);
                 }
             }
         }
@@ -1573,6 +1570,18 @@ impl Manager {
                 state.error = None;
             }
         }
+    }
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
+    if seen.insert(path.clone()) {
+        paths.push(path);
+    }
+}
+
+fn queue_dependency(to_load: &mut Vec<String>, queued: &mut HashSet<String>, dep: &str) {
+    if queued.insert(dep.to_string()) {
+        to_load.push(dep.to_string());
     }
 }
 

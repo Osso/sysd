@@ -17,15 +17,33 @@ use std::env;
 use std::os::unix::process::CommandExt;
 use std::process::{exit, Command};
 
-fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+struct ParsedArgs {
+    user_mode: bool,
+    quiet: bool,
+    wait: bool,
+    job_mode: Option<String>,
+    command: String,
+    positional: Vec<String>,
+}
 
+fn main() {
+    let parsed = parse_args(env::args().skip(1).collect());
+    let sysdctl_args = build_sysdctl_args(parsed);
+
+    // Execute sysdctl
+    let err = Command::new("sysdctl").args(&sysdctl_args).exec();
+
+    // exec() only returns on error
+    eprintln!("systemctl-compat: failed to exec sysdctl: {}", err);
+    exit(1);
+}
+
+fn parse_args(args: Vec<String>) -> ParsedArgs {
     if args.is_empty() {
         eprintln!("systemctl-compat: no command specified");
         exit(1);
     }
 
-    // Parse arguments
     let mut user_mode = false;
     let mut quiet = false;
     let mut wait = false;
@@ -49,9 +67,7 @@ fn main() {
                     job_mode = Some(args[i].clone());
                 }
             }
-            s if s.starts_with("-") => {
-                // Ignore other flags we don't handle
-            }
+            s if s.starts_with('-') => {}
             _ => {
                 if command.is_none() {
                     command = Some(arg.clone());
@@ -63,33 +79,34 @@ fn main() {
         i += 1;
     }
 
-    let command = match command {
-        Some(c) => c,
-        None => {
-            eprintln!("systemctl-compat: no command specified");
-            exit(1);
-        }
-    };
+    let command = command.unwrap_or_else(|| {
+        eprintln!("systemctl-compat: no command specified");
+        exit(1);
+    });
 
-    // Build sysdctl command
+    ParsedArgs {
+        user_mode,
+        quiet,
+        wait,
+        job_mode,
+        command,
+        positional,
+    }
+}
+
+fn build_sysdctl_args(parsed: ParsedArgs) -> Vec<String> {
     let mut sysdctl_args: Vec<String> = Vec::new();
-
-    if user_mode {
+    if parsed.user_mode {
         sysdctl_args.push("--user".to_string());
     }
 
-    match command.as_str() {
+    match parsed.command.as_str() {
         "is-active" => {
             sysdctl_args.push("is-active".to_string());
-            if quiet {
+            if parsed.quiet {
                 sysdctl_args.push("--quiet".to_string());
             }
-            if let Some(unit) = positional.first() {
-                sysdctl_args.push(unit.clone());
-            } else {
-                eprintln!("systemctl-compat: is-active requires unit name");
-                exit(1);
-            }
+            push_required_unit(&mut sysdctl_args, &parsed.positional, "is-active");
         }
         "reset-failed" => {
             sysdctl_args.push("reset-failed".to_string());
@@ -99,83 +116,70 @@ fn main() {
         }
         "start" => {
             sysdctl_args.push("start".to_string());
-            if wait {
+            if parsed.wait {
                 sysdctl_args.push("--wait".to_string());
             }
-            if let Some(mode) = job_mode {
+            if let Some(mode) = parsed.job_mode {
                 sysdctl_args.push(format!("--job-mode={}", mode));
             }
-            if let Some(unit) = positional.first() {
-                sysdctl_args.push(unit.clone());
-            } else {
-                eprintln!("systemctl-compat: start requires unit name");
-                exit(1);
-            }
+            push_required_unit(&mut sysdctl_args, &parsed.positional, "start");
         }
         "stop" => {
             sysdctl_args.push("stop".to_string());
-            if let Some(unit) = positional.first() {
-                sysdctl_args.push(unit.clone());
-            } else {
-                eprintln!("systemctl-compat: stop requires unit name");
-                exit(1);
-            }
+            push_required_unit(&mut sysdctl_args, &parsed.positional, "stop");
         }
         "restart" => {
             sysdctl_args.push("restart".to_string());
-            if let Some(unit) = positional.first() {
-                sysdctl_args.push(unit.clone());
-            } else {
-                eprintln!("systemctl-compat: restart requires unit name");
-                exit(1);
-            }
+            push_required_unit(&mut sysdctl_args, &parsed.positional, "restart");
         }
         "status" => {
             sysdctl_args.push("status".to_string());
-            if let Some(unit) = positional.first() {
-                sysdctl_args.push(unit.clone());
-            } else {
-                eprintln!("systemctl-compat: status requires unit name");
-                exit(1);
-            }
+            push_required_unit(&mut sysdctl_args, &parsed.positional, "status");
         }
         "unset-environment" => {
             sysdctl_args.push("unset-environment".to_string());
-            sysdctl_args.extend(positional);
+            sysdctl_args.extend(parsed.positional);
         }
         "daemon-reload" => {
-            // Map to reload
             sysdctl_args.push("reload".to_string());
         }
         "enable" => {
             sysdctl_args.push("enable".to_string());
-            if let Some(unit) = positional.first() {
-                sysdctl_args.push(unit.clone());
-            }
+            push_optional_unit(&mut sysdctl_args, &parsed.positional);
         }
         "disable" => {
             sysdctl_args.push("disable".to_string());
-            if let Some(unit) = positional.first() {
-                sysdctl_args.push(unit.clone());
-            }
+            push_optional_unit(&mut sysdctl_args, &parsed.positional);
         }
         "is-enabled" => {
             sysdctl_args.push("is-enabled".to_string());
-            if let Some(unit) = positional.first() {
-                sysdctl_args.push(unit.clone());
-            }
+            push_optional_unit(&mut sysdctl_args, &parsed.positional);
         }
-        _ => {
-            eprintln!("systemctl-compat: unsupported command '{}'", command);
-            eprintln!("Supported: is-active, reset-failed, import-environment, start, stop, restart, status, unset-environment, daemon-reload, enable, disable, is-enabled");
-            exit(1);
-        }
+        _ => unsupported_command(&parsed.command),
     }
 
-    // Execute sysdctl
-    let err = Command::new("sysdctl").args(&sysdctl_args).exec();
+    sysdctl_args
+}
 
-    // exec() only returns on error
-    eprintln!("systemctl-compat: failed to exec sysdctl: {}", err);
+fn push_required_unit(args: &mut Vec<String>, positional: &[String], command: &str) {
+    if let Some(unit) = positional.first() {
+        args.push(unit.clone());
+        return;
+    }
+    eprintln!("systemctl-compat: {} requires unit name", command);
+    exit(1);
+}
+
+fn push_optional_unit(args: &mut Vec<String>, positional: &[String]) {
+    if let Some(unit) = positional.first() {
+        args.push(unit.clone());
+    }
+}
+
+fn unsupported_command(command: &str) -> ! {
+    eprintln!("systemctl-compat: unsupported command '{}'", command);
+    eprintln!(
+        "Supported: is-active, reset-failed, import-environment, start, stop, restart, status, unset-environment, daemon-reload, enable, disable, is-enabled"
+    );
     exit(1);
 }

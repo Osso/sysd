@@ -10,8 +10,10 @@ impl Manager {
     /// Enable a unit (create symlinks based on [Install] section)
     pub async fn enable(&mut self, name: &str) -> Result<Vec<PathBuf>, ManagerError> {
         let mut created = Vec::new();
-        let mut to_enable = vec![self.normalize_name(name)];
+        let initial_name = self.normalize_name(name);
+        let mut to_enable = vec![initial_name.clone()];
         let mut enabled: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queued: std::collections::HashSet<String> = [initial_name].into_iter().collect();
 
         while let Some(unit_name) = to_enable.pop() {
             if enabled.contains(&unit_name) {
@@ -81,7 +83,7 @@ impl Manager {
 
             // Queue Also= units for enabling
             for also in also_units {
-                if !enabled.contains(&also) {
+                if queued.insert(also.clone()) {
                     to_enable.push(also);
                 }
             }
@@ -97,8 +99,10 @@ impl Manager {
     /// Disable a unit (remove symlinks)
     pub async fn disable(&mut self, name: &str) -> Result<Vec<PathBuf>, ManagerError> {
         let mut removed = Vec::new();
-        let mut to_disable = vec![self.normalize_name(name)];
+        let initial_name = self.normalize_name(name);
+        let mut to_disable = vec![initial_name.clone()];
         let mut disabled: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queued: std::collections::HashSet<String> = [initial_name].into_iter().collect();
 
         while let Some(unit_name) = to_disable.pop() {
             if disabled.contains(&unit_name) {
@@ -160,7 +164,7 @@ impl Manager {
 
             // Queue Also= units for disabling
             for also in also_units {
-                if !disabled.contains(&also) {
+                if queued.insert(also.clone()) {
                     to_disable.push(also);
                 }
             }

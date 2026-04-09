@@ -80,8 +80,7 @@ impl NotifyMessage {
 /// Async notify socket using tokio
 pub struct AsyncNotifyListener {
     /// Socket kept alive to maintain binding (receiver task has its own Arc)
-    #[allow(dead_code)]
-    socket: Arc<tokio::net::UnixDatagram>,
+    _socket: Arc<tokio::net::UnixDatagram>,
     socket_path: PathBuf,
 }
 
@@ -167,7 +166,7 @@ impl AsyncNotifyListener {
 
         Ok((
             Self {
-                socket,
+                _socket: socket,
                 socket_path: socket_path.to_path_buf(),
             },
             rx,

@@ -21,15 +21,14 @@ pub struct ScopeState {
 
 pub struct ScopeInterface {
     state: Arc<RwLock<ScopeState>>,
-    #[allow(dead_code)]
-    cgroup_manager: Arc<CgroupManager>,
+    _cgroup_manager: Arc<CgroupManager>,
 }
 
 impl ScopeInterface {
     pub fn new(state: Arc<RwLock<ScopeState>>, cgroup_manager: Arc<CgroupManager>) -> Self {
         Self {
             state,
-            cgroup_manager,
+            _cgroup_manager: cgroup_manager,
         }
     }
 }

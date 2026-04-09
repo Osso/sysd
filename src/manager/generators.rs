@@ -49,8 +49,10 @@ impl Manager {
         // This makes local-fs.target pull in these mounts during boot
         if !local_fs_mounts.is_empty() {
             if let Some(Unit::Target(ref mut target)) = self.units.get_mut("local-fs.target") {
+                let mut existing_requires: std::collections::HashSet<String> =
+                    target.unit.requires.iter().cloned().collect();
                 for mount_name in &local_fs_mounts {
-                    if !target.unit.requires.contains(mount_name) {
+                    if existing_requires.insert(mount_name.clone()) {
                         target.unit.requires.push(mount_name.clone());
                     }
                 }
