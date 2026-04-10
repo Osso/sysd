@@ -32,10 +32,7 @@ impl Manager {
 
     /// Validate if a notify message should be accepted based on NotifyAccess policy
     fn validate_notify_access(&self, msg: &NotifyMessage) -> bool {
-        // Find the service for this PID
         let Some(service_name) = self.find_service_by_pid(msg.pid) else {
-            // Unknown PID - could be from a child process
-            // For now, accept it and let the message processing handle matching
             log::debug!(
                 "Notify message from unknown PID {}, accepting for now",
                 msg.pid
@@ -43,7 +40,6 @@ impl Manager {
             return true;
         };
 
-        // Get the service's NotifyAccess policy
         let notify_access = self
             .units
             .get(&service_name)
@@ -62,7 +58,6 @@ impl Manager {
                 false
             }
             NotifyAccess::Main => {
-                // Only accept from the main process
                 let main_pid = self.processes.get(&service_name).and_then(|c| c.id());
                 if main_pid == Some(msg.pid) {
                     true
@@ -76,16 +71,104 @@ impl Manager {
                     false
                 }
             }
-            NotifyAccess::Exec | NotifyAccess::All => {
-                // Accept from any process in the cgroup (we approximate by accepting all)
-                true
+            NotifyAccess::Exec | NotifyAccess::All => true,
+        }
+    }
+
+    /// Resolve which service name to mark ready, consuming the entry from waiting_ready
+    fn resolve_ready_service_name(&mut self, msg: &NotifyMessage) -> Option<String> {
+        if let Some(main_pid) = msg.main_pid() {
+            if let Some(name) = self.waiting_ready.remove(&main_pid) {
+                return Some(name);
+            }
+            return self.waiting_ready.remove(&msg.pid);
+        }
+
+        if let Some(name) = self.waiting_ready.remove(&msg.pid) {
+            return Some(name);
+        }
+
+        // Try to find by iterating processes
+        let found = self.processes.iter().find_map(|(name, child)| {
+            child
+                .id()
+                .filter(|pid| self.waiting_ready.contains_key(pid))
+                .map(|pid| (pid, name.clone()))
+        });
+        if let Some((pid, name)) = found {
+            self.waiting_ready.remove(&pid);
+            Some(name)
+        } else {
+            None
+        }
+    }
+
+    /// Mark a service as ready and optionally arm its watchdog
+    fn mark_service_ready(&mut self, name: &str) {
+        if let Some(state) = self.states.get_mut(name) {
+            let pid = self.processes.get(name).and_then(|c| c.id()).unwrap_or(0);
+            state.set_running(pid);
+            self.active_jobs = self.active_jobs.saturating_sub(1);
+            log::info!("{} signaled READY", name);
+        }
+        self.arm_watchdog(name);
+    }
+
+    /// Set or reset the watchdog deadline for a service if WatchdogSec is configured
+    fn arm_watchdog(&mut self, name: &str) {
+        if let Some(wd) = self
+            .units
+            .get(name)
+            .and_then(|u| u.as_service())
+            .and_then(|s| s.service.watchdog_sec)
+        {
+            self.watchdog_deadlines
+                .insert(name.to_string(), std::time::Instant::now() + wd);
+        }
+    }
+
+    fn handle_notify_ready(&mut self, msg: &NotifyMessage) {
+        log::debug!(
+            "READY received: sender_pid={}, main_pid={:?}, waiting_ready={:?}",
+            msg.pid,
+            msg.main_pid(),
+            self.waiting_ready
+        );
+
+        if let Some(name) = self.resolve_ready_service_name(msg) {
+            self.mark_service_ready(&name);
+        } else {
+            log::warn!(
+                "READY message from PID {} (main_pid={:?}) could not be matched to any service",
+                msg.pid,
+                msg.main_pid()
+            );
+        }
+    }
+
+    fn handle_notify_watchdog_ping(&mut self, msg: &NotifyMessage) {
+        let service_name = self
+            .processes
+            .iter()
+            .find(|(_, child)| child.id() == Some(msg.pid))
+            .map(|(name, _)| name.clone());
+
+        if let Some(name) = service_name {
+            if self
+                .units
+                .get(&name)
+                .and_then(|u| u.as_service())
+                .and_then(|s| s.service.watchdog_sec)
+                .is_some()
+            {
+                self.arm_watchdog(&name);
+                log::trace!("{} watchdog ping received", name);
             }
         }
     }
 
     /// Process pending notify messages (READY, STOPPING, WATCHDOG, etc.)
     pub async fn process_notify(&mut self) {
-        // Collect all pending messages first to avoid borrow conflicts
         let messages: Vec<_> = {
             let Some(rx) = &mut self.notify_rx else {
                 return;
@@ -93,135 +176,37 @@ impl Manager {
             std::iter::from_fn(|| rx.try_recv().ok()).collect()
         };
 
-        // Process collected messages
         for msg in messages {
-            // Log all incoming notify messages for debugging
             log::debug!("Notify message from PID {}: {:?}", msg.pid, msg.fields);
-
-            // Validate NotifyAccess policy before processing
-            if !self.validate_notify_access(&msg) {
-                continue;
+            if self.validate_notify_access(&msg) {
+                self.dispatch_notify(&msg);
             }
+        }
+    }
 
-            if msg.is_ready() {
-                log::debug!(
-                    "READY received: sender_pid={}, main_pid={:?}, waiting_ready={:?}",
-                    msg.pid,
-                    msg.main_pid(),
-                    self.waiting_ready
-                );
-
-                // Find which service this PID belongs to
-                // Strategy:
-                // 1. If MAINPID is provided, try to find service by MAINPID first
-                // 2. Then try sender PID (msg.pid) - handles forking launchers
-                // 3. Fall back to matching any process in waiting_ready
-                let service_name = if let Some(main_pid) = msg.main_pid() {
-                    // Try MAINPID first
-                    if let Some(name) = self.waiting_ready.remove(&main_pid) {
-                        Some(name)
-                    } else {
-                        // MAINPID not in waiting_ready, try sender PID
-                        // This handles the case where launcher sends READY with MAINPID=child
-                        self.waiting_ready.remove(&msg.pid)
-                    }
-                } else {
-                    // No MAINPID, try sender PID first
-                    if let Some(name) = self.waiting_ready.remove(&msg.pid) {
-                        Some(name)
-                    } else {
-                        // Try to find by iterating processes
-                        let mut found = None;
-                        for (name, child) in &self.processes {
-                            if let Some(pid) = child.id() {
-                                if self.waiting_ready.contains_key(&pid) {
-                                    found = Some((pid, name.clone()));
-                                    break;
-                                }
-                            }
-                        }
-                        if let Some((pid, name)) = found {
-                            self.waiting_ready.remove(&pid);
-                            Some(name)
-                        } else {
-                            None
-                        }
-                    }
-                };
-
-                if let Some(name) = service_name {
-                    if let Some(state) = self.states.get_mut(&name) {
-                        let pid = self.processes.get(&name).and_then(|c| c.id()).unwrap_or(0);
-                        state.set_running(pid);
-                        self.active_jobs = self.active_jobs.saturating_sub(1);
-                        log::info!("{} signaled READY", name);
-
-                        // Set watchdog deadline for Type=notify services
-                        if let Some(wd) = self
-                            .units
-                            .get(&name)
-                            .and_then(|u| u.as_service())
-                            .and_then(|s| s.service.watchdog_sec)
-                        {
-                            self.watchdog_deadlines
-                                .insert(name.clone(), std::time::Instant::now() + wd);
-                        }
-                    }
-                } else {
-                    log::warn!(
-                        "READY message from PID {} (main_pid={:?}) could not be matched to any service",
-                        msg.pid,
-                        msg.main_pid()
-                    );
-                }
-            }
-
-            // Handle WATCHDOG=1 ping - reset the deadline
-            if msg.is_watchdog() {
-                // Find service by PID
-                let service_name = self
-                    .processes
-                    .iter()
-                    .find(|(_, child)| child.id() == Some(msg.pid))
-                    .map(|(name, _)| name.clone());
-
-                if let Some(name) = service_name {
-                    if let Some(wd) = self
-                        .units
-                        .get(&name)
-                        .and_then(|u| u.as_service())
-                        .and_then(|s| s.service.watchdog_sec)
-                    {
-                        self.watchdog_deadlines
-                            .insert(name.clone(), std::time::Instant::now() + wd);
-                        log::trace!("{} watchdog ping received", name);
-                    }
-                }
-            }
-
-            if msg.is_stopping() {
-                log::debug!("Service signaled STOPPING (PID hint: {})", msg.pid);
-            }
-
-            // M19: Handle FDSTORE=1 - store file descriptors for restart
-            if msg.is_fdstore() && !msg.fds.is_empty() {
-                self.handle_fdstore(&msg);
-            }
-
-            // M19: Handle FDSTOREREMOVE=1 - remove stored file descriptors
-            if msg.is_fdstoreremove() {
-                self.handle_fdstoreremove(&msg);
-            }
-
-            if let Some(status) = msg.status() {
-                log::debug!("Service status: {}", status);
-            }
+    fn dispatch_notify(&mut self, msg: &NotifyMessage) {
+        if msg.is_ready() {
+            self.handle_notify_ready(msg);
+        }
+        if msg.is_watchdog() {
+            self.handle_notify_watchdog_ping(msg);
+        }
+        if msg.is_stopping() {
+            log::debug!("Service signaled STOPPING (PID hint: {})", msg.pid);
+        }
+        if msg.is_fdstore() && !msg.fds.is_empty() {
+            self.handle_fdstore(msg);
+        }
+        if msg.is_fdstoreremove() {
+            self.handle_fdstoreremove(msg);
+        }
+        if let Some(status) = msg.status() {
+            log::debug!("Service status: {}", status);
         }
     }
 
     /// M19: Handle FDSTORE=1 notification - store FDs for service restart
     fn handle_fdstore(&mut self, msg: &NotifyMessage) {
-        // Find the service for this PID
         let service_name = self.find_service_by_pid(msg.pid);
         let Some(service_name) = service_name else {
             log::warn!(
@@ -235,7 +220,6 @@ impl Manager {
             return;
         };
 
-        // Check FileDescriptorStoreMax limit
         let max_fds = self
             .units
             .get(&service_name)
@@ -258,7 +242,6 @@ impl Manager {
         let fd_name = msg.fdname().unwrap_or("stored").to_string();
         let store = self.fd_store.entry(service_name.clone()).or_default();
 
-        // Store FDs up to the limit
         for fd in &msg.fds {
             if store.len() >= max_fds {
                 log::warn!(
@@ -298,6 +281,178 @@ impl Manager {
         }
     }
 
+    /// Handle Type=forking parent exit: read PIDFile and update state
+    /// Returns true if handled (caller should skip normal exit processing)
+    fn reap_forking_parent(&mut self, name: &str, code: i32) -> bool {
+        if code != 0 {
+            return false;
+        }
+
+        match self.pid_files.remove(name) {
+            Some(pid_file) => match std::fs::read_to_string(&pid_file) {
+                Ok(content) => match content.trim().parse::<u32>() {
+                    Ok(child_pid) => {
+                        if let Some(state) = self.states.get_mut(name) {
+                            state.set_running(child_pid);
+                            self.active_jobs = self.active_jobs.saturating_sub(1);
+                            log::info!(
+                                "{} forked, main PID {} (from {})",
+                                name,
+                                child_pid,
+                                pid_file.display()
+                            );
+                        }
+                        self.arm_watchdog(name);
+                        true
+                    }
+                    Err(_) => {
+                        log::warn!("{}: invalid PID in {}", name, pid_file.display());
+                        false
+                    }
+                },
+                Err(e) => {
+                    log::warn!(
+                        "{}: failed to read PIDFile {}: {}",
+                        name,
+                        pid_file.display(),
+                        e
+                    );
+                    false
+                }
+            },
+            None => {
+                log::warn!("{} forked but no PIDFile configured", name);
+                if let Some(state) = self.states.get_mut(name) {
+                    state.set_running(0);
+                }
+                self.active_jobs = self.active_jobs.saturating_sub(1);
+                self.arm_watchdog(name);
+                true
+            }
+        }
+    }
+
+    /// Apply restart/stop/fail state transitions after a process exits
+    fn apply_restart_decision(
+        &mut self,
+        name: &str,
+        code: i32,
+        is_oneshot: bool,
+        remain_after_exit: bool,
+        restart_policy: &RestartPolicy,
+        restart_sec: std::time::Duration,
+        start_limit_burst: Option<u32>,
+        start_limit_interval_sec: Option<std::time::Duration>,
+        restart_prevent_exit_status: &[i32],
+    ) {
+        let policy_wants_restart = match restart_policy {
+            RestartPolicy::No => false,
+            RestartPolicy::OnFailure => code != 0,
+            RestartPolicy::Always => true,
+        };
+        let exit_prevents_restart = restart_prevent_exit_status.contains(&code);
+
+        let Some(state) = self.states.get_mut(name) else {
+            return;
+        };
+
+        let rate_limited =
+            state.is_restart_rate_limited(start_limit_burst, start_limit_interval_sec);
+        let should_restart = policy_wants_restart && !exit_prevents_restart && !rate_limited;
+
+        if code == 0 {
+            if is_oneshot && remain_after_exit {
+                state.active = ActiveState::Active;
+                state.sub = SubState::Exited;
+                state.main_pid = None;
+                state.exit_code = Some(code);
+                state.reset_restart_count();
+                log::info!("{} exited (RemainAfterExit=yes)", name);
+            } else if should_restart {
+                state.set_auto_restart(restart_sec);
+                log::info!("{} exited, scheduling restart in {:?}", name, restart_sec);
+            } else {
+                state.set_stopped(code);
+                state.reset_restart_count();
+                log::info!("{} exited cleanly", name);
+            }
+        } else if rate_limited {
+            state.set_failed(format!(
+                "Start limit hit (burst {} in {:?})",
+                start_limit_burst.unwrap_or(0),
+                start_limit_interval_sec.unwrap_or(std::time::Duration::from_secs(10))
+            ));
+            log::error!("{} start limit hit, not restarting (exit {})", name, code);
+        } else if exit_prevents_restart {
+            state.set_stopped(code);
+            log::info!(
+                "{} exit code {} in RestartPreventExitStatus, not restarting",
+                name,
+                code
+            );
+        } else if should_restart {
+            state.set_auto_restart(restart_sec);
+            log::warn!(
+                "{} failed (exit {}), scheduling restart in {:?}",
+                name,
+                code,
+                restart_sec
+            );
+        } else {
+            state.set_failed(format!("Exit code {}", code));
+            log::warn!("{} failed with exit code {}", name, code);
+        }
+    }
+
+    /// Clean up cgroup, watchdog, dynamic UID, and stored FDs after a service exits
+    async fn cleanup_after_exit(&mut self, name: &str) {
+        self.cleanup_service_cgroup(name);
+        self.watchdog_deadlines.remove(name);
+
+        let is_restarting = self
+            .states
+            .get(name)
+            .is_some_and(|s| s.sub == SubState::AutoRestart);
+        if !is_restarting {
+            self.release_dynamic_uid(name);
+            self.close_stored_fds(name);
+        }
+
+        self.propagate_binds_to_stop(name).await;
+    }
+
+    fn cleanup_service_cgroup(&mut self, name: &str) {
+        if self.cgroup_paths.remove(name).is_none() {
+            return;
+        }
+        let slice = self
+            .units
+            .get(name)
+            .and_then(|u| u.as_service())
+            .and_then(|s| s.service.slice.as_deref());
+        if let Some(ref cgroup_mgr) = self.cgroup_manager {
+            if let Err(e) = cgroup_mgr.cleanup_service_cgroup(name, slice) {
+                log::debug!("Failed to clean up cgroup for {}: {}", name, e);
+            }
+        }
+    }
+
+    fn release_dynamic_uid(&mut self, name: &str) {
+        if let Some(uid) = self.dynamic_uids.remove(name) {
+            self.dynamic_user_manager.release(uid);
+            log::debug!("Released dynamic UID {} for {}", uid, name);
+        }
+    }
+
+    fn close_stored_fds(&mut self, name: &str) {
+        if let Some(fds) = self.fd_store.remove(name) {
+            for (fd_name, fd) in fds {
+                log::debug!("Closing stored FD {} ('{}') for {}", fd, fd_name, name);
+                unsafe { libc::close(fd) };
+            }
+        }
+    }
+
     /// Check on running processes and update states
     ///
     /// Uses waitpid(-1, WNOHANG) to reap any zombie processes, then looks up
@@ -311,42 +466,28 @@ impl Manager {
 
         let mut exited = Vec::new();
 
-        // Reap all available zombies using waitpid(-1, WNOHANG)
         loop {
             match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::StillAlive) => {
-                    // No more zombies to reap
-                    break;
-                }
+                Ok(WaitStatus::StillAlive) => break,
                 Ok(status) => {
-                    // Extract PID and exit code from status
                     let (pid, code) = match status {
                         WaitStatus::Exited(p, code) => (p.as_raw() as u32, code),
-                        WaitStatus::Signaled(p, signal, _) => {
-                            // Process killed by signal, use negative signal number
-                            (p.as_raw() as u32, -(signal as i32))
-                        }
+                        WaitStatus::Signaled(p, signal, _) => (p.as_raw() as u32, -(signal as i32)),
                         WaitStatus::Stopped(p, _) | WaitStatus::Continued(p) => {
-                            // Process stopped/continued, not exited - ignore
                             log::debug!("Process {} stopped/continued", p.as_raw());
                             continue;
                         }
                         _ => continue,
                     };
 
-                    // Look up which service this PID belongs to
                     if let Some(name) = self.pid_to_service.remove(&pid) {
                         log::debug!("Reaped {} (PID {}) with exit code {}", name, pid, code);
                         exited.push((name, code));
                     } else {
-                        // Orphaned process - just log and discard
                         log::debug!("Reaped orphaned process PID {} (exit {})", pid, code);
                     }
                 }
-                Err(nix::errno::Errno::ECHILD) => {
-                    // No children at all
-                    break;
-                }
+                Err(nix::errno::Errno::ECHILD) => break,
                 Err(e) => {
                     log::error!("waitpid error: {}", e);
                     break;
@@ -357,7 +498,6 @@ impl Manager {
         for (name, code) in exited {
             self.processes.remove(&name);
 
-            // Get service config for restart policy
             let (
                 restart_policy,
                 restart_sec,
@@ -394,187 +534,35 @@ impl Manager {
                     Vec::new(),
                 ));
 
-            // Handle Type=forking: parent exited, read PIDFile
-            if is_forking && code == 0 {
-                if let Some(pid_file) = self.pid_files.remove(&name) {
-                    match std::fs::read_to_string(&pid_file) {
-                        Ok(content) => {
-                            if let Ok(child_pid) = content.trim().parse::<u32>() {
-                                if let Some(state) = self.states.get_mut(&name) {
-                                    state.set_running(child_pid);
-                                    self.active_jobs = self.active_jobs.saturating_sub(1);
-                                    log::info!(
-                                        "{} forked, main PID {} (from {})",
-                                        name,
-                                        child_pid,
-                                        pid_file.display()
-                                    );
-                                }
-                                // Set watchdog deadline for Type=forking services
-                                if let Some(wd) = self
-                                    .units
-                                    .get(&name)
-                                    .and_then(|u| u.as_service())
-                                    .and_then(|s| s.service.watchdog_sec)
-                                {
-                                    self.watchdog_deadlines
-                                        .insert(name.clone(), std::time::Instant::now() + wd);
-                                }
-                                continue; // Don't process as normal exit
-                            } else {
-                                log::warn!("{}: invalid PID in {}", name, pid_file.display());
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!(
-                                "{}: failed to read PIDFile {}: {}",
-                                name,
-                                pid_file.display(),
-                                e
-                            );
-                        }
-                    }
-                } else {
-                    // No PIDFile - assume forked successfully, but we can't track the child
-                    log::warn!("{} forked but no PIDFile configured", name);
-                    if let Some(state) = self.states.get_mut(&name) {
-                        state.set_running(0); // Unknown PID
-                    }
-                    self.active_jobs = self.active_jobs.saturating_sub(1);
-                    // Set watchdog deadline even without PIDFile
-                    if let Some(wd) = self
-                        .units
-                        .get(&name)
-                        .and_then(|u| u.as_service())
-                        .and_then(|s| s.service.watchdog_sec)
-                    {
-                        self.watchdog_deadlines
-                            .insert(name.clone(), std::time::Instant::now() + wd);
-                    }
-                    continue;
-                }
+            if is_forking && self.reap_forking_parent(&name, code) {
+                continue;
             }
 
-            // Determine if we should restart (base policy)
-            let policy_wants_restart = match restart_policy {
-                RestartPolicy::No => false,
-                RestartPolicy::OnFailure => code != 0,
-                RestartPolicy::Always => true,
-            };
+            self.apply_restart_decision(
+                &name,
+                code,
+                is_oneshot,
+                remain_after_exit,
+                &restart_policy,
+                restart_sec,
+                start_limit_burst,
+                start_limit_interval_sec,
+                &restart_prevent_exit_status,
+            );
 
-            // Check if this exit code prevents restart (RestartPreventExitStatus=)
-            let exit_prevents_restart = restart_prevent_exit_status.contains(&code);
-
-            if let Some(state) = self.states.get_mut(&name) {
-                // Check rate limiting before deciding to restart
-                let rate_limited =
-                    state.is_restart_rate_limited(start_limit_burst, start_limit_interval_sec);
-
-                // Final decision: policy wants restart AND not prevented by exit status AND not rate limited
-                let should_restart =
-                    policy_wants_restart && !exit_prevents_restart && !rate_limited;
-
-                if code == 0 {
-                    // Clean exit
-                    if is_oneshot && remain_after_exit {
-                        // Keep as active (exited) for oneshot with RemainAfterExit=yes
-                        state.active = ActiveState::Active;
-                        state.sub = SubState::Exited;
-                        state.main_pid = None;
-                        state.exit_code = Some(code);
-                        state.reset_restart_count();
-                        log::info!("{} exited (RemainAfterExit=yes)", name);
-                    } else if should_restart {
-                        state.set_auto_restart(restart_sec);
-                        log::info!("{} exited, scheduling restart in {:?}", name, restart_sec);
-                    } else {
-                        state.set_stopped(code);
-                        state.reset_restart_count();
-                        log::info!("{} exited cleanly", name);
-                    }
-                } else {
-                    // Failed exit
-                    if rate_limited {
-                        state.set_failed(format!(
-                            "Start limit hit (burst {} in {:?})",
-                            start_limit_burst.unwrap_or(0),
-                            start_limit_interval_sec.unwrap_or(std::time::Duration::from_secs(10))
-                        ));
-                        log::error!("{} start limit hit, not restarting (exit {})", name, code);
-                    } else if exit_prevents_restart {
-                        state.set_stopped(code);
-                        log::info!(
-                            "{} exit code {} in RestartPreventExitStatus, not restarting",
-                            name,
-                            code
-                        );
-                    } else if should_restart {
-                        state.set_auto_restart(restart_sec);
-                        log::warn!(
-                            "{} failed (exit {}), scheduling restart in {:?}",
-                            name,
-                            code,
-                            restart_sec
-                        );
-                    } else {
-                        state.set_failed(format!("Exit code {}", code));
-                        log::warn!("{} failed with exit code {}", name, code);
-                    }
-                }
-            }
-
-            // Clean up cgroup
-            if self.cgroup_paths.remove(&name).is_some() {
-                // Get slice from service config for cleanup
-                let slice = self
-                    .units
-                    .get(&name)
-                    .and_then(|u| u.as_service())
-                    .and_then(|s| s.service.slice.as_deref());
-                if let Some(ref cgroup_mgr) = self.cgroup_manager {
-                    if let Err(e) = cgroup_mgr.cleanup_service_cgroup(&name, slice) {
-                        log::debug!("Failed to clean up cgroup for {}: {}", name, e);
-                    }
-                }
-            }
-
-            // Clean up watchdog (will be re-set on restart)
-            self.watchdog_deadlines.remove(&name);
-
-            // M19: Release dynamic UID and stored FDs if allocated (and not restarting)
-            if let Some(state) = self.states.get(&name) {
-                if state.sub != SubState::AutoRestart {
-                    // Release dynamic UID
-                    if let Some(uid) = self.dynamic_uids.remove(&name) {
-                        self.dynamic_user_manager.release(uid);
-                        log::debug!("Released dynamic UID {} for {}", uid, name);
-                    }
-                    // Close and remove stored FDs
-                    if let Some(fds) = self.fd_store.remove(&name) {
-                        for (fd_name, fd) in fds {
-                            log::debug!("Closing stored FD {} ('{}') for {}", fd, fd_name, name);
-                            unsafe { libc::close(fd) };
-                        }
-                    }
-                }
-            }
-
-            // M19: BindsTo= - stop units that have BindsTo= pointing to this unit
-            self.propagate_binds_to_stop(&name).await;
+            self.cleanup_after_exit(&name).await;
         }
     }
 
     /// M19: BindsTo= stop propagation
     /// When a unit stops, find all units with BindsTo= pointing to it and stop them
     async fn propagate_binds_to_stop(&mut self, stopped_unit: &str) {
-        // Collect units that need to be stopped
         let units_to_stop: Vec<String> = self
             .units
             .iter()
             .filter_map(|(name, unit)| {
                 let binds_to = &unit.unit_section().binds_to;
                 if binds_to.contains(&stopped_unit.to_string()) {
-                    // Check if this unit is currently active
                     if let Some(state) = self.states.get(name) {
                         if state.is_active() {
                             return Some(name.clone());
@@ -585,7 +573,6 @@ impl Manager {
             })
             .collect();
 
-        // Stop each bound unit
         for name in units_to_stop {
             log::info!("Stopping {} (BindsTo={} which stopped)", name, stopped_unit);
             if let Err(e) = self.stop(&name).await {
@@ -600,7 +587,6 @@ impl Manager {
 
     /// Process pending restarts
     pub async fn process_restarts(&mut self) {
-        // Collect services due for restart
         let due: Vec<String> = self
             .states
             .iter()
@@ -629,6 +615,28 @@ impl Manager {
         self.oneshot_completion_rx.take()
     }
 
+    /// Remove the cgroup for a service, logging results
+    fn cleanup_oneshot_cgroup(&mut self, service_name: &str) {
+        if let Some(cgroup_path) = self.cgroup_paths.remove(service_name) {
+            if let Some(ref cgroup_mgr) = self.cgroup_manager {
+                if let Err(e) = cgroup_mgr.remove_cgroup(&cgroup_path) {
+                    log::warn!("Failed to remove cgroup for {}: {}", service_name, e);
+                }
+                log::info!("Removed cgroup: {}", cgroup_path.display());
+            }
+        }
+    }
+
+    /// Fail a oneshot service, cleaning up state and cgroup
+    fn fail_oneshot(&mut self, service_name: &str, error: &str) {
+        self.cleanup_oneshot_cgroup(service_name);
+        self.active_jobs = self.active_jobs.saturating_sub(1);
+        if let Some(state) = self.states.get_mut(service_name) {
+            state.set_failed(error.to_string());
+        }
+        self.pending_oneshot_cmds.remove(service_name);
+    }
+
     /// Process oneshot completion messages
     pub async fn handle_oneshot_completion(&mut self, completion: super::OneshotCompletion) {
         let service_name = &completion.service_name;
@@ -640,30 +648,17 @@ impl Manager {
             completion.error
         );
 
-        // Check if it failed
         if let Some(ref error) = completion.error {
-            // Clean up cgroup
-            if let Some(cgroup_path) = self.cgroup_paths.remove(service_name) {
-                if let Some(ref cgroup_mgr) = self.cgroup_manager {
-                    if let Err(e) = cgroup_mgr.remove_cgroup(&cgroup_path) {
-                        log::warn!("Failed to remove cgroup for {}: {}", service_name, e);
-                    }
-                    log::info!("Removed cgroup: {}", cgroup_path.display());
-                }
-            }
-            self.active_jobs = self.active_jobs.saturating_sub(1);
-            if let Some(state) = self.states.get_mut(service_name) {
-                state.set_failed(error.clone());
-            }
-            self.pending_oneshot_cmds.remove(service_name);
-            log::warn!("Oneshot {} failed: {}", service_name, error);
+            let error = error.clone();
+            let name = service_name.clone();
+            self.fail_oneshot(&name, &error);
+            log::warn!("Oneshot {} failed: {}", name, error);
             return;
         }
 
-        // Check if there are more commands to run
-        if completion.cmd_idx + 1 < completion.total_cmds {
-            // Start next command
-            let next_idx = completion.cmd_idx + 1;
+        let next_idx = completion.cmd_idx + 1;
+
+        if next_idx < completion.total_cmds {
             log::debug!(
                 "Oneshot {} starting command {} of {}",
                 service_name,
@@ -671,7 +666,6 @@ impl Manager {
                 completion.total_cmds
             );
 
-            // Store pending state for next command
             self.pending_oneshot_cmds.insert(
                 service_name.clone(),
                 (
@@ -681,47 +675,30 @@ impl Manager {
                 ),
             );
 
-            // Start next command
-            if let Err(e) = self.start_oneshot_command(service_name, next_idx).await {
-                // Clean up cgroup
-                if let Some(cgroup_path) = self.cgroup_paths.remove(service_name) {
-                    if let Some(ref cgroup_mgr) = self.cgroup_manager {
-                        let _ = cgroup_mgr.remove_cgroup(&cgroup_path);
-                        log::info!("Removed cgroup: {}", cgroup_path.display());
-                    }
-                }
-                self.active_jobs = self.active_jobs.saturating_sub(1);
-                if let Some(state) = self.states.get_mut(service_name) {
-                    state.set_failed(format!("Command {} failed: {}", next_idx, e));
-                }
-                self.pending_oneshot_cmds.remove(service_name);
+            let name = service_name.clone();
+            if let Err(e) = self.start_oneshot_command(&name, next_idx).await {
+                let msg = format!("Command {} failed: {}", next_idx, e);
+                self.fail_oneshot(&name, &msg);
                 log::warn!(
                     "Oneshot {} command {} failed to start: {}",
-                    service_name,
+                    name,
                     next_idx,
                     e
                 );
             }
         } else {
-            // All commands completed successfully
-            if let Some(cgroup_path) = self.cgroup_paths.remove(service_name) {
-                if let Some(ref cgroup_mgr) = self.cgroup_manager {
-                    if let Err(e) = cgroup_mgr.remove_cgroup(&cgroup_path) {
-                        log::warn!("Failed to remove cgroup for {}: {}", service_name, e);
-                    }
-                    log::info!("Removed cgroup: {}", cgroup_path.display());
-                }
-            }
+            let name = service_name.clone();
+            self.cleanup_oneshot_cgroup(&name);
             self.active_jobs = self.active_jobs.saturating_sub(1);
-            if let Some(state) = self.states.get_mut(service_name) {
+            if let Some(state) = self.states.get_mut(&name) {
                 if completion.remain_after_exit {
                     state.set_exited();
                 } else {
                     state.set_inactive();
                 }
             }
-            self.pending_oneshot_cmds.remove(service_name);
-            log::info!("Oneshot {} completed successfully (exit 0)", service_name);
+            self.pending_oneshot_cmds.remove(&name);
+            log::info!("Oneshot {} completed successfully (exit 0)", name);
         }
     }
 
@@ -741,10 +718,8 @@ impl Manager {
         let total_cmds = service.service.exec_start.len();
         let remain_after_exit = service.service.remain_after_exit;
 
-        // Build spawn options
         let options = super::SpawnOptions::default();
 
-        // Spawn the command
         let child = super::process::spawn_service_via_executor(
             &service,
             &options,
@@ -760,7 +735,6 @@ impl Manager {
             pid
         );
 
-        // Add to existing cgroup if available
         if let Some(ref cgroup_path) = self.cgroup_paths.get(service_name) {
             if let Some(ref cgroup_mgr) = self.cgroup_manager {
                 if let Err(e) = cgroup_mgr.add_pid(cgroup_path, pid) {
@@ -774,7 +748,6 @@ impl Manager {
             }
         }
 
-        // Spawn task to wait for completion
         let service_name_clone = service_name.to_string();
         let tx = self.oneshot_completion_tx.clone();
 
@@ -813,7 +786,6 @@ impl Manager {
             return;
         }
 
-        // Try to connect to system bus
         let conn = match zbus::Connection::system().await {
             Ok(c) => c,
             Err(e) => {
@@ -822,10 +794,8 @@ impl Manager {
             }
         };
 
-        // Check each waited name
         let mut ready = Vec::new();
         for (bus_name, service_name) in &self.waiting_bus_name {
-            // Use the fdo DBus interface to check if the name has an owner
             match conn
                 .call_method(
                     Some("org.freedesktop.DBus"),
@@ -837,16 +807,12 @@ impl Manager {
                 .await
             {
                 Ok(_) => {
-                    // Name has an owner - service is ready
                     ready.push((bus_name.clone(), service_name.clone()));
                 }
-                Err(_) => {
-                    // Name not owned yet
-                }
+                Err(_) => {}
             }
         }
 
-        // Mark ready services as running
         for (bus_name, service_name) in ready {
             self.waiting_bus_name.remove(&bus_name);
             if let Some(state) = self.states.get_mut(&service_name) {
@@ -858,55 +824,39 @@ impl Manager {
                 state.set_running(pid);
                 self.active_jobs = self.active_jobs.saturating_sub(1);
                 log::info!("{} acquired D-Bus name {}", service_name, bus_name);
-
-                // Set watchdog deadline for Type=dbus services
-                if let Some(wd) = self
-                    .units
-                    .get(&service_name)
-                    .and_then(|u| u.as_service())
-                    .and_then(|s| s.service.watchdog_sec)
-                {
-                    self.watchdog_deadlines
-                        .insert(service_name.clone(), std::time::Instant::now() + wd);
-                }
             }
+            self.arm_watchdog(&service_name);
         }
     }
 
     /// Check for watchdog timeouts and restart services that missed their deadline
     pub async fn process_watchdog(&mut self) {
         let now = std::time::Instant::now();
-        let mut timed_out = Vec::new();
-
-        for (name, deadline) in &self.watchdog_deadlines {
-            if now > *deadline {
-                timed_out.push(name.clone());
-            }
-        }
+        let timed_out: Vec<String> = self
+            .watchdog_deadlines
+            .iter()
+            .filter(|(_, deadline)| now > **deadline)
+            .map(|(name, _)| name.clone())
+            .collect();
 
         for name in timed_out {
             self.watchdog_deadlines.remove(&name);
             log::warn!("{} watchdog timeout - restarting", name);
 
-            // Kill the service and let restart policy handle it
             if let Some(mut child) = self.processes.remove(&name) {
                 if let Some(pid) = child.id() {
-                    // Send SIGABRT (standard watchdog signal) then SIGKILL
                     unsafe {
                         libc::kill(pid as i32, libc::SIGABRT);
                     }
-                    // Give it a moment, then force kill
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     let _ = child.kill().await;
                 }
             }
 
-            // Update state to failed with watchdog reason
             if let Some(state) = self.states.get_mut(&name) {
                 state.set_failed("Watchdog timeout".to_string());
             }
 
-            // Schedule restart based on policy
             let restart_policy = self
                 .units
                 .get(&name)
