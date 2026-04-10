@@ -18,6 +18,172 @@ fn kmsg(msg: &str) {
     eprintln!("sysd: {}", msg);
 }
 
+fn ensure_mount_directory(mount_point: &str, mode: u32) {
+    if !std::path::Path::new(mount_point).exists() {
+        if let Err(e) = std::fs::create_dir_all(mount_point) {
+            log::warn!("Failed to create mount point {}: {}", mount_point, e);
+        } else if let Err(e) =
+            std::fs::set_permissions(mount_point, std::fs::Permissions::from_mode(mode))
+        {
+            log::warn!("Failed to set permissions on {}: {}", mount_point, e);
+        }
+    }
+}
+
+fn parse_mount_options(options: &str) -> (nix::mount::MsFlags, Vec<&str>, Vec<&str>) {
+    use nix::mount::MsFlags;
+
+    let mut flags = MsFlags::empty();
+    let mut data_options: Vec<&str> = Vec::new();
+    let mut graceful_options: Vec<&str> = Vec::new();
+
+    for opt in options.split(',') {
+        let opt = opt.trim();
+        match opt {
+            "ro" | "read-only" => flags |= MsFlags::MS_RDONLY,
+            "rw" => {}
+            "nosuid" => flags |= MsFlags::MS_NOSUID,
+            "nodev" => flags |= MsFlags::MS_NODEV,
+            "noexec" => flags |= MsFlags::MS_NOEXEC,
+            "noatime" => flags |= MsFlags::MS_NOATIME,
+            "nodiratime" => flags |= MsFlags::MS_NODIRATIME,
+            "relatime" => flags |= MsFlags::MS_RELATIME,
+            "strictatime" => flags |= MsFlags::MS_STRICTATIME,
+            "sync" => flags |= MsFlags::MS_SYNCHRONOUS,
+            "dirsync" => flags |= MsFlags::MS_DIRSYNC,
+            "silent" => flags |= MsFlags::MS_SILENT,
+            "bind" => flags |= MsFlags::MS_BIND,
+            "move" => flags |= MsFlags::MS_MOVE,
+            "remount" => flags |= MsFlags::MS_REMOUNT,
+            "defaults" => {}
+            other => {
+                if let Some(graceful_opt) = other.strip_prefix("x-systemd.graceful-option=") {
+                    graceful_options.push(graceful_opt);
+                    data_options.push(graceful_opt);
+                    continue;
+                }
+                if other.starts_with("x-systemd.")
+                    || other.starts_with("x-")
+                    || other == "_netdev"
+                    || other == "nofail"
+                    || other.starts_with("comment=")
+                {
+                    continue;
+                }
+                data_options.push(other);
+            }
+        }
+    }
+
+    (flags, data_options, graceful_options)
+}
+
+fn mount_with_graceful_retry(
+    what: &str,
+    mount_point: &str,
+    fs_type: &str,
+    flags: nix::mount::MsFlags,
+    data_options: &[&str],
+    graceful_options: &[&str],
+    name: &str,
+) -> nix::Result<()> {
+    use nix::mount::mount;
+
+    let data = if data_options.is_empty() {
+        None
+    } else {
+        Some(data_options.join(","))
+    };
+
+    let result = mount(
+        Some(what),
+        mount_point,
+        Some(fs_type),
+        flags,
+        data.as_deref(),
+    );
+
+    if let Err(nix::errno::Errno::EINVAL) = result {
+        if !graceful_options.is_empty() {
+            log::info!(
+                "{}: mount failed, retrying without graceful options: {:?}",
+                name,
+                graceful_options
+            );
+            let filtered: Vec<&str> = data_options
+                .iter()
+                .filter(|o| !graceful_options.contains(o))
+                .copied()
+                .collect();
+            let data = if filtered.is_empty() {
+                None
+            } else {
+                Some(filtered.join(","))
+            };
+            return mount(
+                Some(what),
+                mount_point,
+                Some(fs_type),
+                flags,
+                data.as_deref(),
+            );
+        }
+    }
+
+    result
+}
+
+fn finalize_mount_result(
+    name: &str,
+    what: &str,
+    mount_point: &str,
+    result: nix::Result<()>,
+    states: &mut std::collections::HashMap<String, super::ServiceState>,
+) -> Result<(), ManagerError> {
+    match result {
+        Ok(()) => {
+            log::info!("{} mounted successfully", name);
+            if let Some(state) = states.get_mut(name) {
+                state.set_running(0);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("mount {} at {} failed: {}", what, mount_point, e);
+            kmsg(&format!("MOUNT FAILED: {}", msg));
+            log::error!("{}: {}", name, msg);
+            if let Some(state) = states.get_mut(name) {
+                state.set_failed(msg.clone());
+            }
+            Err(ManagerError::Io(msg))
+        }
+    }
+}
+
+fn finalize_umount_result(
+    name: &str,
+    result: nix::Result<()>,
+    states: &mut std::collections::HashMap<String, super::ServiceState>,
+) -> Result<(), ManagerError> {
+    match result {
+        Ok(()) => {
+            log::info!("{} unmounted successfully", name);
+            if let Some(state) = states.get_mut(name) {
+                state.set_stopped(0);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("umount failed: {}", e);
+            log::error!("{}: {}", name, msg);
+            if let Some(state) = states.get_mut(name) {
+                state.set_failed(msg.clone());
+            }
+            Err(ManagerError::Io(msg))
+        }
+    }
+}
+
 impl Manager {
     /// Start a mount unit (execute mount operation)
     pub(super) async fn start_mount(
@@ -30,7 +196,6 @@ impl Manager {
             .get_mut(name)
             .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
 
-        // Check if already mounted
         if state.is_active() {
             return Err(ManagerError::AlreadyActive(name.to_string()));
         }
@@ -40,24 +205,13 @@ impl Manager {
         let mount_point = &mnt.mount.r#where;
         let what = &mnt.mount.what;
         let fs_type = mnt.mount.fs_type.as_deref().unwrap_or("auto");
-        // Apply specifier substitution: %% -> %
         let options_raw = mnt.mount.options.as_deref().unwrap_or("defaults");
         let options = options_raw.replace("%%", "%");
 
-        // Create mount point directory if needed
         if let Some(mode) = mnt.mount.directory_mode {
-            if !std::path::Path::new(mount_point).exists() {
-                if let Err(e) = std::fs::create_dir_all(mount_point) {
-                    log::warn!("Failed to create mount point {}: {}", mount_point, e);
-                } else if let Err(e) =
-                    std::fs::set_permissions(mount_point, std::fs::Permissions::from_mode(mode))
-                {
-                    log::warn!("Failed to set permissions on {}: {}", mount_point, e);
-                }
-            }
+            ensure_mount_directory(mount_point, mode);
         }
 
-        // Check if already mounted (via /proc/mounts)
         if is_mounted(mount_point) {
             kmsg(&format!(
                 "{} already mounted at {}, skipping",
@@ -74,7 +228,6 @@ impl Manager {
             name, mount_point
         ));
 
-        // Execute mount
         log::info!(
             "Mounting {} ({}) at {} with options {}",
             name,
@@ -83,118 +236,19 @@ impl Manager {
             options
         );
 
-        use nix::mount::{mount, MsFlags};
+        let (flags, data_options, graceful_options) = parse_mount_options(&options);
 
-        // Parse options into MsFlags and data options
-        let mut flags = MsFlags::empty();
-        let mut data_options: Vec<&str> = Vec::new();
-        let mut graceful_options: Vec<&str> = Vec::new(); // x-systemd.graceful-option=X
-
-        for opt in options.split(',') {
-            let opt = opt.trim();
-            match opt {
-                "ro" | "read-only" => flags |= MsFlags::MS_RDONLY,
-                "rw" => {} // default
-                "nosuid" => flags |= MsFlags::MS_NOSUID,
-                "nodev" => flags |= MsFlags::MS_NODEV,
-                "noexec" => flags |= MsFlags::MS_NOEXEC,
-                "noatime" => flags |= MsFlags::MS_NOATIME,
-                "nodiratime" => flags |= MsFlags::MS_NODIRATIME,
-                "relatime" => flags |= MsFlags::MS_RELATIME,
-                "strictatime" => flags |= MsFlags::MS_STRICTATIME,
-                "sync" => flags |= MsFlags::MS_SYNCHRONOUS,
-                "dirsync" => flags |= MsFlags::MS_DIRSYNC,
-                "silent" => flags |= MsFlags::MS_SILENT,
-                "bind" => flags |= MsFlags::MS_BIND,
-                "move" => flags |= MsFlags::MS_MOVE,
-                "remount" => flags |= MsFlags::MS_REMOUNT,
-                "defaults" => {} // no special flags
-                other => {
-                    // x-systemd.graceful-option=X: try X, but don't fail if unsupported
-                    if let Some(graceful_opt) = other.strip_prefix("x-systemd.graceful-option=") {
-                        graceful_options.push(graceful_opt);
-                        data_options.push(graceful_opt);
-                        continue;
-                    }
-                    // Filter out other userspace-only options (not passed to kernel)
-                    if other.starts_with("x-systemd.")
-                        || other.starts_with("x-")
-                        || other == "_netdev"
-                        || other == "nofail"
-                        || other.starts_with("comment=")
-                    {
-                        continue;
-                    }
-                    // Pass as data option to filesystem
-                    data_options.push(other);
-                }
-            }
-        }
-
-        let data = if data_options.is_empty() {
-            None
-        } else {
-            Some(data_options.join(","))
-        };
-
-        let result = mount(
-            Some(what.as_str()),
-            mount_point.as_str(),
-            Some(fs_type),
+        let result = mount_with_graceful_retry(
+            what,
+            mount_point,
+            fs_type,
             flags,
-            data.as_deref(),
+            &data_options,
+            &graceful_options,
+            name,
         );
 
-        // If mount failed with EINVAL and we have graceful options, retry without them
-        let result = if result.is_err() && !graceful_options.is_empty() {
-            if let Err(nix::errno::Errno::EINVAL) = result {
-                log::info!(
-                    "{}: mount failed, retrying without graceful options: {:?}",
-                    name,
-                    graceful_options
-                );
-                let filtered: Vec<&str> = data_options
-                    .iter()
-                    .filter(|o| !graceful_options.contains(o))
-                    .copied()
-                    .collect();
-                let data = if filtered.is_empty() {
-                    None
-                } else {
-                    Some(filtered.join(","))
-                };
-                mount(
-                    Some(what.as_str()),
-                    mount_point.as_str(),
-                    Some(fs_type),
-                    flags,
-                    data.as_deref(),
-                )
-            } else {
-                result
-            }
-        } else {
-            result
-        };
-
-        match result {
-            Ok(()) => {
-                log::info!("{} mounted successfully", name);
-                if let Some(state) = self.states.get_mut(name) {
-                    state.set_running(0);
-                }
-                Ok(())
-            }
-            Err(e) => {
-                let msg = format!("mount {} at {} failed: {}", what, mount_point, e);
-                kmsg(&format!("MOUNT FAILED: {}", msg));
-                log::error!("{}: {}", name, msg);
-                if let Some(state) = self.states.get_mut(name) {
-                    state.set_failed(msg.clone());
-                }
-                Err(ManagerError::Io(msg))
-            }
-        }
+        finalize_mount_result(name, what, mount_point, result, &mut self.states)
     }
 
     /// Stop a mount unit (execute umount operation)
@@ -212,7 +266,6 @@ impl Manager {
 
         let mount_point = &mnt.mount.r#where;
 
-        // Check if actually mounted
         if !is_mounted(mount_point) {
             log::debug!("{} not mounted, marking inactive", name);
             if let Some(state) = self.states.get_mut(name) {
@@ -235,23 +288,7 @@ impl Manager {
 
         let result = umount2(mount_point.as_str(), flags);
 
-        match result {
-            Ok(()) => {
-                log::info!("{} unmounted successfully", name);
-                if let Some(state) = self.states.get_mut(name) {
-                    state.set_stopped(0);
-                }
-                Ok(())
-            }
-            Err(e) => {
-                let msg = format!("umount failed: {}", e);
-                log::error!("{}: {}", name, msg);
-                if let Some(state) = self.states.get_mut(name) {
-                    state.set_failed(msg.clone());
-                }
-                Err(ManagerError::Io(msg))
-            }
-        }
+        finalize_umount_result(name, result, &mut self.states)
     }
 }
 
@@ -261,7 +298,6 @@ pub(super) fn is_mounted(path: &str) -> bool {
         return false;
     };
 
-    // Normalize path (remove trailing slashes except for root)
     let normalized = if path == "/" {
         path.to_string()
     } else {
@@ -272,7 +308,6 @@ pub(super) fn is_mounted(path: &str) -> bool {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 2 {
             let mount_point = parts[1];
-            // Handle escaped characters in mount points
             let mount_point = mount_point
                 .replace("\\040", " ")
                 .replace("\\011", "\t")
