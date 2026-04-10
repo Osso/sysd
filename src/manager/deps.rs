@@ -57,16 +57,8 @@ impl DepGraph {
         }
 
         // Before=X means we must start before X
-        // So X depends on us: edge from X to name
-        // Only add edge if X is a loaded unit
         for dep in &service.unit.before {
-            let resolved_dep = self.resolve(dep);
-            if self.nodes.contains(&resolved_dep) {
-                self.edges
-                    .entry(resolved_dep)
-                    .or_default()
-                    .insert(name.clone());
-            }
+            self.add_reverse_edge(name, dep);
         }
 
         // Requires=X and Wants=X imply After=X for ordering purposes
@@ -91,77 +83,42 @@ impl DepGraph {
 
         let section = unit.unit_section();
 
-        // DefaultDependencies=yes (default) adds implicit dependencies
-        // Different unit types get different default dependencies:
-        // - Services: After=basic.target, Before=shutdown.target
-        // - Sockets: After=sysinit.target, Before=sockets.target, Before=shutdown.target
-        // - Targets: no implicit ordering
         if section.default_dependencies && !unit.is_target() {
-            if unit.is_socket() {
-                // Sockets use sysinit.target, not basic.target
-                // This is crucial because dbus-broker.service has Before=basic.target
-                // but After=dbus.socket, so dbus.socket must NOT wait for basic.target
-                self.add_edge(name, "sysinit.target");
-
-                // Before=sockets.target - sockets.target depends on us (if loaded)
-                if self.nodes.contains("sockets.target") {
-                    self.edges
-                        .entry("sockets.target".to_string())
-                        .or_default()
-                        .insert(name.to_string());
-                }
-            } else {
-                // Services and other units wait for basic.target
-                self.add_edge(name, "basic.target");
-            }
-
-            // Before=shutdown.target - shutdown.target depends on us (if loaded)
-            if self.nodes.contains("shutdown.target") {
-                self.edges
-                    .entry("shutdown.target".to_string())
-                    .or_default()
-                    .insert(name.to_string());
-            }
+            self.add_default_dependencies(name, unit);
         }
 
-        // After=X means X must start before us
         for dep in &section.after {
             self.add_edge(name, dep);
         }
-
-        // Before=X means we must start before X
-        // Only add edge if X is a loaded unit
         for dep in &section.before {
-            let resolved_dep = self.resolve(dep);
-            if self.nodes.contains(&resolved_dep) {
-                self.edges
-                    .entry(resolved_dep)
-                    .or_default()
-                    .insert(name.to_string());
-            }
+            self.add_reverse_edge(name, dep);
         }
-
-        // Requires=X and Wants=X imply ordering dependency
         for dep in &section.requires {
             self.add_edge(name, dep);
         }
-
         for dep in &section.wants {
             self.add_edge(name, dep);
         }
-
-        // For targets, .wants directory entries are also dependencies
         for dep in unit.wants_dir() {
             self.add_edge(name, dep);
         }
     }
 
+    /// Add implicit ordering dependencies based on unit type
+    fn add_default_dependencies(&mut self, name: &str, unit: &Unit) {
+        if unit.is_socket() {
+            self.add_edge(name, "sysinit.target");
+            self.add_reverse_edge(name, "sockets.target");
+        } else {
+            self.add_edge(name, "basic.target");
+        }
+        self.add_reverse_edge(name, "shutdown.target");
+    }
+
     /// Add a directed edge: `from` depends on `to` (to must start first)
-    /// Resolves `to` through aliases to use canonical names
     /// Only creates edge if `to` is already a known node (loaded unit)
     fn add_edge(&mut self, from: &str, to: &str) {
         let resolved_to = self.resolve(to);
-        // Only add edge if target exists - After= on missing units is ignored
         if !self.nodes.contains(&resolved_to) {
             return;
         }
@@ -171,55 +128,32 @@ impl DepGraph {
             .insert(resolved_to);
     }
 
+    /// Add a reverse edge: `dependent` must start before `target`
+    /// (i.e., Before=target means target depends on us)
+    fn add_reverse_edge(&mut self, dependent: &str, target: &str) {
+        let resolved = self.resolve(target);
+        if self.nodes.contains(&resolved) {
+            self.edges
+                .entry(resolved)
+                .or_default()
+                .insert(dependent.to_string());
+        }
+    }
+
     /// Get direct dependencies of a node (nodes that must start before it)
     pub fn dependencies(&self, name: &str) -> impl Iterator<Item = &String> {
         self.edges.get(name).into_iter().flat_map(|s| s.iter())
     }
 
     /// Topological sort using Kahn's algorithm
-    /// Returns nodes in order they should be started, or an error if cycle detected
     pub fn toposort(&self) -> Result<Vec<String>, CycleError> {
-        // Calculate in-degree for each node
-        // in_degree[X] = number of dependencies X has (nodes that must start before X)
-        let mut in_degree: HashMap<String, usize> = HashMap::new();
-        for node in &self.nodes {
-            in_degree.insert(node.clone(), 0);
-        }
-
-        for (from, deps) in &self.edges {
-            // 'from' depends on all nodes in 'deps'
-            // This means 'from' can't start until all deps are done
-            *in_degree.entry(from.clone()).or_default() = deps.len();
-        }
-
-        // Start with nodes that have no dependencies
-        let mut queue: VecDeque<String> = in_degree
-            .iter()
-            .filter(|(_, &deg)| deg == 0)
-            .map(|(n, _)| n.clone())
-            .collect();
-
+        let mut in_degree = self.compute_in_degree(&self.nodes);
         let mut result = Vec::new();
 
-        while let Some(node) = queue.pop_front() {
-            result.push(node.clone());
-
-            // For each node that depends on this one, decrement its in-degree
-            for (dependent, deps) in &self.edges {
-                if deps.contains(&node) {
-                    if let Some(deg) = in_degree.get_mut(dependent) {
-                        *deg = deg.saturating_sub(1);
-                        if *deg == 0 {
-                            queue.push_back(dependent.clone());
-                        }
-                    }
-                }
-            }
-        }
+        kahn_drain(&self.edges, &mut in_degree, &mut result);
 
         if result.len() != self.nodes.len() {
-            // Find cycle participants
-            let remaining: Vec<String> = self
+            let remaining = self
                 .nodes
                 .iter()
                 .filter(|n| !result.contains(n))
@@ -232,13 +166,16 @@ impl DepGraph {
     }
 
     /// Get the start order for a specific target and its dependencies
-    /// Returns only the subset of nodes reachable from the target
     pub fn start_order_for(&self, target: &str) -> Result<Vec<String>, CycleError> {
-        // First collect all transitive dependencies (following graph edges)
-        let mut needed: HashSet<String> = HashSet::new();
-        let mut to_visit: VecDeque<String> = VecDeque::new();
+        let needed = self.transitive_deps(target);
+        self.toposort_subset(&needed)
+    }
 
-        // Only add target if it's in the graph
+    /// Collect all transitive dependencies reachable from a node
+    fn transitive_deps(&self, target: &str) -> HashSet<String> {
+        let mut needed = HashSet::new();
+        let mut to_visit = VecDeque::new();
+
         if self.nodes.contains(target) {
             to_visit.push_back(target.to_string());
             needed.insert(target.to_string());
@@ -247,7 +184,6 @@ impl DepGraph {
         while let Some(node) = to_visit.pop_front() {
             if let Some(deps) = self.edges.get(&node) {
                 for dep in deps {
-                    // Only follow edges to nodes that exist in our graph
                     if self.nodes.contains(dep) && needed.insert(dep.clone()) {
                         to_visit.push_back(dep.clone());
                     }
@@ -255,117 +191,119 @@ impl DepGraph {
             }
         }
 
-        // Toposort only the subgraph of needed nodes
-        // This avoids cycles from nodes we don't care about (like shutdown.target)
-        self.toposort_subset(&needed)
+        needed
     }
 
-    /// Toposort a subset of the graph, ignoring nodes outside the subset
-    /// If cycles exist, break them by adding cycle members in arbitrary order
+    /// Toposort a subset of the graph, breaking cycles if needed
     fn toposort_subset(&self, subset: &HashSet<String>) -> Result<Vec<String>, CycleError> {
-        // Build in-degree map for subset nodes only
-        let mut in_degree: HashMap<String, usize> = HashMap::new();
-        for node in subset {
-            in_degree.insert(node.clone(), 0);
-        }
-
-        // Count only edges within the subset
-        for (from, deps) in &self.edges {
-            if subset.contains(from) {
-                let subset_deps = deps.iter().filter(|d| subset.contains(*d)).count();
-                *in_degree.entry(from.clone()).or_default() = subset_deps;
-            }
-        }
-
-        // Start with nodes that have no dependencies (within subset)
-        let mut queue: VecDeque<String> = in_degree
-            .iter()
-            .filter(|(_, &deg)| deg == 0)
-            .map(|(n, _)| n.clone())
-            .collect();
-
+        let mut in_degree = self.compute_in_degree(subset);
         let mut result = Vec::new();
-        let mut added: HashSet<String> = HashSet::new();
 
-        while result.len() < subset.len() {
-            if let Some(node) = queue.pop_front() {
-                if added.insert(node.clone()) {
-                    result.push(node.clone());
-                } else {
-                    continue; // Skip duplicates
-                }
+        loop {
+            let before = result.len();
+            kahn_drain(&self.edges, &mut in_degree, &mut result);
 
-                // For each node in subset that depends on this one, decrement in-degree
-                for (dependent, deps) in &self.edges {
-                    if subset.contains(dependent) && deps.contains(&node) {
-                        if let Some(deg) = in_degree.get_mut(dependent) {
-                            *deg = deg.saturating_sub(1);
-                            if *deg == 0 {
-                                queue.push_back(dependent.clone());
-                            }
-                        }
-                    }
-                }
-            } else {
-                // No nodes with zero in-degree - we have a cycle
-                // Break it by picking a node with minimum in-degree from remaining
-                let remaining: Vec<_> = in_degree
-                    .iter()
-                    .filter(|(n, &deg)| deg > 0 && !result.contains(n))
-                    .collect();
-
-                if remaining.is_empty() {
-                    break;
-                }
-
-                // Pick node to break cycle, prioritizing by unit type:
-                // 1. Targets (sync points, no process)
-                // 2. Mounts (filesystem setup)
-                // 3. Sockets (needed by services, quick to create)
-                // 4. Paths, timers, slices (quick setup)
-                // 5. Services (last - most complex, may need sockets)
-                // Within same priority, pick minimum in-degree
-                let unit_type_priority = |name: &str| -> u8 {
-                    if name.ends_with(".target") {
-                        0
-                    } else if name.ends_with(".mount") {
-                        1
-                    } else if name.ends_with(".socket") {
-                        2
-                    } else if name.ends_with(".path")
-                        || name.ends_with(".timer")
-                        || name.ends_with(".slice")
-                    {
-                        3
-                    } else {
-                        4 // .service and others
-                    }
-                };
-
-                let (cycle_node, _) = remaining
-                    .iter()
-                    .min_by_key(|(name, &deg)| (unit_type_priority(name), deg))
-                    .unwrap();
-
-                // Show all cycle participants for debugging
-                let cycle_units: Vec<_> = remaining.iter().map(|(n, _)| n.as_str()).collect();
-                log::warn!(
-                    "Breaking ordering cycle: starting {} early (cycle involves: {})",
-                    cycle_node,
-                    cycle_units.join(", ")
-                );
-                eprintln!(
-                    "sysd: WARNING: Breaking ordering cycle by starting {} early",
-                    cycle_node
-                );
-
-                // Add it and reset its in-degree
-                queue.push_back(cycle_node.to_string());
-                in_degree.insert(cycle_node.to_string(), 0);
+            if result.len() >= subset.len() {
+                break;
+            }
+            if result.len() == before && !break_cycle(&mut in_degree, &result) {
+                break;
             }
         }
 
         Ok(result)
+    }
+
+    /// Build in-degree map for a set of nodes, counting only edges within the set
+    fn compute_in_degree(&self, nodes: &HashSet<String>) -> HashMap<String, usize> {
+        let mut in_degree: HashMap<String, usize> = nodes.iter().map(|n| (n.clone(), 0)).collect();
+
+        for (from, deps) in &self.edges {
+            if nodes.contains(from) {
+                let count = deps.iter().filter(|d| nodes.contains(*d)).count();
+                *in_degree.entry(from.clone()).or_default() = count;
+            }
+        }
+
+        in_degree
+    }
+}
+
+/// Run Kahn's BFS: pop zero-in-degree nodes, decrement dependents
+fn kahn_drain(
+    edges: &HashMap<String, HashSet<String>>,
+    in_degree: &mut HashMap<String, usize>,
+    result: &mut Vec<String>,
+) {
+    let mut queue: VecDeque<String> = in_degree
+        .iter()
+        .filter(|(n, &deg)| deg == 0 && !result.contains(n))
+        .map(|(n, _)| n.clone())
+        .collect();
+
+    while let Some(node) = queue.pop_front() {
+        if result.contains(&node) {
+            continue;
+        }
+        result.push(node.clone());
+
+        for (dependent, deps) in edges {
+            if deps.contains(&node) {
+                if let Some(deg) = in_degree.get_mut(dependent) {
+                    *deg = deg.saturating_sub(1);
+                    if *deg == 0 {
+                        queue.push_back(dependent.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Break a cycle by picking the best candidate to start early.
+/// Returns false if no candidates remain.
+fn break_cycle(in_degree: &mut HashMap<String, usize>, result: &[String]) -> bool {
+    let remaining: Vec<_> = in_degree
+        .iter()
+        .filter(|(n, &deg)| deg > 0 && !result.contains(n))
+        .collect();
+
+    if remaining.is_empty() {
+        return false;
+    }
+
+    let (cycle_node, _) = remaining
+        .iter()
+        .min_by_key(|(name, &deg)| (unit_type_priority(name), deg))
+        .unwrap();
+
+    let cycle_units: Vec<_> = remaining.iter().map(|(n, _)| n.as_str()).collect();
+    log::warn!(
+        "Breaking ordering cycle: starting {} early (cycle involves: {})",
+        cycle_node,
+        cycle_units.join(", ")
+    );
+    eprintln!(
+        "sysd: WARNING: Breaking ordering cycle by starting {} early",
+        cycle_node
+    );
+
+    in_degree.insert(cycle_node.to_string(), 0);
+    true
+}
+
+/// Priority for cycle breaking: lower = start earlier
+fn unit_type_priority(name: &str) -> u8 {
+    if name.ends_with(".target") {
+        0
+    } else if name.ends_with(".mount") {
+        1
+    } else if name.ends_with(".socket") {
+        2
+    } else if name.ends_with(".path") || name.ends_with(".timer") || name.ends_with(".slice") {
+        3
+    } else {
+        4
     }
 }
 
