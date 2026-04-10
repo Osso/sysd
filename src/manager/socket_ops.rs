@@ -417,9 +417,10 @@ impl Manager {
         Ok(())
     }
 
-    /// Get listening socket FDs for a service (for socket activation)
-    pub fn get_socket_fds(&self, service_name: &str) -> Vec<RawFd> {
-        // Check if service has explicit Sockets= directive
+    fn for_each_service_socket<F>(&self, service_name: &str, mut callback: F)
+    where
+        F: FnMut(&str, &[RawFd]),
+    {
         if let Some(service) = self.units.get(service_name).and_then(|u| u.as_service()) {
             if !service.service.sockets.is_empty() {
                 log::debug!(
@@ -428,8 +429,7 @@ impl Manager {
                     service.service.sockets,
                     self.socket_fds.keys().collect::<Vec<_>>()
                 );
-                // Collect FDs from all named sockets
-                let mut fds = Vec::new();
+                let mut found_any = false;
                 for socket_name in &service.service.sockets {
                     if let Some(socket_fds) = self.socket_fds.get(socket_name) {
                         log::debug!(
@@ -438,35 +438,40 @@ impl Manager {
                             socket_fds,
                             socket_name
                         );
-                        fds.extend(socket_fds.iter().copied());
+                        callback(socket_name, socket_fds);
+                        found_any = true;
                     } else {
                         log::warn!("{}: socket {} not in socket_fds", service_name, socket_name);
                     }
                 }
-                if !fds.is_empty() {
-                    return fds;
+                if found_any {
+                    return;
                 }
             }
         }
 
-        // Fall back to name matching: find socket unit that activates this service
         for (socket_name, unit) in &self.units {
             if let Some(socket) = unit.as_socket() {
                 if socket.service_name() == service_name {
-                    if let Some(fds) = self.socket_fds.get(socket_name) {
-                        return fds.clone();
+                    if let Some(socket_fds) = self.socket_fds.get(socket_name) {
+                        callback(socket_name, socket_fds);
+                        return;
                     }
                 }
             }
         }
-        Vec::new()
     }
 
-    /// Get socket FD names for a service (for LISTEN_FDNAMES)
-    /// Returns names in the same order as get_socket_fds returns FDs
+    pub fn get_socket_fds(&self, service_name: &str) -> Vec<RawFd> {
+        let mut fds = Vec::new();
+        self.for_each_service_socket(service_name, |_, socket_fds| {
+            fds.extend(socket_fds.iter().copied());
+        });
+        fds
+    }
+
     pub fn get_socket_fd_names(&self, service_name: &str) -> Vec<String> {
-        // Helper to get fd_name for a socket, with fallback to socket name
-        let get_fd_name = |socket_name: &str| -> String {
+        let resolve_fd_name = |socket_name: &str| -> String {
             if let Some(socket) = self.units.get(socket_name).and_then(|u| u.as_socket()) {
                 socket.socket.fd_name.clone().unwrap_or_else(|| {
                     socket_name
@@ -482,39 +487,14 @@ impl Manager {
             }
         };
 
-        // Check if service has explicit Sockets= directive
-        if let Some(service) = self.units.get(service_name).and_then(|u| u.as_service()) {
-            if !service.service.sockets.is_empty() {
-                // Collect names from all named sockets (one name per FD)
-                let mut names = Vec::new();
-                for socket_name in &service.service.sockets {
-                    if let Some(socket_fds) = self.socket_fds.get(socket_name) {
-                        let fd_name = get_fd_name(socket_name);
-                        // Each FD gets the same name (as per systemd behavior)
-                        for _ in 0..socket_fds.len() {
-                            names.push(fd_name.clone());
-                        }
-                    }
-                }
-                if !names.is_empty() {
-                    return names;
-                }
+        let mut names = Vec::new();
+        self.for_each_service_socket(service_name, |socket_name, socket_fds| {
+            let fd_name = resolve_fd_name(socket_name);
+            for _ in 0..socket_fds.len() {
+                names.push(fd_name.clone());
             }
-        }
-
-        // Fall back to name matching: find socket unit that activates this service
-        for (socket_name, unit) in &self.units {
-            if let Some(socket) = unit.as_socket() {
-                if socket.service_name() == service_name {
-                    if let Some(socket_fds) = self.socket_fds.get(socket_name) {
-                        let fd_name = get_fd_name(socket_name);
-                        // Each FD gets the same name
-                        return vec![fd_name; socket_fds.len()];
-                    }
-                }
-            }
-        }
-        Vec::new()
+        });
+        names
     }
 
     /// Take the socket activation receiver (for use in event loops)
