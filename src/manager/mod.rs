@@ -689,109 +689,23 @@ impl Manager {
             .map_err(|e| ManagerError::Cycle(e.nodes))
     }
 
-    /// Start a single unit (internal, assumes already loaded)
-    async fn start_single(&mut self, name: &str) -> Result<(), ManagerError> {
-        log::debug!("start_single({})", name);
-        // Debug: log when dbus-related units start
-        if name.contains("dbus") {
-            log::info!(
-                ">>> start_single({}) - socket_fds keys: {:?}",
-                name,
-                self.socket_fds.keys().collect::<Vec<_>>()
-            );
+    async fn wait_for_idle_queue(&mut self, name: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.active_jobs > 1 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-
-        // Load if not already loaded (may resolve symlink to different name)
-        let actual_name = if self.units.contains_key(name) {
-            name.to_string()
-        } else {
-            self.load(name).await?
-        };
-
-        let unit = self
-            .units
-            .get(&actual_name)
-            .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
-
-        // Targets are synchronization points, no process to start
-        if unit.is_target() {
-            return Err(ManagerError::IsTarget(actual_name.to_string()));
+        if self.active_jobs > 1 {
+            log::debug!("{}: idle timeout, proceeding anyway", name);
         }
+    }
 
-        // Handle slice units (create cgroup dir and mark active)
-        if let Some(slice) = unit.as_slice().cloned() {
-            return self.start_slice(&actual_name, &slice).await;
-        }
-
-        // Handle socket units (create listening sockets)
-        if let Some(socket) = unit.as_socket().cloned() {
-            return self.start_socket(&actual_name, &socket).await;
-        }
-
-        // Handle timer units (schedule service activation)
-        if let Some(timer) = unit.as_timer().cloned() {
-            return self.start_timer(&actual_name, &timer).await;
-        }
-
-        // Handle path units (set up filesystem watches)
-        if let Some(path_unit) = unit.as_path().cloned() {
-            return self.start_path(&actual_name, &path_unit).await;
-        }
-
-        // Check conditions before starting
-        if let Some(reason) = self.check_conditions(unit) {
-            log::info!("{}: condition failed: {}", actual_name, reason);
-            return Err(ManagerError::ConditionFailed(
-                actual_name.to_string(),
-                reason,
-            ));
-        }
-
-        // Handle mount units
-        if let Some(mnt) = unit.as_mount().cloned() {
-            return self.start_mount(&actual_name, &mnt).await;
-        }
-
-        let service = unit
-            .as_service()
-            .ok_or_else(|| ManagerError::NotFound(actual_name.to_string()))?
-            .clone();
-        let service = &service;
-
-        let state = self
-            .states
-            .get_mut(&actual_name)
-            .ok_or_else(|| ManagerError::NotFound(actual_name.to_string()))?;
-
-        // Check if already running
-        if state.is_active() {
-            return Err(ManagerError::AlreadyActive(actual_name.to_string()));
-        }
-
-        // Update state to starting
-        state.set_starting();
-        self.active_jobs += 1;
-
-        // Type=idle: wait for job queue to be empty (or timeout)
-        let is_idle = service.service.service_type == ServiceType::Idle;
-        if is_idle {
-            // Wait up to 5 seconds for other jobs to complete
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while self.active_jobs > 1 && std::time::Instant::now() < deadline {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-            if self.active_jobs > 1 {
-                log::debug!("{}: idle timeout, proceeding anyway", actual_name);
-            }
-        }
-
-        // Prepare spawn options
-        let is_notify = service.service.service_type == ServiceType::Notify;
-        let watchdog_usec = service.service.watchdog_sec.map(|d| d.as_micros() as u64);
+    fn prepare_socket_fds(
+        &self,
+        service: &Service,
+        actual_name: &str,
+    ) -> (Vec<RawFd>, Vec<String>) {
         let socket_fds = self.get_socket_fds(&service.name);
         let socket_fd_names = self.get_socket_fd_names(&service.name);
-
-        // DEBUG: Log socket FDs being passed
         if !socket_fds.is_empty() {
             log::info!(
                 "{}: passing socket FDs {:?} names {:?}",
@@ -807,31 +721,47 @@ impl Manager {
                 self.socket_fds.keys().collect::<Vec<_>>()
             );
         }
+        (socket_fds, socket_fd_names)
+    }
 
-        // M19: DynamicUser= - allocate ephemeral UID/GID
-        let (dynamic_uid, dynamic_gid) = if service.service.dynamic_user {
-            match self.dynamic_user_manager.allocate(&actual_name) {
+    fn allocate_dynamic_user(
+        &mut self,
+        name: &str,
+        service: &Service,
+    ) -> Result<(Option<u32>, Option<u32>), ManagerError> {
+        if service.service.dynamic_user {
+            match self.dynamic_user_manager.allocate(name) {
                 Ok((uid, gid)) => {
-                    self.dynamic_uids.insert(actual_name.to_string(), uid);
-                    log::info!("Allocated dynamic UID/GID {} for {}", uid, actual_name);
-                    (Some(uid), Some(gid))
+                    self.dynamic_uids.insert(name.to_string(), uid);
+                    log::info!("Allocated dynamic UID/GID {} for {}", uid, name);
+                    Ok((Some(uid), Some(gid)))
                 }
                 Err(e) => {
-                    log::error!("Failed to allocate dynamic user for {}: {}", actual_name, e);
-                    return Err(ManagerError::StartFailed(e.to_string()));
+                    log::error!("Failed to allocate dynamic user for {}: {}", name, e);
+                    Err(ManagerError::StartFailed(e.to_string()))
                 }
             }
         } else {
-            (None, None)
-        };
+            Ok((None, None))
+        }
+    }
 
-        // M19: Get stored FDs for restart (FileDescriptorStoreMax=)
+    fn build_spawn_options(
+        &self,
+        service: &Service,
+        actual_name: &str,
+        socket_fds: Vec<RawFd>,
+        socket_fd_names: Vec<String>,
+        dynamic_uid: Option<u32>,
+        dynamic_gid: Option<u32>,
+    ) -> SpawnOptions {
+        let is_notify = service.service.service_type == ServiceType::Notify;
+        let watchdog_usec = service.service.watchdog_sec.map(|d| d.as_micros() as u64);
         let stored_fds: Vec<RawFd> = self
             .fd_store
-            .get(&actual_name)
+            .get(actual_name)
             .map(|fds| fds.iter().map(|(_, fd)| *fd).collect())
             .unwrap_or_default();
-
         let options = SpawnOptions {
             notify_socket: if is_notify || watchdog_usec.is_some() {
                 self.notify_socket_path()
@@ -847,8 +777,6 @@ impl Manager {
             stored_fds,
             user_environment: self.user_environment.clone(),
         };
-
-        // Debug: log NOTIFY_SOCKET for Type=notify services
         if is_notify {
             log::debug!(
                 "{}: Type=notify, NOTIFY_SOCKET={:?}",
@@ -856,70 +784,23 @@ impl Manager {
                 options.notify_socket
             );
         }
+        options
+    }
 
-        // Type=oneshot services run all ExecStart commands in sequence
-        // Commands are run asynchronously to avoid blocking socket activation
-        if service.service.service_type == ServiceType::Oneshot {
-            let num_commands = service.service.exec_start.len();
-            log::info!(
-                "Starting oneshot {} ({} command{})",
-                actual_name,
-                num_commands,
-                if num_commands == 1 { "" } else { "s" }
-            );
+    fn start_oneshot_service(
+        &mut self,
+        actual_name: &str,
+        service: &Service,
+        options: SpawnOptions,
+    ) -> Result<(), ManagerError> {
+        let num_commands = service.service.exec_start.len();
+        log::info!(
+            "Starting oneshot {} ({} command{})",
+            actual_name,
+            num_commands,
+            if num_commands == 1 { "" } else { "s" }
+        );
 
-            // Spawn first command
-            let child =
-                process::spawn_service_via_executor(service, &options, &self.executor_path, 0)?;
-            log::debug!("{}: spawn returned, getting PID", actual_name);
-            let pid = child.id().unwrap_or(0);
-            log::debug!("{}: PID is {}", actual_name, pid);
-
-            let limits = service_cgroup_limits(service);
-            let slice = service.service.slice.as_deref().map(str::to_string);
-            let delegate = service.service.delegate;
-            self.setup_cgroup_for_service(&actual_name, pid, &limits, slice.as_deref(), delegate);
-
-            log::info!("Started {} (PID {})", actual_name, pid);
-
-            // Spawn async task to wait for command completion
-            // This allows the manager lock to be released so socket activation can proceed
-            let service_name_clone = actual_name.clone();
-            let total_cmds = num_commands;
-            let remain_after_exit = service.service.remain_after_exit;
-            let tx = self.oneshot_completion_tx.clone();
-
-            tokio::spawn(async move {
-                let result = child.wait_with_output().await;
-                let (exit_code, error) = match result {
-                    Ok(output) => {
-                        let code = output.status.code().unwrap_or(-1);
-                        if code == 0 {
-                            (Some(0), None)
-                        } else {
-                            (Some(code), Some(format!("exit code {}", code)))
-                        }
-                    }
-                    Err(e) => (None, Some(e.to_string())),
-                };
-
-                let _ = tx
-                    .send(OneshotCompletion {
-                        service_name: service_name_clone,
-                        cmd_idx: 0,
-                        total_cmds,
-                        exit_code,
-                        error,
-                        remain_after_exit,
-                    })
-                    .await;
-            });
-
-            // Service is now activating - completion will be handled by background task
-            return Ok(());
-        }
-
-        // Non-oneshot services: spawn single process (first ExecStart command)
         let child = process::spawn_service_via_executor(service, &options, &self.executor_path, 0)?;
         log::debug!("{}: spawn returned, getting PID", actual_name);
         let pid = child.id().unwrap_or(0);
@@ -928,23 +809,53 @@ impl Manager {
         let limits = service_cgroup_limits(service);
         let slice = service.service.slice.as_deref().map(str::to_string);
         let delegate = service.service.delegate;
-        self.setup_cgroup_for_service(&actual_name, pid, &limits, slice.as_deref(), delegate);
+        self.setup_cgroup_for_service(actual_name, pid, &limits, slice.as_deref(), delegate);
+        log::info!("Started {} (PID {})", actual_name, pid);
 
-        // Store the child process and track PID -> service mapping
-        self.processes.insert(actual_name.to_string(), child);
-        self.pid_to_service.insert(pid, actual_name.to_string());
+        let service_name_clone = actual_name.to_string();
+        let total_cmds = num_commands;
+        let remain_after_exit = service.service.remain_after_exit;
+        let tx = self.oneshot_completion_tx.clone();
 
-        let is_forking = service.service.service_type == ServiceType::Forking;
+        tokio::spawn(async move {
+            let result = child.wait_with_output().await;
+            let (exit_code, error) = match result {
+                Ok(output) => {
+                    let code = output.status.code().unwrap_or(-1);
+                    if code == 0 {
+                        (Some(0), None)
+                    } else {
+                        (Some(code), Some(format!("exit code {}", code)))
+                    }
+                }
+                Err(e) => (None, Some(e.to_string())),
+            };
+            let _ = tx
+                .send(OneshotCompletion {
+                    service_name: service_name_clone,
+                    cmd_idx: 0,
+                    total_cmds,
+                    exit_code,
+                    error,
+                    remain_after_exit,
+                })
+                .await;
+        });
+
+        Ok(())
+    }
+
+    fn configure_post_spawn_state(&mut self, actual_name: &str, pid: u32, service: &Service) {
+        let is_notify = service.service.service_type == ServiceType::Notify;
         let is_dbus = service.service.service_type == ServiceType::Dbus;
+        let is_forking = service.service.service_type == ServiceType::Forking;
         let pid_file = service.service.pid_file.clone();
         let bus_name = service.service.bus_name.clone();
 
         if is_notify {
-            // Type=notify: stay in starting state until READY=1 received
             self.waiting_ready.insert(pid, actual_name.to_string());
             log::info!("Started {} (PID {}), waiting for READY", actual_name, pid);
         } else if is_dbus {
-            // Type=dbus: wait for BusName to appear on D-Bus
             if let Some(ref bn) = bus_name {
                 self.waiting_bus_name
                     .insert(bn.clone(), actual_name.to_string());
@@ -955,38 +866,140 @@ impl Manager {
                     bn
                 );
             } else {
-                // No BusName specified - treat like simple
                 log::warn!(
                     "{} is Type=dbus but has no BusName=, treating as simple",
                     actual_name
                 );
-                if let Some(state) = self.states.get_mut(&actual_name) {
+                if let Some(state) = self.states.get_mut(actual_name) {
                     state.set_running(pid);
                 }
                 self.active_jobs = self.active_jobs.saturating_sub(1);
                 log::info!("Started {} (PID {})", actual_name, pid);
             }
         } else if is_forking {
-            // Type=forking: wait for parent to exit, then read PIDFile
             log::info!("Started {} (PID {}), waiting for fork", actual_name, pid);
-            // Store PIDFile path for later use in reap()
             if let Some(pf) = pid_file {
                 log::debug!("{} will read PID from {}", actual_name, pf.display());
                 self.pid_files.insert(actual_name.to_string(), pf);
             }
         } else {
-            // Type=simple/idle: immediately mark as running
-            if let Some(state) = self.states.get_mut(&actual_name) {
+            if let Some(state) = self.states.get_mut(actual_name) {
                 state.set_running(pid);
             }
             self.active_jobs = self.active_jobs.saturating_sub(1);
-            // Set watchdog deadline if configured
             if let Some(wd) = service.service.watchdog_sec {
                 self.watchdog_deadlines
                     .insert(actual_name.to_string(), std::time::Instant::now() + wd);
             }
             log::info!("Started {} (PID {})", actual_name, pid);
         }
+    }
+
+    /// Start a single unit (internal, assumes already loaded)
+    async fn start_single(&mut self, name: &str) -> Result<(), ManagerError> {
+        log::debug!("start_single({})", name);
+        if name.contains("dbus") {
+            log::info!(
+                ">>> start_single({}) - socket_fds keys: {:?}",
+                name,
+                self.socket_fds.keys().collect::<Vec<_>>()
+            );
+        }
+
+        let actual_name = if self.units.contains_key(name) {
+            name.to_string()
+        } else {
+            self.load(name).await?
+        };
+
+        let unit = self
+            .units
+            .get(&actual_name)
+            .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
+
+        if unit.is_target() {
+            return Err(ManagerError::IsTarget(actual_name.to_string()));
+        }
+
+        if let Some(slice) = unit.as_slice().cloned() {
+            return self.start_slice(&actual_name, &slice).await;
+        }
+
+        if let Some(socket) = unit.as_socket().cloned() {
+            return self.start_socket(&actual_name, &socket).await;
+        }
+
+        if let Some(timer) = unit.as_timer().cloned() {
+            return self.start_timer(&actual_name, &timer).await;
+        }
+
+        if let Some(path_unit) = unit.as_path().cloned() {
+            return self.start_path(&actual_name, &path_unit).await;
+        }
+
+        if let Some(reason) = self.check_conditions(unit) {
+            log::info!("{}: condition failed: {}", actual_name, reason);
+            return Err(ManagerError::ConditionFailed(
+                actual_name.to_string(),
+                reason,
+            ));
+        }
+
+        if let Some(mnt) = unit.as_mount().cloned() {
+            return self.start_mount(&actual_name, &mnt).await;
+        }
+
+        let service = unit
+            .as_service()
+            .ok_or_else(|| ManagerError::NotFound(actual_name.to_string()))?
+            .clone();
+
+        let state = self
+            .states
+            .get_mut(&actual_name)
+            .ok_or_else(|| ManagerError::NotFound(actual_name.to_string()))?;
+
+        if state.is_active() {
+            return Err(ManagerError::AlreadyActive(actual_name.to_string()));
+        }
+
+        state.set_starting();
+        self.active_jobs += 1;
+
+        if service.service.service_type == ServiceType::Idle {
+            self.wait_for_idle_queue(&actual_name).await;
+        }
+
+        let (socket_fds, socket_fd_names) = self.prepare_socket_fds(&service, &actual_name);
+        let (dynamic_uid, dynamic_gid) = self.allocate_dynamic_user(&actual_name, &service)?;
+        let options = self.build_spawn_options(
+            &service,
+            &actual_name,
+            socket_fds,
+            socket_fd_names,
+            dynamic_uid,
+            dynamic_gid,
+        );
+
+        if service.service.service_type == ServiceType::Oneshot {
+            return self.start_oneshot_service(&actual_name, &service, options);
+        }
+
+        let child =
+            process::spawn_service_via_executor(&service, &options, &self.executor_path, 0)?;
+        log::debug!("{}: spawn returned, getting PID", actual_name);
+        let pid = child.id().unwrap_or(0);
+        log::debug!("{}: PID is {}", actual_name, pid);
+
+        let limits = service_cgroup_limits(&service);
+        let slice = service.service.slice.as_deref().map(str::to_string);
+        let delegate = service.service.delegate;
+        self.setup_cgroup_for_service(&actual_name, pid, &limits, slice.as_deref(), delegate);
+
+        self.processes.insert(actual_name.to_string(), child);
+        self.pid_to_service.insert(pid, actual_name.to_string());
+
+        self.configure_post_spawn_state(&actual_name, pid, &service);
 
         Ok(())
     }
@@ -1037,31 +1050,110 @@ impl Manager {
         }
     }
 
+    async fn send_signals_to_child(
+        child: &mut Child,
+        kill_mode: &KillMode,
+        send_sighup: bool,
+        name: &str,
+    ) {
+        let Some(pid) = child.id() else { return };
+        log::info!("Stopping {} (PID {}, KillMode={:?})", name, pid, kill_mode);
+        if send_sighup {
+            log::debug!("Sending SIGHUP to {} (PID {})", name, pid);
+            unsafe { libc::kill(pid as i32, libc::SIGHUP) };
+        }
+        match kill_mode {
+            KillMode::None => {}
+            KillMode::Process => unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            },
+            KillMode::Mixed | KillMode::ControlGroup => unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            },
+        }
+    }
+
+    async fn wait_for_child_exit(&mut self, name: &str, mut child: Child) {
+        let timeout_sec = self
+            .units
+            .get(name)
+            .and_then(|u| u.as_service())
+            .and_then(|s| s.service.timeout_stop_sec)
+            .unwrap_or(std::time::Duration::from_secs(10));
+
+        match tokio::time::timeout(timeout_sec, child.wait()).await {
+            Ok(Ok(status)) => {
+                let code = status.code().unwrap_or(-1);
+                if let Some(state) = self.states.get_mut(name) {
+                    state.set_stopped(code);
+                }
+                log::info!("Stopped {} (exit code {})", name, code);
+            }
+            Ok(Err(e)) => {
+                if let Some(state) = self.states.get_mut(name) {
+                    state.set_failed(e.to_string());
+                }
+            }
+            Err(_) => {
+                log::warn!("Timeout stopping {}, sending SIGKILL", name);
+                if let Some(pid) = child.id() {
+                    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                }
+                let _ = child.wait().await;
+                if let Some(state) = self.states.get_mut(name) {
+                    state.set_stopped(-9);
+                }
+            }
+        }
+    }
+
+    fn cleanup_runtime_dirs(&self, name: &str) {
+        if let Some(service) = self.units.get(name) {
+            if let crate::units::Unit::Service(svc) = service {
+                use crate::units::RuntimeDirectoryPreserve;
+                match svc.service.runtime_directory_preserve {
+                    RuntimeDirectoryPreserve::No | RuntimeDirectoryPreserve::Restart => {
+                        cleanup_runtime_directories(&svc.service, name);
+                    }
+                    RuntimeDirectoryPreserve::Yes => {}
+                }
+            }
+        }
+    }
+
+    async fn run_stop_post_commands(&self, name: &str) {
+        if let Some(service) = self.units.get(name) {
+            if let crate::units::Unit::Service(svc) = service {
+                for cmd_line in &svc.service.exec_stop_post {
+                    log::debug!("Running ExecStopPost for {}: {}", name, cmd_line);
+                    if let Err(e) = run_simple_command(cmd_line).await {
+                        log::warn!("ExecStopPost failed for {}: {}", name, e);
+                    }
+                }
+            }
+        }
+    }
+
     /// Stop a service
     pub async fn stop(&mut self, name: &str) -> Result<(), ManagerError> {
         let name = self.normalize_name(name);
 
-        // Handle mount units
         if let Some(mount) = self.units.get(&name).and_then(|u| u.as_mount()).cloned() {
             return self.stop_mount(&name, &mount).await;
         }
 
-        // Handle slice units
         if let Some(slice) = self.units.get(&name).and_then(|u| u.as_slice()).cloned() {
             return self.stop_slice(&name, &slice).await;
         }
 
-        // Handle socket units
         if let Some(socket) = self.units.get(&name).and_then(|u| u.as_socket()).cloned() {
             return self.stop_socket(&name, &socket).await;
         }
 
-        // Handle timer units
         if self.units.get(&name).is_some_and(|u| u.is_timer()) {
             return self.stop_timer(&name).await;
         }
 
-        // Handle path units
         if self.units.get(&name).is_some_and(|u| u.is_path()) {
             return self.stop_path(&name).await;
         }
@@ -1077,7 +1169,6 @@ impl Manager {
 
         state.set_stopping();
 
-        // Get kill mode and send_sighup from service config
         let (kill_mode, send_sighup) = self
             .units
             .get(&name)
@@ -1085,84 +1176,14 @@ impl Manager {
             .map(|s| (s.service.kill_mode.clone(), s.service.send_sighup))
             .unwrap_or((KillMode::default(), false));
 
-        // Get the child process
         if let Some(mut child) = self.processes.remove(&name) {
-            if let Some(pid) = child.id() {
-                log::info!("Stopping {} (PID {}, KillMode={:?})", name, pid, kill_mode);
-
-                // M18: SendSIGHUP= - send SIGHUP before SIGTERM
-                if send_sighup {
-                    log::debug!("Sending SIGHUP to {} (PID {})", name, pid);
-                    unsafe {
-                        libc::kill(pid as i32, libc::SIGHUP);
-                    }
-                }
-
-                match kill_mode {
-                    KillMode::None => {
-                        // Don't send any signals, just wait (or timeout)
-                    }
-                    KillMode::Process => {
-                        // Only kill the main process
-                        unsafe {
-                            libc::kill(pid as i32, libc::SIGTERM);
-                        }
-                    }
-                    KillMode::Mixed | KillMode::ControlGroup => {
-                        // SIGTERM to main process first
-                        unsafe {
-                            libc::kill(pid as i32, libc::SIGTERM);
-                        }
-                        // For cgroup killing, we'd also send to all cgroup members
-                        // This requires cgroup iteration which we'll skip for now
-                    }
-                }
-            }
-
-            // Wait for exit (with timeout)
-            let timeout_sec = self
-                .units
-                .get(&name)
-                .and_then(|u| u.as_service())
-                .and_then(|s| s.service.timeout_stop_sec)
-                .unwrap_or(std::time::Duration::from_secs(10));
-
-            match tokio::time::timeout(timeout_sec, child.wait()).await {
-                Ok(Ok(status)) => {
-                    let code = status.code().unwrap_or(-1);
-                    if let Some(state) = self.states.get_mut(&name) {
-                        state.set_stopped(code);
-                    }
-                    log::info!("Stopped {} (exit code {})", name, code);
-                }
-                Ok(Err(e)) => {
-                    if let Some(state) = self.states.get_mut(&name) {
-                        state.set_failed(e.to_string());
-                    }
-                }
-                Err(_) => {
-                    // Timeout - send SIGKILL
-                    log::warn!("Timeout stopping {}, sending SIGKILL", name);
-                    if let Some(pid) = child.id() {
-                        unsafe {
-                            libc::kill(pid as i32, libc::SIGKILL);
-                        }
-                    }
-                    let _ = child.wait().await;
-                    if let Some(state) = self.states.get_mut(&name) {
-                        state.set_stopped(-9);
-                    }
-                }
-            }
-        } else {
-            if let Some(state) = self.states.get_mut(&name) {
-                state.set_stopped(0);
-            }
+            Self::send_signals_to_child(&mut child, &kill_mode, send_sighup, &name).await;
+            self.wait_for_child_exit(&name, child).await;
+        } else if let Some(state) = self.states.get_mut(&name) {
+            state.set_stopped(0);
         }
 
-        // Clean up cgroup (if we created one)
         if self.cgroup_paths.remove(&name).is_some() {
-            // Get slice from service config for cleanup
             let slice = self
                 .units
                 .get(&name)
@@ -1174,39 +1195,14 @@ impl Manager {
                 }
             }
         }
-
-        // Clean up runtime directories (M17: RuntimeDirectoryPreserve)
-        if let Some(service) = self.units.get(&name) {
-            if let crate::units::Unit::Service(svc) = service {
-                use crate::units::RuntimeDirectoryPreserve;
-                match svc.service.runtime_directory_preserve {
-                    RuntimeDirectoryPreserve::No => {
-                        // Remove runtime directories
-                        cleanup_runtime_directories(&svc.service, &name);
-                    }
-                    RuntimeDirectoryPreserve::Yes => {
-                        // Keep directories
-                    }
-                    RuntimeDirectoryPreserve::Restart => {
-                        // Keep only during restart - for now treat as No since we can't
-                        // easily distinguish stop from restart at this point
-                        // TODO: Add restart tracking to properly implement this
-                        cleanup_runtime_directories(&svc.service, &name);
-                    }
-                }
-            }
-        }
-
-        // Clean up watchdog
+        self.cleanup_runtime_dirs(&name);
         self.watchdog_deadlines.remove(&name);
 
-        // M19: Release dynamic UID if allocated
         if let Some(uid) = self.dynamic_uids.remove(&name) {
             self.dynamic_user_manager.release(uid);
             log::debug!("Released dynamic UID {} for {}", uid, name);
         }
 
-        // M19: Close and remove stored FDs
         if let Some(fds) = self.fd_store.remove(&name) {
             for (fd_name, fd) in fds {
                 log::debug!("Closing stored FD {} ('{}') for {}", fd, fd_name, name);
@@ -1214,18 +1210,7 @@ impl Manager {
             }
         }
 
-        // M18: ExecStopPost= - run post-stop commands
-        if let Some(service) = self.units.get(&name) {
-            if let crate::units::Unit::Service(svc) = service {
-                for cmd_line in &svc.service.exec_stop_post {
-                    log::debug!("Running ExecStopPost for {}: {}", name, cmd_line);
-                    if let Err(e) = run_simple_command(cmd_line).await {
-                        log::warn!("ExecStopPost failed for {}: {}", name, e);
-                        // Continue with other commands even if one fails
-                    }
-                }
-            }
-        }
+        self.run_stop_post_commands(&name).await;
 
         Ok(())
     }
