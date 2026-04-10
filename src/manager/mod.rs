@@ -488,40 +488,34 @@ impl Manager {
 
     /// Find a unit file in search paths
     fn find_unit(&self, name: &str) -> Result<PathBuf, ManagerError> {
-        // First, try to find exact match
-        for base in &self.unit_paths {
-            let path = base.join(name);
-            if path.exists() {
-                return Ok(path);
-            }
-            // Also follow symlinks
-            if path.is_symlink() {
-                if let Ok(target) = std::fs::read_link(&path) {
-                    if target.exists() {
-                        return Ok(path);
-                    }
-                }
-            }
+        if let Some(path) = self.search_unit_paths(name) {
+            return Ok(path);
         }
 
-        // For template instances (foo@bar.service), try the template file (foo@.service)
         if let Some(template_name) = units::get_template_name(name) {
-            for base in &self.unit_paths {
-                let path = base.join(&template_name);
-                if path.exists() {
-                    return Ok(path);
-                }
-                if path.is_symlink() {
-                    if let Ok(target) = std::fs::read_link(&path) {
-                        if target.exists() {
-                            return Ok(path);
-                        }
-                    }
-                }
+            if let Some(path) = self.search_unit_paths(&template_name) {
+                return Ok(path);
             }
         }
 
         Err(ManagerError::NotFound(name.to_string()))
+    }
+
+    fn search_unit_paths(&self, name: &str) -> Option<PathBuf> {
+        for base in &self.unit_paths {
+            let path = base.join(name);
+            if path.exists() {
+                return Some(path);
+            }
+            if path.is_symlink() {
+                if let Ok(target) = std::fs::read_link(&path) {
+                    if target.exists() {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Start a single service (no dependency resolution)
@@ -760,7 +754,9 @@ impl Manager {
 
         let service = unit
             .as_service()
-            .ok_or_else(|| ManagerError::NotFound(actual_name.to_string()))?;
+            .ok_or_else(|| ManagerError::NotFound(actual_name.to_string()))?
+            .clone();
+        let service = &service;
 
         let state = self
             .states
@@ -879,41 +875,10 @@ impl Manager {
             let pid = child.id().unwrap_or(0);
             log::debug!("{}: PID is {}", actual_name, pid);
 
-            // Set up cgroup for the process
-            let limits = CgroupLimits {
-                memory_max: service.service.memory_max,
-                cpu_quota: service.service.cpu_quota,
-                tasks_max: service.service.tasks_max,
-            };
-            let slice = service.service.slice.as_deref();
+            let limits = service_cgroup_limits(service);
+            let slice = service.service.slice.as_deref().map(str::to_string);
             let delegate = service.service.delegate;
-
-            if let Some(ref cgroup_mgr) = self.cgroup_manager {
-                match cgroup_mgr.setup_service_cgroup(&actual_name, pid, &limits, slice) {
-                    Ok(cgroup_path) => {
-                        log::debug!(
-                            "Created cgroup {} for {}",
-                            cgroup_path.display(),
-                            actual_name
-                        );
-                        log::info!("Created cgroup: {}", cgroup_path.display());
-                        if delegate {
-                            if let Err(e) = cgroup_mgr.enable_delegation(&cgroup_path) {
-                                log::warn!(
-                                    "Failed to enable cgroup delegation for {}: {}",
-                                    actual_name,
-                                    e
-                                );
-                            }
-                        }
-                        self.cgroup_paths
-                            .insert(actual_name.to_string(), cgroup_path);
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to set up cgroup for {}: {}", actual_name, e);
-                    }
-                }
-            }
+            self.setup_cgroup_for_service(&actual_name, pid, &limits, slice.as_deref(), delegate);
 
             log::info!("Started {} (PID {})", actual_name, pid);
 
@@ -960,63 +925,10 @@ impl Manager {
         let pid = child.id().unwrap_or(0);
         log::debug!("{}: PID is {}", actual_name, pid);
 
-        // Set up cgroup for the process (if available)
-        // Note: DeviceAllow/DevicePolicy is handled via mount namespace in sandbox.rs
-        let limits = CgroupLimits {
-            memory_max: service.service.memory_max,
-            cpu_quota: service.service.cpu_quota,
-            tasks_max: service.service.tasks_max,
-        };
-        let has_resource_limits =
-            limits.memory_max.is_some() || limits.cpu_quota.is_some() || limits.tasks_max.is_some();
-
-        // M18: Slice= - explicit cgroup slice placement
-        let slice = service.service.slice.as_deref();
-
-        // M19: Delegate= - allow service to manage own cgroup subtree
+        let limits = service_cgroup_limits(service);
+        let slice = service.service.slice.as_deref().map(str::to_string);
         let delegate = service.service.delegate;
-
-        if let Some(ref cgroup_mgr) = self.cgroup_manager {
-            match cgroup_mgr.setup_service_cgroup(&actual_name, pid, &limits, slice) {
-                Ok(cgroup_path) => {
-                    log::debug!(
-                        "Created cgroup {} for {}",
-                        cgroup_path.display(),
-                        actual_name
-                    );
-
-                    // M19: Enable delegation if requested
-                    if delegate {
-                        if let Err(e) = cgroup_mgr.enable_delegation(&cgroup_path) {
-                            log::warn!(
-                                "Failed to enable cgroup delegation for {}: {}",
-                                actual_name,
-                                e
-                            );
-                        }
-                    }
-
-                    self.cgroup_paths
-                        .insert(actual_name.to_string(), cgroup_path);
-                }
-                Err(e) => {
-                    if has_resource_limits {
-                        log::error!(
-                            "Failed to set up cgroup for {} (resource limits NOT enforced): {}",
-                            actual_name,
-                            e
-                        );
-                    } else {
-                        log::warn!("Failed to set up cgroup for {}: {}", actual_name, e);
-                    }
-                }
-            }
-        } else if has_resource_limits {
-            log::error!(
-                "Service {} requests resource limits but cgroups unavailable - limits NOT enforced",
-                actual_name
-            );
-        }
+        self.setup_cgroup_for_service(&actual_name, pid, &limits, slice.as_deref(), delegate);
 
         // Store the child process and track PID -> service mapping
         self.processes.insert(actual_name.to_string(), child);
@@ -1077,6 +989,52 @@ impl Manager {
         }
 
         Ok(())
+    }
+
+    /// Set up cgroup for a spawned service process
+    fn setup_cgroup_for_service(
+        &mut self,
+        name: &str,
+        pid: u32,
+        limits: &CgroupLimits,
+        slice: Option<&str>,
+        delegate: bool,
+    ) {
+        let has_resource_limits =
+            limits.memory_max.is_some() || limits.cpu_quota.is_some() || limits.tasks_max.is_some();
+
+        let Some(ref cgroup_mgr) = self.cgroup_manager else {
+            if has_resource_limits {
+                log::error!(
+                    "Service {} requests resource limits but cgroups unavailable - limits NOT enforced",
+                    name
+                );
+            }
+            return;
+        };
+
+        match cgroup_mgr.setup_service_cgroup(name, pid, &limits, slice) {
+            Ok(cgroup_path) => {
+                log::debug!("Created cgroup {} for {}", cgroup_path.display(), name);
+                if delegate {
+                    if let Err(e) = cgroup_mgr.enable_delegation(&cgroup_path) {
+                        log::warn!("Failed to enable cgroup delegation for {}: {}", name, e);
+                    }
+                }
+                self.cgroup_paths.insert(name.to_string(), cgroup_path);
+            }
+            Err(e) => {
+                if has_resource_limits {
+                    log::error!(
+                        "Failed to set up cgroup for {} (resource limits NOT enforced): {}",
+                        name,
+                        e
+                    );
+                } else {
+                    log::warn!("Failed to set up cgroup for {}: {}", name, e);
+                }
+            }
+        }
     }
 
     /// Stop a service
@@ -1570,6 +1528,14 @@ impl Manager {
                 state.error = None;
             }
         }
+    }
+}
+
+fn service_cgroup_limits(service: &Service) -> CgroupLimits {
+    CgroupLimits {
+        memory_max: service.service.memory_max,
+        cpu_quota: service.service.cpu_quota,
+        tasks_max: service.service.tasks_max,
     }
 }
 
