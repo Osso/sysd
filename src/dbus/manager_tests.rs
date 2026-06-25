@@ -1,8 +1,9 @@
 use super::*;
 use crate::manager::{ActiveState, Manager, SubState};
+use std::os::fd::FromRawFd;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use zbus::zvariant::{Array, OwnedValue, Str, Type, Value};
+use zbus::zvariant::{Array, Fd, OwnedValue, Str, Type, Value};
 
 fn string_value(value: &'static str) -> OwnedValue {
     OwnedValue::from(Str::from_static(value))
@@ -13,6 +14,15 @@ fn u32_array_value(values: &[u32]) -> OwnedValue {
     for value in values {
         array.append(Value::U32(*value)).unwrap();
     }
+    OwnedValue::try_from(Value::Array(array)).unwrap()
+}
+
+fn pidfd_array_value() -> OwnedValue {
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, std::process::id(), 0) };
+    assert_ne!(pidfd, -1, "pidfd_open should succeed for current process");
+    let owned_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd as i32) };
+    let mut array = Array::new(<Fd<'_> as Type>::SIGNATURE);
+    array.append(Value::Fd(Fd::from(owned_fd))).unwrap();
     OwnedValue::try_from(Value::Array(array)).unwrap()
 }
 
@@ -126,6 +136,17 @@ fn parse_scope_properties_defaults_when_properties_are_missing_or_wrong_type() {
     assert_eq!(slice, None);
     assert_eq!(description, None);
     assert!(pids.is_empty());
+}
+
+#[test]
+fn parse_scope_properties_collects_pidfds() {
+    let properties = vec![("PIDFDs".to_string(), pidfd_array_value())];
+
+    let (slice, description, pids) = parse_scope_properties(&properties);
+
+    assert_eq!(slice, None);
+    assert_eq!(description, None);
+    assert_eq!(pids, [std::process::id()]);
 }
 
 #[test]
