@@ -1,5 +1,7 @@
 use super::*;
-use crate::units::{Mount, RuntimeDirectoryPreserve, Service, Slice, Target, Timer, Unit};
+use crate::units::{
+    Mount, PathUnit, RuntimeDirectoryPreserve, Service, Slice, Socket, Target, Timer, Unit,
+};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -195,6 +197,21 @@ async fn resolve_start_unit_name_returns_loaded_units_without_disk_lookup() {
 }
 
 #[tokio::test]
+async fn resolve_start_unit_name_reports_missing_units_from_load() {
+    let mut manager = Manager::new_user();
+    manager.unit_paths.clear();
+
+    let result = manager
+        .resolve_start_unit_name("definitely-missing-sysd-test.service")
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(ManagerError::NotFound(name)) if name == "definitely-missing-sysd-test.service"
+    ));
+}
+
+#[tokio::test]
 async fn start_non_service_unit_handles_target_slice_timer_and_service_fallback() {
     let mut manager = Manager::new_user();
     manager
@@ -245,6 +262,51 @@ async fn start_non_service_unit_handles_target_slice_timer_and_service_fallback(
             .await,
         Ok(false)
     ));
+}
+
+#[tokio::test]
+async fn start_non_service_unit_handles_path_socket_and_mount_branches_safely() {
+    let mut manager = Manager::new_user();
+    manager
+        .states
+        .insert("watch.path".to_string(), ServiceState::new());
+    manager
+        .states
+        .insert("-.mount".to_string(), ServiceState::new());
+
+    assert!(matches!(
+        manager
+            .start_non_service_unit(
+                "watch.path",
+                &Unit::Path(PathUnit::new("watch.path".to_string())),
+            )
+            .await,
+        Ok(true)
+    ));
+    assert!(manager.states.get("watch.path").unwrap().is_active());
+
+    assert!(matches!(
+        manager
+            .start_non_service_unit(
+                "missing-state.socket",
+                &Unit::Socket(Socket::new("missing-state.socket".to_string())),
+            )
+            .await,
+        Err(ManagerError::NotFound(name)) if name == "missing-state.socket"
+    ));
+
+    let mut root_mount = Mount::new("-.mount".to_string());
+    root_mount.mount.r#where = "/".to_string();
+    root_mount.mount.what = "rootfs".to_string();
+    root_mount.mount.directory_mode = None;
+
+    assert!(matches!(
+        manager
+            .start_non_service_unit("-.mount", &Unit::Mount(root_mount))
+            .await,
+        Ok(true)
+    ));
+    assert!(manager.states.get("-.mount").unwrap().is_active());
 }
 
 #[tokio::test]
@@ -324,6 +386,29 @@ fn cleanup_runtime_dirs_respects_preserve_yes_and_ignores_non_services() {
 }
 
 #[test]
+fn cleanup_runtime_dirs_allows_no_and_restart_when_directories_are_absent() {
+    let mut manager = Manager::new_user();
+    manager.units.insert(
+        "remove.service".to_string(),
+        Unit::Service(service("remove.service", |service| {
+            service.service.runtime_directory =
+                vec!["sysd-test-absent-remove-dir".to_string(), String::new()];
+            service.service.runtime_directory_preserve = RuntimeDirectoryPreserve::No;
+        })),
+    );
+    manager.units.insert(
+        "restart.service".to_string(),
+        Unit::Service(service("restart.service", |service| {
+            service.service.runtime_directory = vec!["sysd-test-absent-restart-dir".to_string()];
+            service.service.runtime_directory_preserve = RuntimeDirectoryPreserve::Restart;
+        })),
+    );
+
+    manager.cleanup_runtime_dirs("remove.service");
+    manager.cleanup_runtime_dirs("restart.service");
+}
+
+#[test]
 fn prepare_socket_fds_logs_missing_socket_fds_and_returns_empty_values() {
     let manager = Manager::new_user();
     let svc = service("socketed.service", |service| {
@@ -334,6 +419,21 @@ fn prepare_socket_fds_logs_missing_socket_fds_and_returns_empty_values() {
 
     assert!(fds.is_empty());
     assert!(names.is_empty());
+}
+
+#[test]
+fn build_spawn_options_omits_notify_socket_for_plain_services_without_watchdog() {
+    let manager = Manager::new_user();
+    let svc = service("plain.service", |_| {});
+
+    let options =
+        manager.build_spawn_options(&svc, "plain.service", Vec::new(), Vec::new(), None, None);
+
+    assert!(options.notify_socket.is_none());
+    assert_eq!(options.watchdog_usec, None);
+    assert!(options.socket_fds.is_empty());
+    assert!(options.socket_fd_names.is_empty());
+    assert!(options.stored_fds.is_empty());
 }
 
 #[tokio::test]
