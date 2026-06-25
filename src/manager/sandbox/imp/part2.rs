@@ -276,8 +276,7 @@ fn add_restrict_realtime_rules(rules: &mut BTreeMap<i64, Vec<SeccompRule>>) -> R
         let sched_setattr = 314i64;
 
         for syscall in [sched_setscheduler, sched_setparam, sched_setattr] {
-            let rule = SeccompRule::new(vec![]).map_err(|e| e.to_string())?;
-            rules.entry(syscall).or_default().push(rule);
+            add_unconditional_rule(rules, syscall)?;
         }
     }
 
@@ -288,8 +287,7 @@ fn add_restrict_realtime_rules(rules: &mut BTreeMap<i64, Vec<SeccompRule>>) -> R
         let sched_setattr = 274i64;
 
         for syscall in [sched_setscheduler, sched_setparam, sched_setattr] {
-            let rule = SeccompRule::new(vec![]).map_err(|e| e.to_string())?;
-            rules.entry(syscall).or_default().push(rule);
+            add_unconditional_rule(rules, syscall)?;
         }
     }
 
@@ -304,8 +302,7 @@ fn add_protect_clock_rules(rules: &mut BTreeMap<i64, Vec<SeccompRule>>) -> Resul
 
     for name in clock_syscalls {
         if let Some(nr) = syscall_name_to_nr(name) {
-            let rule = SeccompRule::new(vec![]).map_err(|e| e.to_string())?;
-            rules.entry(nr).or_default().push(rule);
+            add_unconditional_rule(rules, nr)?;
         }
     }
 
@@ -320,8 +317,7 @@ fn add_protect_hostname_rules(rules: &mut BTreeMap<i64, Vec<SeccompRule>>) -> Re
 
     for name in hostname_syscalls {
         if let Some(nr) = syscall_name_to_nr(name) {
-            let rule = SeccompRule::new(vec![]).map_err(|e| e.to_string())?;
-            rules.entry(nr).or_default().push(rule);
+            add_unconditional_rule(rules, nr)?;
         }
     }
 
@@ -337,8 +333,7 @@ fn add_lock_personality_rules(rules: &mut BTreeMap<i64, Vec<SeccompRule>>) -> Re
     #[cfg(target_arch = "aarch64")]
     let personality_nr = 92i64;
 
-    let rule = SeccompRule::new(vec![]).map_err(|e| e.to_string())?;
-    rules.entry(personality_nr).or_default().push(rule);
+    add_unconditional_rule(rules, personality_nr)?;
 
     log::debug!("LockPersonality: blocking personality() syscall");
     Ok(())
@@ -404,8 +399,7 @@ fn add_unconditional_rule(
     rules: &mut BTreeMap<i64, Vec<SeccompRule>>,
     syscall_nr: i64,
 ) -> Result<(), String> {
-    let rule = SeccompRule::new(vec![]).map_err(|e| e.to_string())?;
-    rules.entry(syscall_nr).or_default().push(rule);
+    rules.entry(syscall_nr).or_default();
     Ok(())
 }
 

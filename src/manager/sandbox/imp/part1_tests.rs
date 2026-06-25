@@ -1,5 +1,6 @@
 use super::*;
 use crate::units::{DevicePolicy, ProtectHome, ProtectProc, ProtectSystem, ServiceSection};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -137,4 +138,195 @@ fn no_op_sandbox_paths_accept_default_service() {
     assert_eq!(apply_device_namespace_policy(&service), Ok(()));
     assert_eq!(apply_mount_protections(&service), Ok(()));
     assert_eq!(apply_protect_proc(&ProtectProc::Default), Ok(()));
+}
+
+#[test]
+fn path_restrictions_ignore_missing_paths_without_mounting() {
+    let missing = PathBuf::from(format!(
+        "/tmp/sysd-sandbox-missing-{}",
+        TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    assert_eq!(
+        apply_path_restrictions(&[missing.clone()], &[missing.clone()], &[missing]),
+        Ok(())
+    );
+}
+
+#[test]
+fn namespace_restriction_defaults_to_all_known_namespaces() {
+    let all_flags = [
+        ("cgroup", libc::CLONE_NEWCGROUP as u64),
+        ("ipc", libc::CLONE_NEWIPC as u64),
+        ("net", libc::CLONE_NEWNET as u64),
+        ("mnt", libc::CLONE_NEWNS as u64),
+        ("pid", libc::CLONE_NEWPID as u64),
+        ("user", libc::CLONE_NEWUSER as u64),
+        ("uts", libc::CLONE_NEWUTS as u64),
+    ];
+    let default_flags = blocked_namespace_flags(&[], &all_flags);
+    let selected_flags = blocked_namespace_flags(&["Net".to_string(), "USER".to_string()], &all_flags);
+    let unknown_flags = blocked_namespace_flags(&["unknown".to_string()], &all_flags);
+
+    assert_eq!(default_flags.len(), all_flags.len());
+    assert_eq!(
+        selected_flags,
+        vec![libc::CLONE_NEWNET as u64, libc::CLONE_NEWUSER as u64]
+    );
+    assert!(unknown_flags.is_empty());
+}
+
+#[test]
+fn namespace_rules_block_unshare_clone_and_clone3() {
+    let mut rules = rule_map();
+
+    add_restrict_namespaces_rules(&mut rules, &["net".to_string()]).unwrap();
+
+    assert!(rules.contains_key(&(libc::SYS_unshare as i64)));
+    assert!(rules.contains_key(&(libc::SYS_clone as i64)));
+    assert!(rules.contains_key(&435));
+}
+
+#[test]
+fn syscall_filters_only_add_deny_rules_for_known_syscalls() {
+    let mut rules = rule_map();
+
+    add_syscall_filter_rules(
+        &mut rules,
+        &[
+            "mount".to_string(),
+            "~mount".to_string(),
+            "~@clock".to_string(),
+            "~does_not_exist".to_string(),
+            "@clock".to_string(),
+        ],
+    )
+    .unwrap();
+
+    assert!(rules.contains_key(&syscall_name_to_nr("mount").unwrap()));
+    assert!(rules.contains_key(&syscall_name_to_nr("clock_settime").unwrap()));
+    assert!(rules.contains_key(&syscall_name_to_nr("clock_adjtime").unwrap()));
+    assert!(rules.contains_key(&syscall_name_to_nr("settimeofday").unwrap()));
+}
+
+#[test]
+fn syscall_group_lookup_returns_known_groups_and_empty_unknown_group() {
+    assert_eq!(get_syscall_group("swap"), ["swapon", "swapoff"]);
+    assert_eq!(
+        get_syscall_group("mount"),
+        ["mount", "umount", "umount2", "pivot_root", "move_mount"]
+    );
+    assert!(get_syscall_group("not-a-group").is_empty());
+}
+
+#[test]
+fn combined_seccomp_collection_merges_all_supported_toggles() {
+    let mut service = ServiceSection {
+        restrict_namespaces: Some(vec!["net".to_string()]),
+        system_call_filter: vec!["~@clock".to_string()],
+        restrict_realtime: true,
+        protect_clock: true,
+        protect_hostname: true,
+        lock_personality: true,
+        restrict_suid_sgid: true,
+        restrict_address_families: Some(vec!["~AF_INET".to_string(), "~AF_INET6".to_string()]),
+        ..Default::default()
+    };
+    let mut rules = rule_map();
+
+    collect_combined_seccomp_rules(&service, &mut rules).unwrap();
+
+    assert!(rules.contains_key(&(libc::SYS_unshare as i64)));
+    assert!(rules.contains_key(&syscall_name_to_nr("clock_settime").unwrap()));
+    assert!(rules.contains_key(&syscall_name_to_nr("sethostname").unwrap()));
+    assert!(rules.contains_key(&personality_syscall_nr()));
+    assert!(rules.contains_key(&socket_syscall_nr()));
+    assert!(rules.len() >= 10);
+
+    service.system_call_filter.clear();
+    let before = rules.len();
+    collect_combined_seccomp_rules(&service, &mut rules).unwrap();
+    assert!(rules.len() >= before);
+}
+
+#[test]
+fn address_family_rules_only_block_tilde_prefixed_deny_entries() {
+    let mut deny_rules = rule_map();
+    add_restrict_address_families_rules(
+        &mut deny_rules,
+        &[
+            "~AF_UNIX".to_string(),
+            "~af_inet".to_string(),
+            "~AF_UNKNOWN".to_string(),
+        ],
+    )
+    .unwrap();
+
+    let socket_rules = deny_rules.get(&socket_syscall_nr()).unwrap();
+    assert_eq!(socket_rules.len(), 2);
+
+    let mut allow_rules = rule_map();
+    add_restrict_address_families_rules(&mut allow_rules, &["AF_UNIX".to_string()]).unwrap();
+    assert!(allow_rules.is_empty());
+}
+
+#[test]
+fn protection_rule_helpers_add_expected_syscall_entries() {
+    let mut rules = rule_map();
+
+    add_restrict_realtime_rules(&mut rules).unwrap();
+    add_protect_clock_rules(&mut rules).unwrap();
+    add_protect_hostname_rules(&mut rules).unwrap();
+    add_lock_personality_rules(&mut rules).unwrap();
+    add_restrict_suid_sgid_rules(&mut rules).unwrap();
+
+    assert!(rules.contains_key(&syscall_name_to_nr("clock_settime").unwrap()));
+    assert!(rules.contains_key(&syscall_name_to_nr("settimeofday").unwrap()));
+    assert!(rules.contains_key(&syscall_name_to_nr("sethostname").unwrap()));
+    assert!(rules.contains_key(&syscall_name_to_nr("setdomainname").unwrap()));
+    assert!(rules.contains_key(&personality_syscall_nr()));
+    assert!(rules.len() >= 10);
+}
+
+#[test]
+fn syscall_lookup_matches_native_table_and_unknowns_return_none() {
+    assert_eq!(lookup_syscall_nr(&[("one", 1), ("two", 2)], "two"), Some(2));
+    assert_eq!(lookup_syscall_nr(&[("one", 1)], "missing"), None);
+    assert_eq!(syscall_name_to_nr("mount"), native_mount_syscall_nr());
+    assert_eq!(syscall_name_to_nr("definitely_not_a_syscall"), None);
+    assert!(native_seccomp_arch().is_some());
+}
+
+fn rule_map() -> BTreeMap<i64, Vec<SeccompRule>> {
+    BTreeMap::new()
+}
+
+#[cfg(target_arch = "x86_64")]
+fn socket_syscall_nr() -> i64 {
+    41
+}
+
+#[cfg(target_arch = "aarch64")]
+fn socket_syscall_nr() -> i64 {
+    198
+}
+
+#[cfg(target_arch = "x86_64")]
+fn personality_syscall_nr() -> i64 {
+    135
+}
+
+#[cfg(target_arch = "aarch64")]
+fn personality_syscall_nr() -> i64 {
+    92
+}
+
+#[cfg(target_arch = "x86_64")]
+fn native_mount_syscall_nr() -> Option<i64> {
+    Some(165)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn native_mount_syscall_nr() -> Option<i64> {
+    Some(40)
 }
