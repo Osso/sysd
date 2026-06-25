@@ -283,3 +283,101 @@ pub enum MountError {
         source: nix::Error,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_ID: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempDir(PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir(label: &str) -> TempDir {
+        let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "sysd-pid1-mount-{label}-{}-{id}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        TempDir(path)
+    }
+
+    #[test]
+    fn essential_mount_table_contains_expected_virtual_filesystems() {
+        let targets: Vec<&str> = ESSENTIAL_MOUNTS.iter().map(|mount| mount.target).collect();
+
+        assert!(ESSENTIAL_MOUNTS.len() >= 11);
+        assert!(targets.contains(&"/proc"));
+        assert!(targets.contains(&"/sys"));
+        assert!(targets.contains(&"/dev"));
+        assert!(targets.contains(&"/run"));
+        assert!(targets.contains(&"/sys/fs/cgroup"));
+
+        let proc_mount = ESSENTIAL_MOUNTS
+            .iter()
+            .find(|mount| mount.target == "/proc")
+            .unwrap();
+        assert_eq!(proc_mount.source, "proc");
+        assert_eq!(proc_mount.fstype, "proc");
+        assert!(proc_mount.flags.contains(MsFlags::MS_NOSUID));
+        assert!(proc_mount.flags.contains(MsFlags::MS_NODEV));
+        assert!(proc_mount.flags.contains(MsFlags::MS_NOEXEC));
+
+        let run_mount = ESSENTIAL_MOUNTS
+            .iter()
+            .find(|mount| mount.target == "/run")
+            .unwrap();
+        assert_eq!(run_mount.data, Some("mode=0755"));
+    }
+
+    #[test]
+    fn verify_mount_and_mountpoint_detect_existing_proc_and_missing_paths() {
+        let root = temp_dir("mountpoint");
+        let missing = root.0.join("missing");
+
+        assert!(verify_mount("/proc"));
+        assert!(!verify_mount("/definitely-not-mounted-sysd-test"));
+        assert!(is_mountpoint(Path::new("/proc")));
+        assert!(!is_mountpoint(&root.0));
+        assert!(!is_mountpoint(&missing));
+    }
+
+    #[test]
+    fn mount_one_skips_already_mounted_proc_without_mounting() {
+        let proc_mount = ESSENTIAL_MOUNTS
+            .iter()
+            .find(|mount| mount.target == "/proc")
+            .unwrap();
+
+        assert!(mount_one(proc_mount).is_ok());
+    }
+
+    #[test]
+    fn mount_one_reports_create_dir_failure_before_mounting() {
+        let root = temp_dir("create-dir-failure");
+        let file = root.0.join("file");
+        fs::write(&file, b"not a directory").unwrap();
+        let target = file.join("child");
+        let target_str = target.to_str().unwrap().to_string();
+        let mount_point = MountPoint {
+            source: "tmpfs",
+            target: Box::leak(target_str.into_boxed_str()),
+            fstype: "tmpfs",
+            flags: MsFlags::empty(),
+            data: None,
+        };
+
+        assert!(matches!(
+            mount_one(&mount_point),
+            Err(MountError::CreateDir { path, .. }) if path == mount_point.target
+        ));
+    }
+}
