@@ -194,3 +194,154 @@ impl Unit {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn service_unit(name: &str) -> Unit {
+        Unit::Service(Service::new(name.to_string()))
+    }
+
+    #[test]
+    fn names_types_and_accessors_match_each_variant() {
+        let units = vec![
+            (service_unit("api.service"), "api.service", "service"),
+            (
+                Unit::Target(Target::new("multi-user.target".to_string())),
+                "multi-user.target",
+                "target",
+            ),
+            (
+                Unit::Mount(Mount::new("var-lib.mount".to_string())),
+                "var-lib.mount",
+                "mount",
+            ),
+            (
+                Unit::Slice(Slice::new("system.slice".to_string())),
+                "system.slice",
+                "slice",
+            ),
+            (
+                Unit::Socket(Socket::new("api.socket".to_string())),
+                "api.socket",
+                "socket",
+            ),
+            (
+                Unit::Timer(Timer::new("api.timer".to_string())),
+                "api.timer",
+                "timer",
+            ),
+            (
+                Unit::Path(PathUnit::new("api.path".to_string())),
+                "api.path",
+                "path",
+            ),
+        ];
+
+        for (unit, name, unit_type) in units {
+            assert_eq!(unit.name(), name);
+            assert_eq!(unit.unit_type(), unit_type);
+            assert_eq!(unit.is_service(), unit_type == "service");
+            assert_eq!(unit.is_target(), unit_type == "target");
+            assert_eq!(unit.is_mount(), unit_type == "mount");
+            assert_eq!(unit.is_slice(), unit_type == "slice");
+            assert_eq!(unit.is_socket(), unit_type == "socket");
+            assert_eq!(unit.is_timer(), unit_type == "timer");
+            assert_eq!(unit.is_path(), unit_type == "path");
+            assert_eq!(unit.as_service().is_some(), unit_type == "service");
+            assert_eq!(unit.as_target().is_some(), unit_type == "target");
+            assert_eq!(unit.as_mount().is_some(), unit_type == "mount");
+            assert_eq!(unit.as_slice().is_some(), unit_type == "slice");
+            assert_eq!(unit.as_socket().is_some(), unit_type == "socket");
+            assert_eq!(unit.as_timer().is_some(), unit_type == "timer");
+            assert_eq!(unit.as_path().is_some(), unit_type == "path");
+        }
+    }
+
+    #[test]
+    fn install_section_is_available_for_installable_variants_only() {
+        assert!(service_unit("api.service").install_section().is_some());
+        assert!(Unit::Mount(Mount::new("var-lib.mount".to_string()))
+            .install_section()
+            .is_some());
+        assert!(Unit::Socket(Socket::new("api.socket".to_string()))
+            .install_section()
+            .is_some());
+        assert!(Unit::Timer(Timer::new("api.timer".to_string()))
+            .install_section()
+            .is_some());
+        assert!(Unit::Path(PathUnit::new("api.path".to_string()))
+            .install_section()
+            .is_some());
+        assert!(Unit::Target(Target::new("multi-user.target".to_string()))
+            .install_section()
+            .is_none());
+        assert!(Unit::Slice(Slice::new("system.slice".to_string()))
+            .install_section()
+            .is_none());
+    }
+
+    #[test]
+    fn dependencies_chain_after_requires_and_wants() {
+        let mut service = Service::new("api.service".to_string());
+        service.unit.after = vec!["network.target".to_string()];
+        service.unit.requires = vec!["dbus.service".to_string()];
+        service.unit.wants = vec!["logger.service".to_string()];
+        let unit = Unit::Service(service);
+
+        let deps: Vec<&str> = unit
+            .dependencies()
+            .into_iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            deps,
+            vec!["network.target", "dbus.service", "logger.service"]
+        );
+    }
+
+    #[test]
+    fn wants_dir_only_reports_target_wants() {
+        let mut target = Target::new("multi-user.target".to_string());
+        target.wants_dir = vec!["ssh.service".to_string()];
+
+        assert_eq!(Unit::Target(target).wants_dir(), ["ssh.service"]);
+        assert!(service_unit("api.service").wants_dir().is_empty());
+    }
+
+    #[test]
+    fn set_name_updates_each_variant_and_service_instance() {
+        let mut service = service_unit("worker@.service");
+        service.set_name("worker@one.service".to_string());
+        assert_eq!(service.name(), "worker@one.service");
+        assert_eq!(
+            service.as_service().unwrap().instance.as_deref(),
+            Some("one")
+        );
+
+        let mut target = Unit::Target(Target::new("old.target".to_string()));
+        target.set_name("new.target".to_string());
+        assert_eq!(target.name(), "new.target");
+
+        let mut mount = Unit::Mount(Mount::new("old.mount".to_string()));
+        mount.set_name("new.mount".to_string());
+        assert_eq!(mount.name(), "new.mount");
+
+        let mut slice = Unit::Slice(Slice::new("old.slice".to_string()));
+        slice.set_name("new.slice".to_string());
+        assert_eq!(slice.name(), "new.slice");
+
+        let mut socket = Unit::Socket(Socket::new("old.socket".to_string()));
+        socket.set_name("new.socket".to_string());
+        assert_eq!(socket.name(), "new.socket");
+
+        let mut timer = Unit::Timer(Timer::new("old.timer".to_string()));
+        timer.set_name("new.timer".to_string());
+        assert_eq!(timer.name(), "new.timer");
+
+        let mut path = Unit::Path(PathUnit::new("old.path".to_string()));
+        path.set_name("new.path".to_string());
+        assert_eq!(path.name(), "new.path");
+    }
+}

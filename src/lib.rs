@@ -25,6 +25,7 @@ pub mod getty;
 pub mod manager;
 pub mod pid1;
 pub mod protocol;
+pub mod sandbox_prctl;
 pub mod units;
 
 // Re-exports for D-Bus interfaces

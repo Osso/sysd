@@ -171,3 +171,88 @@ impl Timer {
         !self.timer.on_calendar.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calendar_spec_parse_named_weekday_time_and_full_values() {
+        assert_eq!(
+            CalendarSpec::parse("daily"),
+            CalendarSpec::Named("daily".to_string())
+        );
+        assert_eq!(
+            CalendarSpec::parse("Mon"),
+            CalendarSpec::DayOfWeek("Mon".to_string())
+        );
+        assert_eq!(
+            CalendarSpec::parse("12:34:56"),
+            CalendarSpec::Time {
+                hour: 12,
+                minute: 34,
+                second: 56
+            }
+        );
+        assert_eq!(
+            CalendarSpec::parse("2026-06-25 12:34:56"),
+            CalendarSpec::Full("2026-06-25 12:34:56".to_string())
+        );
+    }
+
+    #[test]
+    fn calendar_spec_helpers_identify_daily_and_weekly() {
+        assert!(CalendarSpec::Named("daily".to_string()).is_daily());
+        assert!(CalendarSpec::Time {
+            hour: 1,
+            minute: 2,
+            second: 3,
+        }
+        .is_daily());
+        assert!(CalendarSpec::Named("weekly".to_string()).is_weekly());
+        assert!(CalendarSpec::DayOfWeek("Fri".to_string()).is_weekly());
+        assert!(!CalendarSpec::Named("monthly".to_string()).is_daily());
+    }
+
+    #[test]
+    fn timer_defaults_and_activation_service() {
+        let timer = Timer::new("backup.timer".to_string());
+
+        assert_eq!(timer.service_name(), "backup.service");
+        assert!(!timer.is_monotonic());
+        assert!(!timer.is_realtime());
+        assert_eq!(timer.timer.accuracy_sec, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn timer_reports_explicit_service_monotonic_and_realtime_modes() {
+        let mut timer = Timer::new("backup.timer".to_string());
+        timer.timer.unit = Some("custom.service".to_string());
+        timer.timer.on_boot_sec = Some(Duration::from_secs(5));
+        timer.timer.on_startup_sec = Some(Duration::from_secs(6));
+        timer.timer.on_active_sec = Some(Duration::from_secs(7));
+        timer.timer.on_unit_active_sec = Some(Duration::from_secs(8));
+        timer.timer.on_unit_inactive_sec = Some(Duration::from_secs(9));
+        timer.timer.randomized_delay_sec = Some(Duration::from_secs(10));
+        timer.timer.persistent = true;
+        timer.timer.wake_system = true;
+        timer.timer.on_clock_change = true;
+        timer.timer.on_timezone_change = true;
+        timer
+            .timer
+            .on_calendar
+            .push(CalendarSpec::Named("daily".to_string()));
+
+        assert_eq!(timer.service_name(), "custom.service");
+        assert!(timer.is_monotonic());
+        assert!(timer.is_realtime());
+        assert_eq!(
+            timer.timer.randomized_delay_sec,
+            Some(Duration::from_secs(10))
+        );
+        assert!(timer.timer.persistent);
+        assert!(timer.timer.wake_system);
+        assert!(timer.timer.on_clock_change);
+        assert!(timer.timer.on_timezone_change);
+    }
+}

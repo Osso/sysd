@@ -37,3 +37,36 @@ impl Slice {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_sets_name_and_default_unit_section() {
+        let slice = Slice::new("system.slice".to_string());
+
+        assert_eq!(slice.name, "system.slice");
+        assert!(slice.unit.description.is_none());
+    }
+
+    #[test]
+    fn cgroup_path_handles_top_level_and_nested_slice_names() {
+        assert_eq!(
+            Slice::new("system.slice".to_string()).cgroup_path(),
+            "/sys/fs/cgroup/system.slice"
+        );
+        assert_eq!(
+            Slice::new("user-1000.slice".to_string()).cgroup_path(),
+            "/sys/fs/cgroup/user.slice/user-1000.slice"
+        );
+        assert_eq!(
+            Slice::new("machine-test.slice".to_string()).cgroup_path(),
+            "/sys/fs/cgroup/machine.slice/machine-test.slice"
+        );
+        assert_eq!(
+            Slice::new("system-app.slice".to_string()).cgroup_path(),
+            "/sys/fs/cgroup/system.slice/system-app.slice"
+        );
+    }
+}

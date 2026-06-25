@@ -68,3 +68,45 @@ impl Path {
             || !self.path.directory_not_empty.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn new_sets_defaults_and_activated_unit_falls_back_to_service_name() {
+        let unit = Path::new("watch.path".to_string());
+
+        assert_eq!(unit.name, "watch.path");
+        assert_eq!(unit.activated_unit(), "watch.service");
+        assert!(!unit.has_watches());
+    }
+
+    #[test]
+    fn activated_unit_uses_explicit_unit_and_detects_all_watch_types() {
+        let mut unit = Path::new("watch.path".to_string());
+        unit.path.unit = Some("custom.service".to_string());
+        unit.path.path_exists.push("/tmp/ready".to_string());
+        unit.path.path_exists_glob.push("/tmp/*.ready".to_string());
+        unit.path.path_changed.push("/etc/example.conf".to_string());
+        unit.path.path_modified.push("/var/lib/state".to_string());
+        unit.path
+            .directory_not_empty
+            .push("/var/spool/jobs".to_string());
+        unit.path.make_directory = true;
+        unit.path.directory_mode = Some(0o750);
+        unit.path.trigger_limit_interval_sec = Some(Duration::from_secs(60));
+        unit.path.trigger_limit_burst = Some(3);
+
+        assert_eq!(unit.activated_unit(), "custom.service");
+        assert!(unit.has_watches());
+        assert!(unit.path.make_directory);
+        assert_eq!(unit.path.directory_mode, Some(0o750));
+        assert_eq!(
+            unit.path.trigger_limit_interval_sec,
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(unit.path.trigger_limit_burst, Some(3));
+    }
+}

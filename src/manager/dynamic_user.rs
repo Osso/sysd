@@ -58,6 +58,7 @@ impl DynamicUserManager {
                 } else {
                     uid + 1
                 };
+                debug_assert!(Self::is_dynamic_uid(uid));
 
                 log::debug!(
                     "Allocated dynamic UID/GID {} for service {}",

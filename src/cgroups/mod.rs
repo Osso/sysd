@@ -327,6 +327,28 @@ pub async fn create_session_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::time::{timeout, Duration};
+
+    struct TempRoot(PathBuf);
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    static TEMP_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_manager() -> (TempRoot, CgroupManager) {
+        let id = TEMP_ID.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("sysd-cgroup-test-{}-{id}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let manager = CgroupManager { root: dir.clone() };
+        (TempRoot(dir), manager)
+    }
 
     #[test]
     fn test_cgroup_limits_default() {
@@ -374,5 +396,190 @@ mod tests {
             let mgr = result.unwrap();
             assert_eq!(mgr.root, PathBuf::from("/sys/fs/cgroup"));
         }
+    }
+
+    #[test]
+    fn create_cgroup_uses_default_or_explicit_slice() {
+        let (_dir, manager) = temp_manager();
+
+        let default_path = manager.create_cgroup(None, "demo.service").unwrap();
+        assert_eq!(
+            default_path,
+            manager.root.join("system.slice").join("demo.service")
+        );
+        assert!(default_path.exists());
+
+        let custom_path = manager
+            .create_cgroup(Some("user.slice"), "session-1.scope")
+            .unwrap();
+        assert_eq!(
+            custom_path,
+            manager.root.join("user.slice").join("session-1.scope")
+        );
+        assert!(custom_path.exists());
+    }
+
+    #[test]
+    fn pid_files_are_read_written_and_empty_state_is_reported() {
+        let (_dir, manager) = temp_manager();
+        let cgroup = manager.create_cgroup(None, "demo.service").unwrap();
+        std::fs::write(cgroup.join("cgroup.procs"), "123\nnot-a-pid\n456\n").unwrap();
+
+        assert_eq!(manager.get_pids(&cgroup).unwrap(), vec![123, 456]);
+        assert!(!manager.is_empty(&cgroup).unwrap());
+
+        manager.add_pid(&cgroup, 789).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(cgroup.join("cgroup.procs")).unwrap(),
+            "789"
+        );
+
+        manager.add_pids(&cgroup, &[111, 222]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(cgroup.join("cgroup.procs")).unwrap(),
+            "222"
+        );
+
+        std::fs::write(cgroup.join("cgroup.procs"), "").unwrap();
+        assert!(manager.is_empty(&cgroup).unwrap());
+    }
+
+    #[test]
+    fn remove_cgroup_rejects_non_empty_and_reports_temp_fs_directory_not_empty() {
+        let (_dir, manager) = temp_manager();
+        let cgroup = manager.create_cgroup(None, "demo.service").unwrap();
+        std::fs::write(cgroup.join("cgroup.procs"), "123\n").unwrap();
+
+        let error = manager.remove_cgroup(&cgroup).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(cgroup.exists());
+
+        std::fs::write(cgroup.join("cgroup.procs"), "").unwrap();
+        let error = manager.remove_cgroup(&cgroup).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::DirectoryNotEmpty);
+        assert!(cgroup.exists());
+    }
+
+    #[test]
+    fn resource_limit_writers_use_cgroup_v2_file_formats() {
+        let (_dir, manager) = temp_manager();
+        let cgroup = manager.create_cgroup(None, "demo.service").unwrap();
+
+        manager.set_memory_max(&cgroup, 1024).unwrap();
+        manager.set_cpu_quota(&cgroup, 50).unwrap();
+        manager.set_tasks_max(&cgroup, 32).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(cgroup.join("memory.max")).unwrap(),
+            "1024"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cgroup.join("cpu.max")).unwrap(),
+            "50000 100000"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cgroup.join("pids.max")).unwrap(),
+            "32"
+        );
+
+        manager.set_tasks_max(&cgroup, u64::MAX).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(cgroup.join("pids.max")).unwrap(),
+            "max"
+        );
+    }
+
+    #[test]
+    fn setup_service_cgroup_applies_limits_and_cleanup_skips_non_empty_cgroup() {
+        let (_dir, manager) = temp_manager();
+        let limits = CgroupLimits {
+            memory_max: Some(2048),
+            cpu_quota: Some(25),
+            tasks_max: Some(64),
+        };
+
+        let cgroup = manager
+            .setup_service_cgroup("demo.service", 1234, &limits, None)
+            .unwrap();
+        assert_eq!(
+            cgroup,
+            manager.root.join("system.slice").join("demo.service")
+        );
+        assert_eq!(
+            std::fs::read_to_string(cgroup.join("memory.max")).unwrap(),
+            "2048"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cgroup.join("cpu.max")).unwrap(),
+            "25000 100000"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cgroup.join("pids.max")).unwrap(),
+            "64"
+        );
+
+        manager
+            .cleanup_service_cgroup("demo.service", None)
+            .unwrap();
+        assert!(cgroup.exists());
+        manager
+            .cleanup_service_cgroup("missing.service", None)
+            .unwrap();
+    }
+
+    #[test]
+    fn enable_delegation_writes_available_controllers_to_subtree_control() {
+        let (_dir, manager) = temp_manager();
+        let cgroup = manager.create_cgroup(None, "demo.service").unwrap();
+        std::fs::write(cgroup.join("cgroup.controllers"), "cpu memory pids\n").unwrap();
+
+        manager.enable_delegation(&cgroup).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(cgroup.join("cgroup.subtree_control")).unwrap(),
+            "+cpu +memory +pids"
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_empty_signals_when_cgroup_events_becomes_unpopulated() {
+        let (_dir, manager) = temp_manager();
+        let cgroup = manager.create_cgroup(None, "demo.service").unwrap();
+        std::fs::write(cgroup.join("cgroup.events"), "populated 0\n").unwrap();
+
+        let receiver = manager.watch_empty(cgroup).unwrap();
+
+        timeout(Duration::from_secs(1), receiver)
+            .await
+            .expect("watch should observe populated 0")
+            .expect("watch sender should complete");
+    }
+
+    #[tokio::test]
+    async fn create_session_scope_creates_scope_applies_memory_and_adds_pids() {
+        let (_dir, manager) = temp_manager();
+
+        let cgroup = create_session_scope(
+            &manager,
+            "session-1.scope",
+            "user-1000.slice",
+            &[100, 200],
+            Some(4096),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            cgroup,
+            manager.root.join("user-1000.slice").join("session-1.scope")
+        );
+        assert_eq!(
+            std::fs::read_to_string(cgroup.join("memory.max")).unwrap(),
+            "4096"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cgroup.join("cgroup.procs")).unwrap(),
+            "200"
+        );
     }
 }

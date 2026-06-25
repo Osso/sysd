@@ -1,0 +1,584 @@
+// Socket unit operations
+//
+// Handles creation and management of listening sockets for socket activation.
+
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::{AsRawFd, RawFd};
+
+use tokio::sync::mpsc;
+
+use crate::units::{ListenType, Listener, Socket};
+
+use super::{socket_watcher, Manager, ManagerError};
+
+impl Manager {
+    /// Start a socket unit (create listening sockets)
+    pub(super) async fn start_socket(
+        &mut self,
+        name: &str,
+        socket: &Socket,
+    ) -> Result<(), ManagerError> {
+        let state = self
+            .states
+            .get_mut(name)
+            .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
+
+        if state.is_active() {
+            return Err(ManagerError::AlreadyActive(name.to_string()));
+        }
+
+        state.set_starting();
+
+        log::info!("Starting socket {}", name);
+
+        let mut fds = Vec::new();
+
+        for listener in &socket.socket.listeners {
+            match self.create_listener(listener, socket) {
+                Ok(fd) => {
+                    log::info!(
+                        "{}: created {:?} listener on {} (fd {})",
+                        name,
+                        listener.listen_type,
+                        listener.address,
+                        fd
+                    );
+                    fds.push(fd);
+                }
+                Err(e) => {
+                    // Close already created sockets on failure
+                    for fd in fds {
+                        unsafe { libc::close(fd) };
+                    }
+                    if let Some(state) = self.states.get_mut(name) {
+                        state.set_failed(format!("listener creation failed: {}", e));
+                    }
+                    return Err(ManagerError::Io(format!(
+                        "Failed to create listener {}: {}",
+                        listener.address, e
+                    )));
+                }
+            }
+        }
+
+        // Store the FDs
+        log::debug!(
+            "{}: storing socket FDs {:?} (total sockets with FDs: {})",
+            name,
+            fds,
+            self.socket_fds.len() + 1
+        );
+        self.socket_fds.insert(name.to_string(), fds.clone());
+
+        // Spawn socket watcher task for activation
+        let service_name = socket.service_name();
+        let socket_name = name.to_string();
+        let tx = self.socket_activation_tx.clone();
+        tokio::spawn(async move {
+            socket_watcher::watch_socket(socket_name, service_name, fds, tx).await;
+        });
+
+        // Mark as active
+        if let Some(state) = self.states.get_mut(name) {
+            state.set_running(0);
+        }
+
+        log::info!("{} listening", name);
+        Ok(())
+    }
+
+    /// Create a single listener socket
+    fn create_listener(
+        &self,
+        listener: &Listener,
+        socket: &Socket,
+    ) -> std::io::Result<RawFd> {
+        match listener.listen_type {
+            ListenType::Stream => self.create_stream_listener(listener, socket),
+            ListenType::Datagram => self.create_datagram_listener(listener, socket),
+            ListenType::Fifo => self.create_fifo(&listener.address, socket),
+            ListenType::Netlink => self.create_netlink_socket(&listener.address),
+        }
+    }
+
+    fn create_stream_listener(&self, listener: &Listener, socket: &Socket) -> std::io::Result<RawFd> {
+        if listener.address.starts_with('/') || listener.address.starts_with('@') {
+            return self.create_unix_stream_listener(&listener.address, socket);
+        }
+        self.create_tcp_socket(&listener.address)
+    }
+
+    fn create_datagram_listener(
+        &self,
+        listener: &Listener,
+        socket: &Socket,
+    ) -> std::io::Result<RawFd> {
+        if listener.address.starts_with('/') {
+            return self.create_unix_dgram_socket(&listener.address, socket);
+        }
+        self.create_udp_socket(&listener.address)
+    }
+
+    fn create_unix_stream_listener(&self, address: &str, socket: &Socket) -> std::io::Result<RawFd> {
+        if address.starts_with('@') {
+            return self.create_abstract_unix_socket(&format!("\0{}", &address[1..]));
+        }
+        self.create_filesystem_unix_listener(address, socket)
+    }
+
+    fn create_filesystem_unix_listener(
+        &self,
+        address: &str,
+        socket: &Socket,
+    ) -> std::io::Result<RawFd> {
+        use std::os::unix::net::UnixListener;
+
+        let _ = std::fs::remove_file(address);
+        if let Some(parent) = std::path::Path::new(address).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let unix_listener = UnixListener::bind(address)?;
+        let mode = socket.socket.socket_mode.unwrap_or(0o666);
+        let perms = std::fs::Permissions::from_mode(mode);
+        std::fs::set_permissions(address, perms)?;
+
+        let fd = unix_listener.as_raw_fd();
+        std::mem::forget(unix_listener);
+        Ok(fd)
+    }
+
+    fn create_abstract_unix_socket(&self, addr: &str) -> std::io::Result<RawFd> {
+        use std::mem::size_of;
+
+        unsafe {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            // Set SO_REUSEADDR
+            let optval: libc::c_int = 1;
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_REUSEADDR,
+                &optval as *const _ as *const libc::c_void,
+                size_of::<libc::c_int>() as libc::socklen_t,
+            );
+
+            let mut sockaddr: libc::sockaddr_un = std::mem::zeroed();
+            sockaddr.sun_family = libc::AF_UNIX as u16;
+
+            // Copy address including the null byte for abstract sockets
+            let bytes = addr.as_bytes();
+            let len = std::cmp::min(bytes.len(), sockaddr.sun_path.len());
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                sockaddr.sun_path.as_mut_ptr() as *mut u8,
+                len,
+            );
+
+            let addr_len = (size_of::<libc::sa_family_t>() + len) as libc::socklen_t;
+
+            if libc::bind(fd, &sockaddr as *const _ as *const libc::sockaddr, addr_len) < 0 {
+                let err = std::io::Error::last_os_error();
+                libc::close(fd);
+                return Err(err);
+            }
+
+            if libc::listen(fd, 128) < 0 {
+                let err = std::io::Error::last_os_error();
+                libc::close(fd);
+                return Err(err);
+            }
+
+            Ok(fd)
+        }
+    }
+
+    fn create_tcp_socket(&self, addr: &str) -> std::io::Result<RawFd> {
+        use std::net::TcpListener;
+
+        // Handle port-only or host:port
+        let bind_addr = if addr.contains(':') {
+            addr.to_string()
+        } else {
+            format!("0.0.0.0:{}", addr)
+        };
+
+        let listener = TcpListener::bind(&bind_addr)?;
+        let fd = listener.as_raw_fd();
+        std::mem::forget(listener);
+        Ok(fd)
+    }
+
+    fn create_udp_socket(&self, addr: &str) -> std::io::Result<RawFd> {
+        use std::net::UdpSocket;
+
+        let bind_addr = if addr.contains(':') {
+            addr.to_string()
+        } else {
+            format!("0.0.0.0:{}", addr)
+        };
+
+        let socket = UdpSocket::bind(&bind_addr)?;
+        let fd = socket.as_raw_fd();
+        std::mem::forget(socket);
+        Ok(fd)
+    }
+
+    fn create_unix_dgram_socket(&self, path: &str, socket: &Socket) -> std::io::Result<RawFd> {
+        use std::os::unix::net::UnixDatagram;
+
+        // Remove existing socket
+        let _ = std::fs::remove_file(path);
+
+        // Create parent directory
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let sock = UnixDatagram::bind(path)?;
+
+        // Set permissions (default 0666 per systemd spec)
+        let mode = socket.socket.socket_mode.unwrap_or(0o666);
+        let perms = std::fs::Permissions::from_mode(mode);
+        std::fs::set_permissions(path, perms)?;
+
+        let fd = sock.as_raw_fd();
+        std::mem::forget(sock);
+        Ok(fd)
+    }
+
+    fn create_fifo(&self, path: &str, socket: &Socket) -> std::io::Result<RawFd> {
+        use std::ffi::CString;
+
+        // Remove existing FIFO
+        let _ = std::fs::remove_file(path);
+
+        // Create parent directory
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let mode = socket.socket.socket_mode.unwrap_or(0o644);
+        let c_path = CString::new(path)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid path"))?;
+
+        unsafe {
+            if libc::mkfifo(c_path.as_ptr(), mode) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            let fd = libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK);
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            Ok(fd)
+        }
+    }
+
+    /// Create a netlink socket
+    /// Address format: "<protocol> <groups>" e.g., "route 1361" or "audit 1"
+    fn create_netlink_socket(&self, addr: &str) -> std::io::Result<RawFd> {
+        let (protocol_name, protocol, groups) = parse_netlink_address(addr)?;
+        let fd = create_bound_netlink_socket(protocol, groups)?;
+
+        log::debug!(
+            "Created netlink socket: protocol={}, groups={}, fd={}",
+            protocol_name,
+            groups,
+            fd
+        );
+        Ok(fd)
+    }
+
+    /// Stop a socket unit (close listening sockets)
+    pub(super) async fn stop_socket(
+        &mut self,
+        name: &str,
+        socket: &Socket,
+    ) -> Result<(), ManagerError> {
+        let state = self
+            .states
+            .get_mut(name)
+            .ok_or_else(|| ManagerError::NotFound(name.to_string()))?;
+
+        if !state.is_active() {
+            return Err(ManagerError::NotActive(name.to_string()));
+        }
+
+        state.set_stopping();
+
+        log::info!("Stopping socket {}", name);
+
+        // Close all socket FDs
+        if let Some(fds) = self.socket_fds.remove(name) {
+            for fd in fds {
+                unsafe { libc::close(fd) };
+            }
+        }
+
+        // Remove socket files if RemoveOnStop=yes
+        if socket.socket.remove_on_stop {
+            for listener in &socket.socket.listeners {
+                if listener.address.starts_with('/') {
+                    let _ = std::fs::remove_file(&listener.address);
+                }
+            }
+        }
+
+        if let Some(state) = self.states.get_mut(name) {
+            state.set_stopped(0);
+        }
+
+        log::info!("{} stopped", name);
+        Ok(())
+    }
+
+    fn for_each_service_socket<F>(&self, service_name: &str, mut callback: F)
+    where
+        F: FnMut(&str, &[RawFd]),
+    {
+        if self.for_each_configured_service_socket(service_name, &mut callback) {
+            return;
+        }
+        self.for_each_reverse_mapped_socket(service_name, &mut callback);
+    }
+
+    pub fn get_socket_fds(&self, service_name: &str) -> Vec<RawFd> {
+        let mut fds = Vec::new();
+        self.for_each_service_socket(service_name, |_, socket_fds| {
+            fds.extend(socket_fds.iter().copied());
+        });
+        fds
+    }
+
+    pub fn get_socket_fd_names(&self, service_name: &str) -> Vec<String> {
+        let resolve_fd_name = |socket_name: &str| -> String {
+            if let Some(socket) = self.units.get(socket_name).and_then(|u| u.as_socket()) {
+                socket.socket.fd_name.clone().unwrap_or_else(|| {
+                    socket_name
+                        .strip_suffix(".socket")
+                        .unwrap_or(socket_name)
+                        .to_string()
+                })
+            } else {
+                socket_name
+                    .strip_suffix(".socket")
+                    .unwrap_or(socket_name)
+                    .to_string()
+            }
+        };
+
+        let mut names = Vec::new();
+        self.for_each_service_socket(service_name, |socket_name, socket_fds| {
+            let fd_name = resolve_fd_name(socket_name);
+            for _ in 0..socket_fds.len() {
+                names.push(fd_name.clone());
+            }
+        });
+        names
+    }
+
+    /// Take the socket activation receiver (for use in event loops)
+    pub fn take_socket_activation_rx(
+        &mut self,
+    ) -> Option<mpsc::Receiver<socket_watcher::SocketActivation>> {
+        self.socket_activation_rx.take()
+    }
+
+    /// Process a socket activation message (start the associated service)
+    pub async fn handle_socket_activation(
+        &mut self,
+        activation: socket_watcher::SocketActivation,
+    ) -> Result<(), ManagerError> {
+        log::info!(
+            "Socket activation: {} triggered by {}",
+            activation.service_name,
+            activation.socket_name
+        );
+
+        // Resolve alias to canonical name before checking state
+        // The service_name might be an alias (e.g., "dbus.service" -> "dbus-broker.service")
+        let canonical_name = if self.units.contains_key(&activation.service_name) {
+            activation.service_name.clone()
+        } else {
+            // Try to load to resolve alias - if already loaded under different name, returns canonical
+            match self.load(&activation.service_name).await {
+                Ok(name) => name,
+                Err(_) => activation.service_name.clone(),
+            }
+        };
+
+        // Check if service is already running under canonical name
+        if let Some(state) = self.states.get(&canonical_name) {
+            if state.is_active() {
+                log::debug!("{} already running, skipping activation", canonical_name);
+                return Ok(());
+            }
+        }
+
+        // Start the service - use original name so it goes through normal start flow
+        match self.start(&activation.service_name).await {
+            Ok(()) => Ok(()),
+            // Treat AlreadyActive as success - service is running which is what we want
+            Err(ManagerError::AlreadyActive(name)) => {
+                log::debug!("{} already active during socket activation", name);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl Manager {
+    fn for_each_configured_service_socket<F>(&self, service_name: &str, callback: &mut F) -> bool
+    where
+        F: FnMut(&str, &[RawFd]),
+    {
+        let Some(service) = self.units.get(service_name).and_then(|u| u.as_service()) else {
+            return false;
+        };
+        if service.service.sockets.is_empty() {
+            return false;
+        }
+
+        log::debug!(
+            "{}: has Sockets={:?}, available socket_fds keys: {:?}",
+            service_name,
+            service.service.sockets,
+            self.socket_fds.keys().collect::<Vec<_>>()
+        );
+
+        let mut found_any = false;
+        for socket_name in &service.service.sockets {
+            match self.socket_fds.get(socket_name) {
+                Some(socket_fds) => {
+                    log::debug!(
+                        "{}: found FDs {:?} from {}",
+                        service_name,
+                        socket_fds,
+                        socket_name
+                    );
+                    callback(socket_name, socket_fds);
+                    found_any = true;
+                }
+                None => {
+                    log::warn!("{}: socket {} not in socket_fds", service_name, socket_name);
+                }
+            }
+        }
+
+        found_any
+    }
+
+    fn for_each_reverse_mapped_socket<F>(&self, service_name: &str, callback: &mut F)
+    where
+        F: FnMut(&str, &[RawFd]),
+    {
+        for (socket_name, unit) in &self.units {
+            let Some(socket) = unit.as_socket() else {
+                continue;
+            };
+            if socket.service_name() != service_name {
+                continue;
+            }
+            let Some(socket_fds) = self.socket_fds.get(socket_name) else {
+                continue;
+            };
+            callback(socket_name, socket_fds);
+            return;
+        }
+    }
+}
+
+fn parse_netlink_address(addr: &str) -> std::io::Result<(&str, libc::c_int, u32)> {
+    let mut parts = addr.split_whitespace();
+    let protocol_name = parts.next().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Invalid netlink address: empty",
+        )
+    })?;
+    let protocol = parse_netlink_protocol(protocol_name)?;
+    let groups = match parts.next() {
+        Some(raw) => raw.parse().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Invalid netlink groups: {}", raw),
+            )
+        })?,
+        None => 0,
+    };
+    Ok((protocol_name, protocol, groups))
+}
+
+fn parse_netlink_protocol(name: &str) -> std::io::Result<libc::c_int> {
+    let protocol = match name.to_lowercase().as_str() {
+        "route" => libc::NETLINK_ROUTE,
+        "kobject-uevent" => libc::NETLINK_KOBJECT_UEVENT,
+        "audit" => libc::NETLINK_AUDIT,
+        "selinux" => libc::NETLINK_SELINUX,
+        "netfilter" | "firewall" => libc::NETLINK_NETFILTER,
+        "connector" | "cn" => libc::NETLINK_CONNECTOR,
+        "iscsi" => libc::NETLINK_ISCSI,
+        "rdma" => libc::NETLINK_RDMA,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Unknown netlink protocol: {}", name),
+            ))
+        }
+    };
+    Ok(protocol)
+}
+
+fn create_bound_netlink_socket(protocol: libc::c_int, groups: u32) -> std::io::Result<RawFd> {
+    let fd = open_nonblocking_netlink_socket(protocol)?;
+    if let Err(e) = bind_netlink_socket(fd, groups) {
+        unsafe { libc::close(fd) };
+        return Err(e);
+    }
+    Ok(fd)
+}
+
+fn open_nonblocking_netlink_socket(protocol: libc::c_int) -> std::io::Result<RawFd> {
+    let fd = unsafe { libc::socket(libc::AF_NETLINK, libc::SOCK_DGRAM, protocol) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        unsafe { libc::close(fd) };
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let set_result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if set_result < 0 {
+        unsafe { libc::close(fd) };
+        return Err(std::io::Error::last_os_error());
+    }
+
+    Ok(fd)
+}
+
+fn bind_netlink_socket(fd: RawFd, groups: u32) -> std::io::Result<()> {
+    use std::mem::size_of;
+
+    let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+    addr.nl_family = libc::AF_NETLINK as u16;
+    addr.nl_pid = 0;
+    addr.nl_groups = groups;
+
+    let addr_ptr = &addr as *const libc::sockaddr_nl as *const libc::sockaddr;
+    let addr_len = size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+    let bind_result = unsafe { libc::bind(fd, addr_ptr, addr_len) };
+    if bind_result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}

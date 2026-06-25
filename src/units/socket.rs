@@ -120,3 +120,62 @@ impl Socket {
         self.socket.accept
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_sets_default_socket_state() {
+        let socket = Socket::new("dbus.socket".to_string());
+
+        assert_eq!(socket.name, "dbus.socket");
+        assert_eq!(socket.service_name(), "dbus.service");
+        assert!(!socket.is_accept_socket());
+        assert!(socket.socket.listeners.is_empty());
+        assert!(!socket.socket.remove_on_stop);
+        assert_eq!(socket.socket.socket_mode, None);
+    }
+
+    #[test]
+    fn explicit_service_accept_and_listener_fields_are_reported() {
+        let mut socket = Socket::new("api.socket".to_string());
+        socket.socket.service = Some("api-worker.service".to_string());
+        socket.socket.accept = true;
+        socket.socket.listeners.push(Listener {
+            address: "/run/api.sock".to_string(),
+            listen_type: ListenType::Stream,
+        });
+        socket.socket.socket_mode = Some(0o660);
+        socket.socket.socket_user = Some("api".to_string());
+        socket.socket.socket_group = Some("api".to_string());
+        socket.socket.fd_name = Some("api".to_string());
+        socket.socket.remove_on_stop = true;
+        socket.socket.max_connections_per_source = Some(10);
+        socket.socket.receive_buffer = Some(4096);
+        socket.socket.send_buffer = Some(8192);
+        socket.socket.pass_credentials = true;
+        socket.socket.pass_security = true;
+        socket.socket.symlinks = vec!["/run/api-link.sock".to_string()];
+        socket.socket.defer_trigger = true;
+
+        assert_eq!(socket.service_name(), "api-worker.service");
+        assert!(socket.is_accept_socket());
+        assert_eq!(socket.socket.listeners[0].listen_type, ListenType::Stream);
+        assert_eq!(socket.socket.socket_mode, Some(0o660));
+        assert_eq!(socket.socket.max_connections_per_source, Some(10));
+        assert!(socket.socket.pass_credentials);
+        assert!(socket.socket.pass_security);
+        assert_eq!(socket.socket.symlinks, vec!["/run/api-link.sock"]);
+        assert!(socket.socket.defer_trigger);
+    }
+
+    #[test]
+    fn set_name_updates_socket_name_and_default_service() {
+        let mut socket = Socket::new("old.socket".to_string());
+        socket.set_name("new.socket".to_string());
+
+        assert_eq!(socket.name, "new.socket");
+        assert_eq!(socket.service_name(), "new.service");
+    }
+}

@@ -15,8 +15,13 @@ static DOCKER_LOCK: Mutex<()> = Mutex::new(());
 
 /// Check if Docker is available
 fn docker_available() -> bool {
+    docker_command_succeeds(&["info"])
+}
+
+/// Run docker command and check successful status
+fn docker_command_succeeds(args: &[&str]) -> bool {
     Command::new("docker")
-        .args(["info"])
+        .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -26,13 +31,7 @@ fn docker_available() -> bool {
 
 /// Check if the sysd container image exists
 fn image_exists() -> bool {
-    Command::new("docker")
-        .args(["image", "inspect", "sysd-sysd"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    docker_command_succeeds(&["image", "inspect", "sysd-sysd"])
 }
 
 /// Run docker compose command and return output

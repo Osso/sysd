@@ -235,27 +235,55 @@ fn kahn_drain(
     in_degree: &mut HashMap<String, usize>,
     result: &mut Vec<String>,
 ) {
-    let mut queue: VecDeque<String> = in_degree
-        .iter()
-        .filter(|(n, &deg)| deg == 0 && !result.contains(n))
-        .map(|(n, _)| n.clone())
-        .collect();
+    let mut emitted: HashSet<String> = result.iter().cloned().collect();
+    let mut queued: HashSet<String> = HashSet::new();
+    let mut queue = initial_zero_in_degree_queue(in_degree, &emitted, &mut queued);
 
     while let Some(node) = queue.pop_front() {
-        if result.contains(&node) {
+        queued.remove(&node);
+        if !emitted.insert(node.clone()) {
             continue;
         }
         result.push(node.clone());
+        queue_newly_unblocked_nodes(edges, in_degree, &node, &emitted, &mut queued, &mut queue);
+    }
+}
 
-        for (dependent, deps) in edges {
-            if deps.contains(&node) {
-                if let Some(deg) = in_degree.get_mut(dependent) {
-                    *deg = deg.saturating_sub(1);
-                    if *deg == 0 {
-                        queue.push_back(dependent.clone());
-                    }
-                }
-            }
+fn initial_zero_in_degree_queue(
+    in_degree: &HashMap<String, usize>,
+    emitted: &HashSet<String>,
+    queued: &mut HashSet<String>,
+) -> VecDeque<String> {
+    let mut queue = VecDeque::new();
+    for (node, &degree) in in_degree {
+        if degree != 0 || emitted.contains(node) {
+            continue;
+        }
+        if queued.insert(node.clone()) {
+            queue.push_back(node.clone());
+        }
+    }
+    queue
+}
+
+fn queue_newly_unblocked_nodes(
+    edges: &HashMap<String, HashSet<String>>,
+    in_degree: &mut HashMap<String, usize>,
+    node: &str,
+    emitted: &HashSet<String>,
+    queued: &mut HashSet<String>,
+    queue: &mut VecDeque<String>,
+) {
+    for (dependent, deps) in edges {
+        if !deps.contains(node) || emitted.contains(dependent) {
+            continue;
+        }
+        let Some(degree) = in_degree.get_mut(dependent) else {
+            continue;
+        };
+        *degree = degree.saturating_sub(1);
+        if *degree == 0 && queued.insert(dependent.clone()) {
+            queue.push_back(dependent.clone());
         }
     }
 }
@@ -328,7 +356,7 @@ impl std::error::Error for CycleError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::units::Service;
+    use crate::units::{Service, Socket, Target, Unit};
 
     fn make_service(name: &str, after: &[&str]) -> Service {
         let mut svc = Service::new(name.to_string());
@@ -347,6 +375,95 @@ mod tests {
         let mut graph = DepGraph::new();
         graph.add_service(&make_service("a.service", &[]));
         assert_eq!(graph.toposort().unwrap(), vec!["a.service"]);
+    }
+
+    #[test]
+    fn alias_and_direct_dependency_iterator_use_canonical_loaded_name() {
+        let mut graph = DepGraph::new();
+        graph.add_node("canonical.service");
+        graph.add_node("consumer.service");
+        graph.add_alias("alias.service", "canonical.service");
+        graph.add_alias("same.service", "same.service");
+
+        graph.add_edge("consumer.service", "alias.service");
+
+        let deps: Vec<&str> = graph
+            .dependencies("consumer.service")
+            .map(String::as_str)
+            .collect();
+        assert_eq!(deps, vec!["canonical.service"]);
+        assert!(!graph.aliases.contains_key("same.service"));
+    }
+
+    #[test]
+    fn add_unit_applies_default_dependencies_to_non_targets() {
+        let mut graph = DepGraph::new();
+        for name in [
+            "sysinit.target",
+            "sockets.target",
+            "shutdown.target",
+            "basic.target",
+            "api.socket",
+            "api.service",
+        ] {
+            graph.add_node(name);
+        }
+
+        graph.add_unit(&Unit::Socket(Socket::new("api.socket".to_string())));
+        graph.add_unit(&Unit::Service(Service::new("api.service".to_string())));
+        graph.add_unit(&Unit::Target(Target::new("multi-user.target".to_string())));
+
+        let socket_deps: Vec<&str> = graph
+            .dependencies("api.socket")
+            .map(String::as_str)
+            .collect();
+        assert!(socket_deps.contains(&"sysinit.target"));
+        assert!(graph
+            .dependencies("sockets.target")
+            .any(|dep| dep == "api.socket"));
+        assert!(graph
+            .dependencies("shutdown.target")
+            .any(|dep| dep == "api.socket"));
+
+        let service_deps: Vec<&str> = graph
+            .dependencies("api.service")
+            .map(String::as_str)
+            .collect();
+        assert!(service_deps.contains(&"basic.target"));
+        assert!(graph.dependencies("multi-user.target").next().is_none());
+    }
+
+    #[test]
+    fn add_unit_with_name_uses_explicit_instance_name_and_wants_dir() {
+        let mut graph = DepGraph::new();
+        for name in ["template@one.service", "alpha.service", "beta.service"] {
+            graph.add_node(name);
+        }
+        let mut target = Target::new("group.target".to_string());
+        target.wants_dir = vec!["alpha.service".to_string(), "beta.service".to_string()];
+        target.unit.default_dependencies = false;
+
+        graph.add_unit_with_name("template@one.service", &Unit::Target(target));
+
+        let deps: Vec<&str> = graph
+            .dependencies("template@one.service")
+            .map(String::as_str)
+            .collect();
+        assert_eq!(deps.len(), 2);
+        assert!(deps.contains(&"alpha.service"));
+        assert!(deps.contains(&"beta.service"));
+    }
+
+    #[test]
+    fn cycle_error_display_lists_nodes() {
+        let error = CycleError {
+            nodes: vec!["a.service".to_string(), "b.service".to_string()],
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "Dependency cycle detected involving: a.service, b.service"
+        );
     }
 
     #[test]
