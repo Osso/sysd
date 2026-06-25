@@ -183,3 +183,213 @@ fn create_directory(path: &str, mode: u32) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manager::{ActiveState, ServiceState, SubState};
+    use crate::units::{Service, Unit};
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct TempRoot(std::path::PathBuf);
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_dir(label: &str) -> TempRoot {
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "sysd-path-ops-{label}-{}-{counter}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        TempRoot(dir)
+    }
+
+    fn path_unit(name: &str, configure: impl FnOnce(&mut PathUnit)) -> PathUnit {
+        let mut unit = PathUnit::new(name.to_string());
+        configure(&mut unit);
+        unit
+    }
+
+    #[test]
+    fn create_directory_creates_missing_dirs_with_mode_and_keeps_existing_dirs() {
+        let root = temp_dir("mkdir");
+        let dir = root.0.join("nested/path");
+
+        create_directory(dir.to_str().unwrap(), 0o750).unwrap();
+        create_directory(dir.to_str().unwrap(), 0o700).unwrap();
+
+        assert!(dir.is_dir());
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+    }
+
+    #[tokio::test]
+    async fn start_path_requires_state_creates_directories_and_emits_initial_trigger() {
+        let root = temp_dir("start");
+        let ready_dir = root.0.join("ready");
+        let spool_dir = root.0.join("spool");
+        let mut manager = Manager::new();
+        let mut rx = manager.take_path_rx().unwrap();
+        let unit = path_unit("ready.path", |unit| {
+            unit.path.make_directory = true;
+            unit.path.directory_mode = Some(0o710);
+            unit.path.path_exists.push(ready_dir.to_string_lossy().into_owned());
+            unit.path
+                .directory_not_empty
+                .push(spool_dir.to_string_lossy().into_owned());
+            unit.path.unit = Some("ready.service".to_string());
+        });
+
+        assert!(matches!(
+            manager.start_path("ready.path", &unit).await,
+            Err(ManagerError::NotFound(name)) if name == "ready.path"
+        ));
+
+        manager
+            .states
+            .insert("ready.path".to_string(), ServiceState::new());
+        manager.start_path("ready.path", &unit).await.unwrap();
+
+        assert!(ready_dir.is_dir());
+        assert!(spool_dir.is_dir());
+        assert_eq!(
+            std::fs::metadata(&ready_dir).unwrap().permissions().mode() & 0o777,
+            0o710
+        );
+        assert!(manager.states.get("ready.path").unwrap().is_active());
+
+        let trigger = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(trigger.path_name, "ready.path");
+        assert_eq!(trigger.service_name, "ready.service");
+        assert_eq!(trigger.triggered_path, ready_dir.to_string_lossy());
+    }
+
+    #[tokio::test]
+    async fn start_path_with_all_watch_types_marks_active_and_rejects_already_active() {
+        let root = temp_dir("all-watch-types");
+        let mut manager = Manager::new();
+        let _rx = manager.take_path_rx().unwrap();
+        let unit = path_unit("all.path", |unit| {
+            unit.path
+                .path_exists_glob
+                .push(root.0.join("*.ready").to_string_lossy().into_owned());
+            unit.path
+                .path_changed
+                .push(root.0.join("changed").to_string_lossy().into_owned());
+            unit.path
+                .path_modified
+                .push(root.0.join("modified").to_string_lossy().into_owned());
+        });
+        manager
+            .states
+            .insert("all.path".to_string(), ServiceState::new());
+
+        manager.start_path("all.path", &unit).await.unwrap();
+
+        assert!(manager.states.get("all.path").unwrap().is_active());
+        assert!(matches!(
+            manager.start_path("all.path", &unit).await,
+            Err(ManagerError::AlreadyActive(name)) if name == "all.path"
+        ));
+    }
+
+    #[tokio::test]
+    async fn start_path_without_watches_still_marks_unit_active() {
+        let mut manager = Manager::new();
+        let unit = path_unit("empty.path", |_| {});
+        manager
+            .states
+            .insert("empty.path".to_string(), ServiceState::new());
+
+        manager.start_path("empty.path", &unit).await.unwrap();
+
+        assert!(manager.states.get("empty.path").unwrap().is_active());
+    }
+
+    #[tokio::test]
+    async fn stop_path_requires_active_state_and_marks_stopped() {
+        let mut manager = Manager::new();
+
+        assert!(matches!(
+            manager.stop_path("watch.path").await,
+            Err(ManagerError::NotFound(name)) if name == "watch.path"
+        ));
+
+        manager
+            .states
+            .insert("watch.path".to_string(), ServiceState::new());
+        assert!(matches!(
+            manager.stop_path("watch.path").await,
+            Err(ManagerError::NotActive(name)) if name == "watch.path"
+        ));
+
+        manager
+            .states
+            .get_mut("watch.path")
+            .unwrap()
+            .set_running(0);
+        manager.stop_path("watch.path").await.unwrap();
+
+        let state = manager.states.get("watch.path").unwrap();
+        assert_eq!(state.active, ActiveState::Inactive);
+        assert_eq!(state.sub, SubState::Exited);
+    }
+
+    #[test]
+    fn take_path_receiver_returns_receiver_once() {
+        let mut manager = Manager::new();
+
+        assert!(manager.take_path_rx().is_some());
+        assert!(manager.take_path_rx().is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_path_triggered_skips_active_service_and_reports_missing_service() {
+        let mut manager = Manager::new();
+        manager.units.insert(
+            "ready.service".to_string(),
+            Unit::Service(Service::new("ready.service".to_string())),
+        );
+        manager
+            .states
+            .insert("ready.service".to_string(), ServiceState::new());
+        manager
+            .states
+            .get_mut("ready.service")
+            .unwrap()
+            .set_running(42);
+
+        manager
+            .handle_path_triggered(path_watcher::PathTriggered {
+                path_name: "ready.path".to_string(),
+                service_name: "ready.service".to_string(),
+                triggered_path: "/tmp/ready".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let err = manager
+            .handle_path_triggered(path_watcher::PathTriggered {
+                path_name: "missing.path".to_string(),
+                service_name: "missing.service".to_string(),
+                triggered_path: "/tmp/missing".to_string(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ManagerError::NotFound(name) if name == "missing.service"));
+    }
+}

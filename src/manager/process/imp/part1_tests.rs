@@ -28,6 +28,21 @@ fn unique_name(prefix: &str) -> String {
     format!("SYSD_TEST_{prefix}_{id}")
 }
 
+#[cfg(unix)]
+fn libc_env_var(key: &str) -> Option<String> {
+    let key = std::ffi::CString::new(key).unwrap();
+    let value = unsafe { libc::getenv(key.as_ptr()) };
+    if value.is_null() {
+        None
+    } else {
+        Some(
+            unsafe { std::ffi::CStr::from_ptr(value) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+}
+
 #[test]
 fn parse_command_trims_systemd_prefixes_and_preserves_quoted_args() {
     let (program, args) = parse_command("-+!/bin/echo 'hello world' plain").unwrap();
@@ -229,7 +244,7 @@ fn environment_helpers_apply_valid_names_and_ignore_invalid_cstrings() {
 
     set_env_var(&keep_key, "one");
     set_env_var("BAD\0KEY", "ignored");
-    assert_eq!(std::env::var(&keep_key).unwrap(), "one");
+    assert_eq!(libc_env_var(&keep_key).unwrap(), "one");
 
     let mut extra = std::collections::HashMap::new();
     extra.insert(keep_key.clone(), "two".to_string());
@@ -237,10 +252,10 @@ fn environment_helpers_apply_valid_names_and_ignore_invalid_cstrings() {
     set_env_var(&drop_key, "remove-me");
     set_environment_from_maps(&extra, &[drop_key.clone(), "BAD\0KEY".to_string()]);
 
-    assert_eq!(std::env::var(&keep_key).unwrap(), "two");
-    assert!(std::env::var(&drop_key).is_err());
+    assert_eq!(libc_env_var(&keep_key).unwrap(), "two");
+    assert!(libc_env_var(&drop_key).is_none());
     unset_env_var(&keep_key);
-    assert!(std::env::var(&keep_key).is_err());
+    assert!(libc_env_var(&keep_key).is_none());
 }
 
 #[test]
