@@ -112,4 +112,44 @@ mod tests {
 
         send_activation_message(&tx, "closed.socket", "closed.service").await;
     }
+
+    #[tokio::test]
+    async fn watch_socket_sends_activation_when_listener_becomes_readable() {
+        use std::os::unix::io::AsRawFd;
+
+        let socket_path = std::env::temp_dir().join(format!(
+            "sysd-socket-watcher-{}-{}.sock",
+            std::process::id(),
+            socket_name_suffix()
+        ));
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let watcher = tokio::spawn(watch_socket(
+            "ready.socket".to_string(),
+            "ready.service".to_string(),
+            vec![listener.as_raw_fd()],
+            tx,
+        ));
+        let _client = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
+
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        watcher.await.unwrap();
+        let _ = std::fs::remove_file(&socket_path);
+
+        assert_eq!(message.socket_name, "ready.socket");
+        assert_eq!(message.service_name, "ready.service");
+    }
+
+    fn socket_name_suffix() -> usize {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    }
 }

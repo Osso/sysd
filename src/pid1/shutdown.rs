@@ -119,26 +119,10 @@ fn unmount_filesystems() {
         }
     };
 
-    // Parse mount points (reverse order for proper unmounting)
-    let mut mount_points: Vec<String> = mounts
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                Some(parts[1].to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    mount_points.reverse();
-
-    // Skip critical mounts
-    let skip = ["/", "/proc", "/sys", "/dev"];
+    let mount_points = mount_points_for_unmount(&mounts);
 
     for mount_point in mount_points {
-        if skip.contains(&mount_point.as_str()) {
+        if should_skip_mount(&mount_point) {
             continue;
         }
 
@@ -157,5 +141,55 @@ fn unmount_filesystems() {
                 log::warn!("Failed to unmount {}: {}", mount_point, e);
             }
         }
+    }
+}
+
+fn mount_points_for_unmount(mounts: &str) -> Vec<String> {
+    let mut mount_points: Vec<String> = mounts
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                Some(parts[1].to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    mount_points.reverse();
+    mount_points
+}
+
+fn should_skip_mount(mount_point: &str) -> bool {
+    ["/", "/proc", "/sys", "/dev"].contains(&mount_point)
+}
+
+#[cfg(test)]
+mod more_tests {
+    use super::*;
+
+    #[test]
+    fn mount_points_for_unmount_parses_and_reverses_proc_mount_lines() {
+        let mounts = "\
+rootfs / rootfs rw 0 0
+proc /proc proc rw 0 0
+tmpfs /run tmpfs rw 0 0
+malformed
+/dev/sda1 /var ext4 rw 0 0
+";
+
+        assert_eq!(
+            mount_points_for_unmount(mounts),
+            ["/var", "/run", "/proc", "/"]
+        );
+    }
+
+    #[test]
+    fn should_skip_mount_only_skips_critical_mount_points() {
+        for mount in ["/", "/proc", "/sys", "/dev"] {
+            assert!(should_skip_mount(mount));
+        }
+        assert!(!should_skip_mount("/run"));
+        assert!(!should_skip_mount("/var"));
     }
 }
