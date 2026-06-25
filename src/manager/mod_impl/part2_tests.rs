@@ -322,3 +322,133 @@ fn cleanup_runtime_dirs_respects_preserve_yes_and_ignores_non_services() {
     manager.cleanup_runtime_dirs("plain.target");
     manager.cleanup_runtime_dirs("missing.service");
 }
+
+#[test]
+fn prepare_socket_fds_logs_missing_socket_fds_and_returns_empty_values() {
+    let manager = Manager::new_user();
+    let svc = service("socketed.service", |service| {
+        service.service.sockets = vec!["missing.socket".to_string()];
+    });
+
+    let (fds, names) = manager.prepare_socket_fds(&svc, "socketed.service");
+
+    assert!(fds.is_empty());
+    assert!(names.is_empty());
+}
+
+#[tokio::test]
+async fn build_spawn_options_includes_notify_watchdog_fds_dynamic_ids_and_environment() {
+    let mut manager = Manager::new_user();
+    let notify_path = std::env::temp_dir().join(format!(
+        "sysd-build-options-notify-{}-{}.sock",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let (listener, rx) = AsyncNotifyListener::new(&notify_path).unwrap();
+    manager.notify_listener = Some(listener);
+    manager.notify_rx = Some(rx);
+    manager
+        .fd_store
+        .insert("api.service".to_string(), vec![("stored".to_string(), 12)]);
+    manager
+        .user_environment
+        .insert("LANG".to_string(), "C.UTF-8".to_string());
+    let svc = service("api.service", |service| {
+        service.service.service_type = ServiceType::Notify;
+        service.service.watchdog_sec = Some(Duration::from_secs(5));
+    });
+
+    let options = manager.build_spawn_options(
+        &svc,
+        "api.service",
+        vec![3, 4],
+        vec!["api".to_string(), "metrics".to_string()],
+        Some(100_001),
+        Some(100_001),
+    );
+
+    assert!(options.notify_socket.is_some());
+    assert_eq!(options.watchdog_usec, Some(5_000_000));
+    assert_eq!(options.socket_fds, [3, 4]);
+    assert_eq!(options.socket_fd_names, ["api", "metrics"]);
+    assert_eq!(options.dynamic_uid, Some(100_001));
+    assert_eq!(options.dynamic_gid, Some(100_001));
+    assert_eq!(options.stored_fds, [12]);
+    assert_eq!(
+        options.user_environment.get("LANG").map(String::as_str),
+        Some("C.UTF-8")
+    );
+    drop(manager);
+    let _ = std::fs::remove_file(notify_path);
+}
+
+#[tokio::test]
+async fn wait_for_child_exit_records_success_status() {
+    let mut manager = manager_with_state("wait.service");
+    manager.units.insert(
+        "wait.service".to_string(),
+        Unit::Service(service("wait.service", |service| {
+            service.service.timeout_stop_sec = Some(Duration::from_secs(1));
+        })),
+    );
+    let child = tokio::process::Command::new("/bin/true").spawn().unwrap();
+
+    manager.wait_for_child_exit("wait.service", child).await;
+
+    let state = manager.states.get("wait.service").unwrap();
+    assert_eq!(state.active, ActiveState::Inactive);
+    assert_eq!(state.sub, SubState::Exited);
+    assert_eq!(state.exit_code, Some(0));
+}
+
+#[tokio::test]
+async fn wait_for_child_exit_kills_process_after_timeout() {
+    let mut manager = manager_with_state("slow.service");
+    manager.units.insert(
+        "slow.service".to_string(),
+        Unit::Service(service("slow.service", |service| {
+            service.service.timeout_stop_sec = Some(Duration::from_millis(10));
+        })),
+    );
+    let child = tokio::process::Command::new("/bin/sleep")
+        .arg("5")
+        .spawn()
+        .unwrap();
+
+    manager.wait_for_child_exit("slow.service", child).await;
+
+    let state = manager.states.get("slow.service").unwrap();
+    assert_eq!(state.active, ActiveState::Inactive);
+    assert_eq!(state.exit_code, Some(-9));
+}
+
+#[tokio::test]
+async fn run_stop_post_commands_runs_successes_and_ignores_failures_or_missing_units() {
+    let marker = std::env::temp_dir().join(format!(
+        "sysd-stop-post-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut manager = Manager::new_user();
+    manager.units.insert(
+        "cleanup.service".to_string(),
+        Unit::Service(service("cleanup.service", |service| {
+            service.service.exec_stop_post = vec![
+                format!("/usr/bin/touch {}", marker.display()),
+                "/bin/false".to_string(),
+            ];
+        })),
+    );
+
+    manager.run_stop_post_commands("cleanup.service").await;
+    manager.run_stop_post_commands("missing.service").await;
+
+    assert!(marker.exists());
+    let _ = std::fs::remove_file(marker);
+}
