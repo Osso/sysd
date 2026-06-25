@@ -297,6 +297,45 @@ fn syscall_lookup_matches_native_table_and_unknowns_return_none() {
     assert!(native_seccomp_arch().is_some());
 }
 
+#[test]
+fn native_syscall_table_contains_late_security_entries() {
+    assert!(syscall_name_to_nr("kexec_file_load").is_some());
+    assert!(syscall_name_to_nr("open_tree").is_some());
+    assert!(syscall_name_to_nr("move_mount").is_some());
+    assert!(syscall_name_to_nr("bpf").is_some());
+}
+
+#[test]
+fn prctl_backed_part3_helpers_are_callable_without_mounts() {
+    assert_eq!(apply_restrict_realtime(), Ok(()));
+    assert_eq!(apply_lock_personality(), Ok(()));
+}
+
+#[test]
+fn ignore_sigpipe_sets_sigpipe_to_ignore() {
+    let original = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    unsafe { libc::signal(libc::SIGPIPE, original) };
+
+    assert_eq!(apply_ignore_sigpipe(), Ok(()));
+
+    let previous = unsafe { libc::signal(libc::SIGPIPE, original) };
+
+    assert_eq!(previous, libc::SIG_IGN);
+}
+
+#[test]
+fn mount_helpers_reject_paths_with_nul_before_mounting() {
+    assert!(bind_mount_ro("bad\0path").unwrap_err().contains("nul byte"));
+    assert!(remount_rw("bad\0path").unwrap_err().contains("nul byte"));
+    assert!(mount_tmpfs("bad\0path").unwrap_err().contains("nul byte"));
+    assert!(make_inaccessible("bad\0path")
+        .unwrap_err()
+        .contains("nul byte"));
+    assert!(remount_proc("hidepid=2\0bad")
+        .unwrap_err()
+        .contains("nul byte"));
+}
+
 fn rule_map() -> BTreeMap<i64, Vec<SeccompRule>> {
     BTreeMap::new()
 }
