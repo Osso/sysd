@@ -16,6 +16,21 @@ fn u32_array_value(values: &[u32]) -> OwnedValue {
     OwnedValue::try_from(Value::Array(array)).unwrap()
 }
 
+struct TempDir(std::path::PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn temp_dir(label: &str) -> TempDir {
+    let id = format!("{}-{}", std::process::id(), next_job_id());
+    let path = std::env::temp_dir().join(format!("sysd-dbus-manager-{label}-{id}"));
+    std::fs::create_dir_all(&path).unwrap();
+    TempDir(path)
+}
+
 #[test]
 fn job_ids_and_paths_are_monotonic_and_systemd_shaped() {
     let first = next_job_id();
@@ -120,6 +135,43 @@ fn pidfd_to_pid_reports_missing_fd() {
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 }
 
+#[test]
+fn pidfd_to_pid_reports_current_process_for_pidfd() {
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, std::process::id(), 0) };
+    assert_ne!(pidfd, -1, "pidfd_open should succeed for current process");
+
+    let pid = pidfd_to_pid(pidfd as std::os::unix::io::RawFd).unwrap();
+    unsafe { libc::close(pidfd as i32) };
+
+    assert_eq!(pid, std::process::id());
+}
+
+#[test]
+fn ensure_user_session_bus_accepts_existing_bus_path() {
+    let root = temp_dir("existing-bus");
+    let bus_path = root.0.join("bus");
+    std::fs::write(&bus_path, b"").unwrap();
+
+    assert!(ensure_user_session_bus(
+        1234,
+        root.0.to_str().unwrap(),
+        bus_path.to_str().unwrap()
+    ));
+}
+
+#[test]
+fn log_scope_start_accepts_all_optional_inputs() {
+    log_scope_start(
+        "session-3.scope",
+        "replace",
+        Some("user-1000.slice"),
+        Some("Session 3"),
+        &[std::process::id()],
+    );
+
+    log_scope_start("session-empty.scope", "fail", None, None, &[]);
+}
+
 #[tokio::test]
 async fn manager_interface_reports_static_paths_and_version() {
     let interface = ManagerInterface::new(Arc::new(RwLock::new(Manager::new_user())));
@@ -139,6 +191,46 @@ async fn manager_interface_reports_static_paths_and_version() {
     );
     assert_eq!(interface.subscribe().await, Ok(()));
     assert_eq!(interface.reload().await, Ok(()));
+}
+
+#[tokio::test]
+async fn stop_unit_returns_job_path_even_when_unit_is_missing() {
+    let interface = ManagerInterface::new(Arc::new(RwLock::new(Manager::new_user())));
+
+    let job = interface
+        .stop_unit("definitely-missing.service", "replace")
+        .await
+        .unwrap();
+
+    assert!(job.as_str().starts_with("/org/freedesktop/systemd1/job/"));
+}
+
+#[tokio::test]
+async fn kill_unit_ignores_missing_units_and_checks_scope_main_pid() {
+    let manager = Arc::new(RwLock::new(Manager::new_user()));
+    let interface = ManagerInterface::new(Arc::clone(&manager));
+
+    interface
+        .kill_unit("definitely-missing.scope", "all", 0)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        register_scope_job(
+            Arc::clone(&manager),
+            "session-kill.scope",
+            None,
+            Some("Kill test"),
+            &[std::process::id()],
+        )
+        .await,
+        "done"
+    );
+
+    interface
+        .kill_unit("session-kill.scope", "all", 0)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
