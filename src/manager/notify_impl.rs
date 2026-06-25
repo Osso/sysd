@@ -270,6 +270,28 @@ pub const NOTIFY_SOCKET_PATH: &str = "/run/sysd/notify";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct TempRoot(PathBuf);
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_dir(label: &str) -> TempRoot {
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "sysd-notify-{label}-{}-{counter}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        TempRoot(dir)
+    }
 
     #[test]
     fn test_parse_notify_message() {
@@ -307,5 +329,122 @@ mod tests {
         let msg = parse_notify_message("FDSTOREREMOVE=1\nFDNAME=myfd", 2000, vec![]);
         assert!(msg.is_fdstoreremove());
         assert_eq!(msg.fdname(), Some("myfd"));
+    }
+
+    #[test]
+    fn notify_message_helpers_reject_non_one_values_and_bad_main_pid() {
+        let msg = parse_notify_message(
+            "READY=0\nSTOPPING=no\nWATCHDOG=false\nFDSTORE=2\nFDSTOREREMOVE=0\nMAINPID=oops\nIGNORED\nKEY=value=with=equals",
+            4321,
+            vec![],
+        );
+
+        assert!(!msg.is_ready());
+        assert!(!msg.is_stopping());
+        assert!(!msg.is_watchdog());
+        assert!(!msg.is_fdstore());
+        assert!(!msg.is_fdstoreremove());
+        assert_eq!(msg.main_pid(), None);
+        assert_eq!(msg.status(), None);
+        assert_eq!(msg.fields.get("KEY").unwrap(), "value=with=equals");
+    }
+
+    #[tokio::test]
+    async fn socket_path_helpers_remove_stale_socket_and_set_world_permissions() {
+        let root = temp_dir("path");
+        let socket_path = root.0.join("nested/notify.sock");
+        std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+        std::fs::write(&socket_path, "stale").unwrap();
+
+        prepare_socket_path(&socket_path).unwrap();
+        assert!(!socket_path.exists());
+
+        let socket = create_notify_socket(&socket_path).unwrap();
+
+        assert!(socket_path.exists());
+        assert_eq!(
+            std::fs::metadata(&socket_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o777
+        );
+        drop(socket);
+    }
+
+    #[tokio::test]
+    async fn async_listener_receives_notify_message_and_drop_removes_socket() {
+        let root = temp_dir("listener");
+        let socket_path = root.0.join("notify.sock");
+
+        let (listener, mut rx) = AsyncNotifyListener::new(&socket_path).unwrap();
+        assert_eq!(listener.socket_path(), socket_path.as_path());
+
+        let sender = tokio::net::UnixDatagram::unbound().unwrap();
+        sender
+            .send_to(b"READY=1\nWATCHDOG=1\nSTATUS=booted\nMAINPID=42", &socket_path)
+            .await
+            .unwrap();
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(msg.is_ready());
+        assert!(msg.is_watchdog());
+        assert_eq!(msg.status(), Some("booted"));
+        assert_eq!(msg.main_pid(), Some(42));
+        assert_eq!(msg.pid, std::process::id());
+
+        drop(listener);
+        assert!(!socket_path.exists());
+    }
+
+    #[tokio::test]
+    async fn forward_notify_packet_sends_valid_utf8_and_stops_when_receiver_closed() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let buf = b"READY=1\nSTATUS=ok";
+
+        assert!(forward_notify_packet(&tx, (buf.len(), 77, Vec::new()), buf).await);
+        let msg = rx.recv().await.unwrap();
+        assert_eq!(msg.pid, 77);
+        assert!(msg.is_ready());
+        assert_eq!(msg.status(), Some("ok"));
+
+        drop(rx);
+        assert!(!forward_notify_packet(&tx, (buf.len(), 77, Vec::new()), buf).await);
+    }
+
+    #[tokio::test]
+    async fn forward_notify_packet_closes_fds_for_invalid_utf8() {
+        let (tx, _rx) = mpsc::channel(1);
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let invalid = [0xff, 0xfe];
+
+        assert!(forward_notify_packet(&tx, (invalid.len(), 1, vec![fds[0]]), &invalid).await);
+
+        let mut byte = [0u8; 1];
+        let read_result = unsafe { libc::read(fds[0], byte.as_mut_ptr().cast(), 1) };
+        assert_eq!(read_result, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+        unsafe { libc::close(fds[1]) };
+    }
+
+    #[test]
+    fn retry_predicate_accepts_would_block_eagain_and_ewouldblock_only() {
+        assert!(should_retry_notify_read(&std::io::Error::from(
+            std::io::ErrorKind::WouldBlock
+        )));
+        assert!(should_retry_notify_read(
+            &std::io::Error::from_raw_os_error(libc::EAGAIN)
+        ));
+        assert!(should_retry_notify_read(
+            &std::io::Error::from_raw_os_error(libc::EWOULDBLOCK)
+        ));
+        assert!(!should_retry_notify_read(&std::io::Error::from(
+            std::io::ErrorKind::ConnectionRefused
+        )));
     }
 }
