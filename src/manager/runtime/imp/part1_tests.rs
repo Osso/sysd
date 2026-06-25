@@ -625,3 +625,124 @@ async fn read_oneshot_completion_result_reports_exit_status() {
         (Some(1), Some("exit code 1".to_string()))
     );
 }
+
+#[tokio::test]
+async fn resolve_ready_service_name_falls_back_to_tracked_process_pid() {
+    let mut manager = manager_with_service("notify.service", |_| {});
+    let child = tokio::process::Command::new("/bin/true")
+        .spawn()
+        .unwrap();
+    let child_pid = child.id().unwrap();
+    manager
+        .waiting_ready
+        .insert(child_pid, "notify.service".to_string());
+    manager.processes.insert("notify.service".to_string(), child);
+
+    assert_eq!(
+        manager.resolve_ready_service_name(&notify(9999, &[("READY", "1")])),
+        Some("notify.service".to_string())
+    );
+    assert!(manager.waiting_ready.is_empty());
+
+    let mut child = manager.processes.remove("notify.service").unwrap();
+    let _ = child.wait().await;
+}
+
+#[tokio::test]
+async fn process_notify_drains_ready_messages_and_keeps_unmatched_waiters() {
+    let mut manager = manager_with_service("ready.service", |service| {
+        service.service.notify_access = NotifyAccess::All;
+    });
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    manager.notify_rx = Some(rx);
+    manager
+        .waiting_ready
+        .insert(101, "ready.service".to_string());
+    manager
+        .waiting_ready
+        .insert(202, "other.service".to_string());
+    manager.active_jobs = 1;
+
+    tx.send(notify(101, &[("READY", "1")])).await.unwrap();
+    tx.send(notify(303, &[("READY", "1")])).await.unwrap();
+    drop(tx);
+
+    manager.process_notify().await;
+
+    let state = manager.states.get("ready.service").unwrap();
+    assert_eq!(state.active, ActiveState::Active);
+    assert_eq!(state.sub, SubState::Running);
+    assert_eq!(state.main_pid, Some(0));
+    assert_eq!(manager.active_jobs, 0);
+    assert_eq!(
+        manager.waiting_ready.get(&202).map(String::as_str),
+        Some("other.service")
+    );
+}
+
+#[test]
+fn apply_restart_decision_covers_clean_restart_and_failed_no_restart() {
+    let mut manager = Manager::new();
+    manager
+        .states
+        .insert("always.service".to_string(), ServiceState::new());
+    manager
+        .states
+        .insert("failed.service".to_string(), ServiceState::new());
+
+    manager.apply_restart_decision(
+        "always.service",
+        0,
+        false,
+        false,
+        &RestartPolicy::Always,
+        Duration::from_secs(3),
+        None,
+        None,
+        &[],
+    );
+    manager.apply_restart_decision(
+        "failed.service",
+        9,
+        false,
+        false,
+        &RestartPolicy::No,
+        Duration::from_secs(3),
+        None,
+        None,
+        &[],
+    );
+
+    let always = manager.states.get("always.service").unwrap();
+    assert_eq!(always.active, ActiveState::Activating);
+    assert_eq!(always.sub, SubState::AutoRestart);
+    assert_eq!(always.restart_count, 1);
+    assert!(always.restart_at.is_some());
+
+    let failed = manager.states.get("failed.service").unwrap();
+    assert_eq!(failed.active, ActiveState::Failed);
+    assert_eq!(failed.sub, SubState::Failed);
+    assert_eq!(failed.error.as_deref(), Some("Exit code 9"));
+}
+
+#[tokio::test]
+async fn process_restarts_marks_missing_due_service_failed() {
+    let mut manager = Manager::new_user();
+    let mut state = ServiceState::new();
+    state.set_auto_restart(Duration::from_secs(0));
+    manager.states.insert("missing.service".to_string(), state);
+
+    manager.process_restarts().await;
+
+    let state = manager.states.get("missing.service").unwrap();
+    assert_eq!(state.active, ActiveState::Failed);
+    assert_eq!(state.sub, SubState::Failed);
+    assert!(
+        state
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Restart failed: Unit not found: missing.service")
+    );
+    assert!(state.restart_at.is_none());
+}
