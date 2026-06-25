@@ -357,3 +357,208 @@ pub(super) fn is_mounted(path: &str) -> bool {
 
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manager::{ActiveState, ServiceState, SubState};
+    use crate::units::Mount;
+    use std::collections::HashMap;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_ID: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempDir(std::path::PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir(label: &str) -> TempDir {
+        let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("sysd-mount-{label}-{id}"));
+        std::fs::create_dir_all(&path).unwrap();
+        TempDir(path)
+    }
+
+    fn mount_unit(name: &str, mount_point: &str) -> Mount {
+        let mut mount = Mount::new(name.to_string());
+        mount.mount.what = "tmpfs".to_string();
+        mount.mount.r#where = mount_point.to_string();
+        mount.mount.fs_type = Some("tmpfs".to_string());
+        mount
+    }
+
+    fn states_with_mount(name: &str) -> HashMap<String, ServiceState> {
+        let mut states = HashMap::new();
+        states.insert(name.to_string(), ServiceState::new());
+        states
+    }
+
+    #[test]
+    fn parse_mount_options_separates_flags_data_graceful_and_ignored_values() {
+        let (flags, data, graceful) = parse_mount_options(
+            "ro,nosuid,nodev,noexec,noatime,nodiratime,relatime,strictatime,sync,dirsync,silent,bind,move,remount,size=64m,x-systemd.graceful-option=nosymfollow,nofail,x-comment,_netdev,comment=demo",
+        );
+
+        assert!(flags.contains(nix::mount::MsFlags::MS_RDONLY));
+        assert!(flags.contains(nix::mount::MsFlags::MS_NOSUID));
+        assert!(flags.contains(nix::mount::MsFlags::MS_NODEV));
+        assert!(flags.contains(nix::mount::MsFlags::MS_NOEXEC));
+        assert!(flags.contains(nix::mount::MsFlags::MS_NOATIME));
+        assert!(flags.contains(nix::mount::MsFlags::MS_NODIRATIME));
+        assert!(flags.contains(nix::mount::MsFlags::MS_RELATIME));
+        assert!(flags.contains(nix::mount::MsFlags::MS_STRICTATIME));
+        assert!(flags.contains(nix::mount::MsFlags::MS_SYNCHRONOUS));
+        assert!(flags.contains(nix::mount::MsFlags::MS_DIRSYNC));
+        assert!(flags.contains(nix::mount::MsFlags::MS_SILENT));
+        assert!(flags.contains(nix::mount::MsFlags::MS_BIND));
+        assert!(flags.contains(nix::mount::MsFlags::MS_MOVE));
+        assert!(flags.contains(nix::mount::MsFlags::MS_REMOUNT));
+        assert_eq!(data, ["size=64m", "nosymfollow"]);
+        assert_eq!(graceful, ["nosymfollow"]);
+    }
+
+    #[test]
+    fn parse_single_mount_option_classifies_known_and_nonstandard_values() {
+        assert!(matches!(
+            parse_mount_option("defaults"),
+            ParsedMountOption::Ignore
+        ));
+        assert!(matches!(
+            parse_mount_option("nofail"),
+            ParsedMountOption::Ignore
+        ));
+        assert!(matches!(
+            parse_mount_option("x-systemd.requires=network.target"),
+            ParsedMountOption::Ignore
+        ));
+        assert!(matches!(
+            parse_mount_option("x-systemd.graceful-option=nosymfollow"),
+            ParsedMountOption::Graceful("nosymfollow")
+        ));
+        assert!(matches!(
+            parse_mount_option("mode=0755"),
+            ParsedMountOption::Data("mode=0755")
+        ));
+    }
+
+    #[test]
+    fn mount_data_and_graceful_helpers_filter_retry_options() {
+        let result: nix::Result<()> = Err(nix::errno::Errno::EINVAL);
+        let other_error: nix::Result<()> = Err(nix::errno::Errno::EPERM);
+
+        assert_eq!(mount_data_string(&[]), None);
+        assert_eq!(mount_data_string(&["size=1m", "mode=0755"]), Some("size=1m,mode=0755".to_string()));
+        assert!(should_retry_without_graceful(&result, &["nosymfollow"]));
+        assert!(!should_retry_without_graceful(&other_error, &["nosymfollow"]));
+        assert!(!should_retry_without_graceful(&result, &[]));
+        assert_eq!(
+            filter_out_graceful_options(&["size=1m", "nosymfollow", "mode=0755"], &["nosymfollow"]),
+            ["size=1m", "mode=0755"]
+        );
+    }
+
+    #[test]
+    fn finalize_mount_and_umount_results_update_state_and_report_errors() {
+        let mut states = states_with_mount("demo.mount");
+
+        assert!(
+            finalize_mount_result("demo.mount", "tmpfs", "/tmp/demo", Ok(()), &mut states)
+                .is_ok()
+        );
+        let state = states.get("demo.mount").unwrap();
+        assert_eq!(state.active, ActiveState::Active);
+        assert_eq!(state.sub, SubState::Running);
+
+        let error = finalize_mount_result(
+            "demo.mount",
+            "tmpfs",
+            "/tmp/demo",
+            Err(nix::errno::Errno::EINVAL),
+            &mut states,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ManagerError::Io(message) if message.contains("failed")));
+        assert_eq!(states.get("demo.mount").unwrap().active, ActiveState::Failed);
+
+        assert!(finalize_umount_result("demo.mount", Ok(()), &mut states).is_ok());
+        let state = states.get("demo.mount").unwrap();
+        assert_eq!(state.active, ActiveState::Inactive);
+        assert_eq!(state.sub, SubState::Exited);
+
+        let error =
+            finalize_umount_result("demo.mount", Err(nix::errno::Errno::EINVAL), &mut states)
+                .unwrap_err();
+        assert!(matches!(error, ManagerError::Io(message) if message.contains("umount failed")));
+    }
+
+    #[test]
+    fn ensure_mount_directory_creates_missing_directory_with_mode() {
+        let root = temp_dir("ensure-dir");
+        let mount_point = root.0.join("nested/mount");
+
+        ensure_mount_directory(mount_point.to_str().unwrap(), 0o750);
+
+        let mode = std::fs::metadata(&mount_point)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o750);
+    }
+
+    #[tokio::test]
+    async fn start_mount_marks_already_mounted_root_active_without_mount_call() {
+        let mut manager = Manager::new_user();
+        manager
+            .states
+            .insert("root.mount".to_string(), ServiceState::new());
+        let mount = mount_unit("root.mount", "/");
+
+        assert!(manager.start_mount("root.mount", &mount).await.is_ok());
+
+        let state = manager.states.get("root.mount").unwrap();
+        assert_eq!(state.active, ActiveState::Active);
+        assert_eq!(state.sub, SubState::Running);
+    }
+
+    #[tokio::test]
+    async fn mount_start_stop_validate_state_before_privileged_operations() {
+        let mut manager = Manager::new_user();
+        let mount = mount_unit("missing.mount", "/definitely/not/mounted/sysd-test");
+
+        assert!(matches!(
+            manager.start_mount("missing.mount", &mount).await,
+            Err(ManagerError::NotFound(name)) if name == "missing.mount"
+        ));
+
+        manager
+            .states
+            .insert("inactive.mount".to_string(), ServiceState::new());
+        assert!(matches!(
+            manager.stop_mount("inactive.mount", &mount).await,
+            Err(ManagerError::NotActive(name)) if name == "inactive.mount"
+        ));
+
+        manager
+            .states
+            .get_mut("inactive.mount")
+            .unwrap()
+            .set_running(0);
+        assert!(manager.stop_mount("inactive.mount", &mount).await.is_ok());
+        assert_eq!(
+            manager.states.get("inactive.mount").unwrap().active,
+            ActiveState::Inactive
+        );
+    }
+
+    #[test]
+    fn is_mounted_handles_root_and_missing_paths() {
+        assert!(is_mounted("/"));
+        assert!(!is_mounted("/definitely/not/mounted/sysd-test"));
+    }
+}
