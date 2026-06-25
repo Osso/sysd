@@ -1,5 +1,5 @@
 use super::*;
-use crate::units::{Service, Unit};
+use crate::units::{Mount, RuntimeDirectoryPreserve, Service, Slice, Target, Timer, Unit};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -179,4 +179,146 @@ fn build_spawn_options_carries_runtime_inputs_and_stored_fds() {
         options.user_environment.get("SESSION").map(String::as_str),
         Some("desktop")
     );
+}
+
+#[tokio::test]
+async fn resolve_start_unit_name_returns_loaded_units_without_disk_lookup() {
+    let mut manager = Manager::new_user();
+    manager.units.insert(
+        "loaded.service".to_string(),
+        Unit::Service(service("loaded.service", |_| {})),
+    );
+
+    let actual_name = manager.resolve_start_unit_name("loaded.service").await.unwrap();
+
+    assert_eq!(actual_name, "loaded.service");
+}
+
+#[tokio::test]
+async fn start_non_service_unit_handles_target_slice_timer_and_service_fallback() {
+    let mut manager = Manager::new_user();
+    manager
+        .states
+        .insert("system.slice".to_string(), ServiceState::new());
+    manager
+        .states
+        .insert("cleanup.timer".to_string(), ServiceState::new());
+
+    assert!(matches!(
+        manager
+            .start_non_service_unit(
+                "multi-user.target",
+                &Unit::Target(Target::new("multi-user.target".to_string())),
+            )
+            .await,
+        Err(ManagerError::IsTarget(name)) if name == "multi-user.target"
+    ));
+
+    assert!(matches!(
+        manager
+            .start_non_service_unit(
+                "system.slice",
+                &Unit::Slice(Slice::new("system.slice".to_string())),
+            )
+            .await,
+        Ok(true)
+    ));
+    assert!(manager.states.get("system.slice").unwrap().is_active());
+
+    assert!(matches!(
+        manager
+            .start_non_service_unit(
+                "cleanup.timer",
+                &Unit::Timer(Timer::new("cleanup.timer".to_string())),
+            )
+            .await,
+        Ok(true)
+    ));
+    assert!(manager.states.get("cleanup.timer").unwrap().is_active());
+
+    assert!(matches!(
+        manager
+            .start_non_service_unit(
+                "plain.service",
+                &Unit::Service(service("plain.service", |_| {})),
+            )
+            .await,
+        Ok(false)
+    ));
+}
+
+#[tokio::test]
+async fn start_non_service_unit_reports_failed_conditions_before_mounting() {
+    let mut manager = Manager::new_user();
+    let mut mount = Mount::new("tmp-sysd-missing.mount".to_string());
+    mount
+        .unit
+        .condition_path_exists
+        .push("/definitely/missing/sysd-condition".to_string());
+
+    let result = manager
+        .start_non_service_unit("tmp-sysd-missing.mount", &Unit::Mount(mount))
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(ManagerError::ConditionFailed(name, reason))
+            if name == "tmp-sysd-missing.mount"
+                && reason.contains("ConditionPathExists=")
+    ));
+}
+
+#[test]
+fn allocate_dynamic_user_records_allocated_uid_and_skips_static_services() {
+    let mut manager = Manager::new_user();
+    let dynamic = service("dynamic.service", |service| {
+        service.service.dynamic_user = true;
+    });
+    let static_service = service("static.service", |_| {});
+
+    let (uid, gid) = manager
+        .allocate_dynamic_user("dynamic.service", &dynamic)
+        .unwrap();
+    assert_eq!(uid, gid);
+    let uid = uid.unwrap();
+    assert!(crate::manager::dynamic_user::DynamicUserManager::is_dynamic_uid(uid));
+    assert_eq!(manager.dynamic_uids.get("dynamic.service"), Some(&uid));
+
+    assert_eq!(
+        manager
+            .allocate_dynamic_user("static.service", &static_service)
+            .unwrap(),
+        (None, None)
+    );
+}
+
+#[tokio::test]
+async fn idle_queue_returns_immediately_when_no_other_jobs_are_active() {
+    let mut manager = Manager::new_user();
+    manager.active_jobs = 1;
+
+    let start = std::time::Instant::now();
+    manager.wait_for_idle_queue("idle.service").await;
+
+    assert!(start.elapsed() < Duration::from_millis(50));
+}
+
+#[test]
+fn cleanup_runtime_dirs_respects_preserve_yes_and_ignores_non_services() {
+    let mut manager = Manager::new_user();
+    manager.units.insert(
+        "preserve.service".to_string(),
+        Unit::Service(service("preserve.service", |service| {
+            service.service.runtime_directory = vec!["sysd-test-preserve".to_string()];
+            service.service.runtime_directory_preserve = RuntimeDirectoryPreserve::Yes;
+        })),
+    );
+    manager.units.insert(
+        "plain.target".to_string(),
+        Unit::Target(Target::new("plain.target".to_string())),
+    );
+
+    manager.cleanup_runtime_dirs("preserve.service");
+    manager.cleanup_runtime_dirs("plain.target");
+    manager.cleanup_runtime_dirs("missing.service");
 }
