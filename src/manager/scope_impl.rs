@@ -259,4 +259,71 @@ mod tests {
         let mgr = ScopeManager::new(None);
         assert!(mgr.cgroup_manager().is_none());
     }
+
+    #[tokio::test]
+    async fn register_without_cgroup_or_dbus_tracks_scope_with_default_slice() {
+        let mut mgr = ScopeManager::new(None);
+
+        let path = mgr
+            .register("session-11.scope", None, Some("Session 11"), &[1000, 1001])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            path,
+            PathBuf::from("/sys/fs/cgroup/user.slice/session-11.scope")
+        );
+        assert!(mgr.exists("session-11.scope"));
+        assert_eq!(mgr.get_cgroup_path("session-11.scope"), Some(&path));
+    }
+
+    #[tokio::test]
+    async fn register_without_cgroup_uses_explicit_slice_and_unregister_removes_tracking() {
+        let mut mgr = ScopeManager::new(None);
+
+        let path = mgr
+            .register("session-22.scope", Some("user-1000.slice"), None, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            path,
+            PathBuf::from("/sys/fs/cgroup/user-1000.slice/session-22.scope")
+        );
+        assert!(mgr.exists("session-22.scope"));
+
+        mgr.unregister("session-22.scope").await.unwrap();
+
+        assert!(!mgr.exists("session-22.scope"));
+        assert!(mgr.get_cgroup_path("session-22.scope").is_none());
+    }
+
+    #[tokio::test]
+    async fn unregister_missing_scope_is_ok_without_dbus_or_cgroup_manager() {
+        let mut mgr = ScopeManager::new(None);
+
+        mgr.unregister("missing.scope").await.unwrap();
+
+        assert!(mgr.scopes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_scope_cgroup_path_falls_back_when_cgroup_manager_is_absent() {
+        let path =
+            create_scope_cgroup_path(&None, "session-33.scope", "custom.slice", &[1, 2, 3])
+                .await
+                .unwrap();
+
+        assert_eq!(
+            path,
+            PathBuf::from("/sys/fs/cgroup/custom.slice/session-33.scope")
+        );
+    }
+
+    #[tokio::test]
+    async fn scope_interface_builders_construct_unit_and_scope_interfaces() {
+        let _unit_iface = build_scope_unit_interface("session-44.scope", "Session 44").await;
+        let cgroup_path = PathBuf::from("/sys/fs/cgroup/user.slice/session-44.scope");
+        let _scope_iface = build_scope_interface("session-44.scope", &cgroup_path, &None);
+    }
 }
