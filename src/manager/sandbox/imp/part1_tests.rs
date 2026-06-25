@@ -94,6 +94,10 @@ fn capability_lists_tolerate_unknown_capabilities_without_failing() {
         Ok(())
     );
     assert_eq!(
+        apply_capability_bounding_set(&["~CAP_DOES_NOT_EXIST".to_string()]),
+        Ok(())
+    );
+    assert_eq!(
         apply_ambient_capabilities(&["CAP_DOES_NOT_EXIST".to_string()]),
         Ok(())
     );
@@ -114,6 +118,7 @@ fn device_node_detection_distinguishes_regular_files_from_missing_paths() {
     std::fs::write(&regular_file, "not a device").unwrap();
 
     assert_eq!(is_device_node(&regular_file), Ok(false));
+    assert_eq!(add_device_path(regular_file.to_str().unwrap(), true), Ok(()));
     assert!(is_device_node(&root.0.join("missing")).is_err());
 }
 
@@ -137,6 +142,7 @@ fn no_op_sandbox_paths_accept_default_service() {
     assert_eq!(apply_prctl_settings(&service), Ok(()));
     assert_eq!(apply_device_namespace_policy(&service), Ok(()));
     assert_eq!(apply_mount_protections(&service), Ok(()));
+    assert_eq!(apply_protect_system(&ProtectSystem::No), Ok(()));
     assert_eq!(apply_protect_proc(&ProtectProc::Default), Ok(()));
 }
 
@@ -204,6 +210,80 @@ fn device_policy_and_private_devices_report_tmpfs_mount_failure() {
 #[test]
 fn device_remount_read_write_is_noop() {
     remount_device_read_only("/dev/definitely-missing-sysd-test", false);
+}
+
+#[test]
+fn capability_lists_ignore_keep_entries_and_unknown_names() {
+    assert_eq!(
+        apply_capability_bounding_set(&["CAP_SYS_ADMIN".to_string()]),
+        Ok(())
+    );
+    assert_eq!(
+        apply_capability_bounding_set(&["~CAP_NOT_A_REAL_CAP".to_string()]),
+        Ok(())
+    );
+    assert_eq!(
+        apply_ambient_capabilities(&[
+            "CAP_NOT_A_REAL_CAP".to_string(),
+            "CAP_SYS_ADMIN".to_string(),
+        ]),
+        Ok(())
+    );
+}
+
+#[test]
+fn private_tmp_reports_first_tmpfs_mount_failure() {
+    assert!(apply_private_tmp()
+        .unwrap_err()
+        .starts_with("Failed to mount tmpfs on /tmp"));
+}
+
+#[test]
+fn protect_system_modes_attempt_expected_read_only_mounts() {
+    assert!(apply_protect_system(&ProtectSystem::Yes)
+        .unwrap_err()
+        .starts_with("Failed to bind mount /usr"));
+    assert!(apply_protect_system(&ProtectSystem::Full)
+        .unwrap_err()
+        .starts_with("Failed to bind mount /usr"));
+    assert!(apply_protect_system(&ProtectSystem::Strict)
+        .unwrap_err()
+        .starts_with("Failed to bind mount /"));
+}
+
+#[test]
+fn protect_home_modes_report_existing_home_mount_failure() {
+    for mode in [
+        ProtectHome::Yes,
+        ProtectHome::ReadOnly,
+        ProtectHome::Tmpfs,
+    ] {
+        assert!(apply_protect_home(&mode).is_err());
+    }
+}
+
+#[test]
+fn device_allow_explicit_paths_skip_missing_and_regular_files() {
+    let temp = temp_dir("regular-device");
+    let regular_file = temp.0.join("not-a-device");
+    std::fs::write(&regular_file, b"not a device").unwrap();
+
+    assert_eq!(add_device_allow_entry("/dev/sysd-definitely-missing rw"), Ok(()));
+    assert_eq!(
+        add_device_path(regular_file.to_str().unwrap(), false),
+        Ok(())
+    );
+}
+
+#[test]
+fn protect_proc_modes_report_mount_or_inaccessible_failures() {
+    assert!(apply_protect_proc(&ProtectProc::Invisible)
+        .unwrap_err()
+        .starts_with("Failed to remount /proc"));
+    assert!(apply_protect_proc(&ProtectProc::Ptraceable)
+        .unwrap_err()
+        .starts_with("Failed to remount /proc"));
+    assert!(apply_protect_proc(&ProtectProc::NoAccess).is_err());
 }
 
 #[test]
