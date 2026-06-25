@@ -1,5 +1,6 @@
 use super::*;
 use crate::manager::state::ServiceState;
+use crate::manager::SpawnError;
 use crate::units::{Service, Unit};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -41,6 +42,15 @@ fn pipe_fds() -> [libc::c_int; 2] {
 
 fn manager_with_service(name: &str, configure: impl FnOnce(&mut Service)) -> Manager {
     let mut manager = Manager::new();
+    manager
+        .units
+        .insert(name.to_string(), service_unit(name, configure));
+    manager.states.insert(name.to_string(), ServiceState::new());
+    manager
+}
+
+fn user_manager_with_service(name: &str, configure: impl FnOnce(&mut Service)) -> Manager {
+    let mut manager = Manager::new_user();
     manager
         .units
         .insert(name.to_string(), service_unit(name, configure));
@@ -425,5 +435,193 @@ fn decode_wait_status_maps_exit_signal_and_non_terminal_states() {
     assert_eq!(
         Manager::decode_wait_status(nix::sys::wait::WaitStatus::StillAlive),
         None
+    );
+}
+
+#[test]
+fn take_oneshot_completion_receiver_is_single_use() {
+    let mut manager = Manager::new_user();
+
+    assert!(manager.take_oneshot_completion_rx().is_some());
+    assert!(manager.take_oneshot_completion_rx().is_none());
+}
+
+#[tokio::test]
+async fn handle_oneshot_completion_marks_success_and_failure_states() {
+    let mut manager = user_manager_with_service("ok.service", |_| {});
+    manager
+        .states
+        .insert("fail.service".to_string(), ServiceState::new());
+    manager.active_jobs = 2;
+
+    manager
+        .handle_oneshot_completion(OneshotCompletion {
+            service_name: "ok.service".to_string(),
+            cmd_idx: 0,
+            total_cmds: 1,
+            exit_code: Some(0),
+            error: None,
+            remain_after_exit: true,
+        })
+        .await;
+    manager
+        .handle_oneshot_completion(OneshotCompletion {
+            service_name: "fail.service".to_string(),
+            cmd_idx: 0,
+            total_cmds: 1,
+            exit_code: Some(1),
+            error: Some("boom".to_string()),
+            remain_after_exit: false,
+        })
+        .await;
+
+    let ok = manager.states.get("ok.service").unwrap();
+    assert_eq!(ok.active, ActiveState::Active);
+    assert_eq!(ok.sub, SubState::Exited);
+    let fail = manager.states.get("fail.service").unwrap();
+    assert_eq!(fail.active, ActiveState::Failed);
+    assert_eq!(fail.sub, SubState::Failed);
+    assert_eq!(fail.error.as_deref(), Some("boom"));
+    assert_eq!(manager.active_jobs, 0);
+}
+
+#[tokio::test]
+async fn handle_oneshot_completion_starts_next_command() {
+    let mut manager = user_manager_with_service("chain.service", |service| {
+        service.service.exec_start = vec!["/bin/true".to_string(), "/bin/true".to_string()];
+        service.service.service_type = ServiceType::Oneshot;
+    });
+    let mut rx = manager.take_oneshot_completion_rx().unwrap();
+
+    manager
+        .handle_oneshot_completion(OneshotCompletion {
+            service_name: "chain.service".to_string(),
+            cmd_idx: 0,
+            total_cmds: 2,
+            exit_code: Some(0),
+            error: None,
+            remain_after_exit: false,
+        })
+        .await;
+
+    assert_eq!(
+        manager.pending_oneshot_cmds.get("chain.service"),
+        Some(&(1, 2, false))
+    );
+    let completion = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completion.service_name, "chain.service");
+    assert_eq!(completion.cmd_idx, 1);
+    assert_eq!(completion.exit_code, Some(0));
+    assert_eq!(completion.error, None);
+}
+
+#[tokio::test]
+async fn start_oneshot_command_reports_missing_service_or_command() {
+    let mut manager = Manager::new_user();
+    assert!(matches!(
+        manager.start_oneshot_command("missing.service", 0).await,
+        Err(ManagerError::NotFound(name)) if name == "missing.service"
+    ));
+
+    manager = user_manager_with_service("short.service", |service| {
+        service.service.exec_start = vec!["/bin/true".to_string()];
+    });
+    assert!(matches!(
+        manager.start_oneshot_command("short.service", 1).await,
+        Err(ManagerError::Spawn(SpawnError::NoExecStart(name))) if name == "short.service"
+    ));
+}
+
+#[test]
+fn mark_dbus_service_ready_activates_state_and_arms_watchdog() {
+    let mut manager = user_manager_with_service("dbus.service", |service| {
+        service.service.watchdog_sec = Some(Duration::from_secs(5));
+    });
+    manager
+        .waiting_bus_name
+        .insert("com.example.Demo".to_string(), "dbus.service".to_string());
+    manager.active_jobs = 1;
+
+    manager.mark_dbus_service_ready("com.example.Demo", "dbus.service");
+
+    let state = manager.states.get("dbus.service").unwrap();
+    assert_eq!(state.active, ActiveState::Active);
+    assert_eq!(state.sub, SubState::Running);
+    assert_eq!(state.main_pid, Some(0));
+    assert_eq!(manager.active_jobs, 0);
+    assert!(manager.waiting_bus_name.is_empty());
+    assert!(manager.watchdog_deadlines.contains_key("dbus.service"));
+}
+
+#[tokio::test]
+async fn process_dbus_ready_returns_without_bus_when_no_names_or_no_connection() {
+    let mut manager = Manager::new_user();
+    manager.process_dbus_ready().await;
+
+    manager
+        .waiting_bus_name
+        .insert("com.example.Missing".to_string(), "missing.service".to_string());
+    manager.process_dbus_ready().await;
+
+    assert_eq!(
+        manager
+            .waiting_bus_name
+            .get("com.example.Missing")
+            .map(String::as_str),
+        Some("missing.service")
+    );
+}
+
+#[tokio::test]
+async fn process_watchdog_marks_failure_and_schedules_restart() {
+    let mut manager = user_manager_with_service("watch.service", |service| {
+        service.service.restart = RestartPolicy::Always;
+        service.service.restart_sec = Duration::from_secs(2);
+    });
+    manager
+        .watchdog_deadlines
+        .insert("watch.service".to_string(), std::time::Instant::now());
+
+    manager.process_watchdog().await;
+
+    assert!(!manager.watchdog_deadlines.contains_key("watch.service"));
+    let state = manager.states.get("watch.service").unwrap();
+    assert_eq!(state.active, ActiveState::Activating);
+    assert_eq!(state.sub, SubState::AutoRestart);
+    assert!(state.restart_at.is_some());
+}
+
+#[test]
+fn watchdog_restart_delay_respects_restart_policy() {
+    let manager = user_manager_with_service("no.service", |_| {});
+    assert_eq!(manager.watchdog_restart_delay("no.service"), None);
+
+    let always = user_manager_with_service("always.service", |service| {
+        service.service.restart = RestartPolicy::Always;
+        service.service.restart_sec = Duration::from_secs(4);
+    });
+    assert_eq!(
+        always.watchdog_restart_delay("always.service"),
+        Some(Duration::from_secs(4))
+    );
+    assert_eq!(always.watchdog_restart_delay("missing.service"), None);
+}
+
+#[tokio::test]
+async fn read_oneshot_completion_result_reports_exit_status() {
+    let success = tokio::process::Command::new("/bin/true")
+        .spawn()
+        .unwrap();
+    assert_eq!(read_oneshot_completion_result(success).await, (Some(0), None));
+
+    let failure = tokio::process::Command::new("/bin/false")
+        .spawn()
+        .unwrap();
+    assert_eq!(
+        read_oneshot_completion_result(failure).await,
+        (Some(1), Some("exit code 1".to_string()))
     );
 }
