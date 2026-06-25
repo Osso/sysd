@@ -474,3 +474,251 @@ fn capability_number(name: &str) -> Option<u32> {
         .find(|(cap_name, _)| *cap_name == upper.as_str())
         .map(|(_, number)| *number)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::units::Service;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEMP_ID: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir(label: &str) -> TempDir {
+        let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("sysd-conditions-{label}-{id}"));
+        std::fs::create_dir_all(&path).unwrap();
+        TempDir(path)
+    }
+
+    fn service_unit(configure: impl FnOnce(&mut Service)) -> Unit {
+        let mut service = Service::new("demo.service".to_string());
+        configure(&mut service);
+        Unit::Service(service)
+    }
+
+    #[test]
+    fn parse_condition_handles_trigger_and_negation_prefixes() {
+        let plain = parse_condition("/tmp/demo");
+        assert!(!plain.trigger);
+        assert!(!plain.negated);
+        assert_eq!(plain.value, "/tmp/demo");
+
+        let negated = parse_condition("!/tmp/demo");
+        assert!(!negated.trigger);
+        assert!(negated.negated);
+        assert_eq!(negated.value, "/tmp/demo");
+
+        let trigger = parse_condition("|!/tmp/demo");
+        assert!(trigger.trigger);
+        assert!(trigger.negated);
+        assert_eq!(trigger.value, "/tmp/demo");
+    }
+
+    #[test]
+    fn condition_list_requires_regular_conditions_and_accepts_any_trigger() {
+        let matches_present = |value: &str| value == "present";
+
+        assert_eq!(
+            check_condition_list(
+                &["present".to_string()],
+                "ConditionDemo",
+                "was present",
+                "was missing",
+                matches_present,
+            ),
+            None
+        );
+
+        let regular_failure = check_condition_list(
+            &["missing".to_string()],
+            "ConditionDemo",
+            "was present",
+            "was missing",
+            matches_present,
+        )
+        .unwrap();
+        assert!(regular_failure.contains("ConditionDemo=missing"));
+        assert!(regular_failure.contains("was missing"));
+
+        let negated_failure = check_condition_list(
+            &["!present".to_string()],
+            "ConditionDemo",
+            "was present",
+            "was missing",
+            matches_present,
+        )
+        .unwrap();
+        assert!(negated_failure.contains("ConditionDemo=!present"));
+        assert!(negated_failure.contains("was present"));
+
+        assert_eq!(
+            check_condition_list(
+                &["|missing".to_string(), "|present".to_string()],
+                "ConditionDemo",
+                "was present",
+                "was missing",
+                matches_present,
+            ),
+            None
+        );
+
+        let trigger_failure = check_condition_list(
+            &["|missing".to_string(), "|absent".to_string()],
+            "ConditionDemo",
+            "was present",
+            "was missing",
+            matches_present,
+        )
+        .unwrap();
+        assert!(trigger_failure.contains("|missing, |absent"));
+        assert!(trigger_failure.contains("no trigger condition matched"));
+    }
+
+    #[test]
+    fn directory_not_empty_reports_only_non_empty_directories() {
+        let root = temp_dir("directory-not-empty");
+        let empty_dir = root.path().join("empty");
+        let full_dir = root.path().join("full");
+        let file_path = root.path().join("file");
+        std::fs::create_dir(&empty_dir).unwrap();
+        std::fs::create_dir(&full_dir).unwrap();
+        std::fs::write(full_dir.join("entry"), "data").unwrap();
+        std::fs::write(&file_path, "data").unwrap();
+
+        assert!(!is_directory_not_empty(empty_dir.to_str().unwrap()));
+        assert!(is_directory_not_empty(full_dir.to_str().unwrap()));
+        assert!(!is_directory_not_empty(file_path.to_str().unwrap()));
+        assert!(!is_directory_not_empty(
+            root.path().join("missing").to_str().unwrap()
+        ));
+    }
+
+    #[test]
+    fn capability_number_is_case_insensitive_and_rejects_unknown_names() {
+        assert_eq!(capability_number("cap_chown"), Some(0));
+        assert_eq!(capability_number("CAP_CHECKPOINT_RESTORE"), Some(40));
+        assert_eq!(capability_number("CAP_DOES_NOT_EXIST"), None);
+    }
+
+    #[test]
+    fn detect_vm_from_dmi_matches_known_product_markers() {
+        let root = temp_dir("dmi");
+        let product = root.path().join("product_name");
+
+        std::fs::write(&product, "VMware Virtual Platform").unwrap();
+        assert_eq!(
+            detect_vm_from_dmi(product.to_str().unwrap()),
+            Some(VirtualizationType::VMware)
+        );
+
+        std::fs::write(&product, "Microsoft Corporation Hyper-V").unwrap();
+        assert_eq!(
+            detect_vm_from_dmi(product.to_str().unwrap()),
+            Some(VirtualizationType::HyperV)
+        );
+
+        std::fs::write(&product, "KVM").unwrap();
+        assert_eq!(
+            detect_vm_from_dmi(product.to_str().unwrap()),
+            Some(VirtualizationType::Qemu)
+        );
+
+        std::fs::write(&product, "bare metal").unwrap();
+        assert_eq!(detect_vm_from_dmi(product.to_str().unwrap()), None);
+        assert_eq!(
+            detect_vm_from_dmi(root.path().join("missing").to_str().unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn virtualization_match_handles_generic_specific_and_negative_checks() {
+        let manager = Manager::new();
+        let docker = Some(VirtualizationType::Docker);
+        let qemu = Some(VirtualizationType::Qemu);
+        let none = None;
+
+        assert!(manager.check_virtualization_match_with(&docker, "yes"));
+        assert!(manager.check_virtualization_match_with(&none, "no"));
+        assert!(manager.check_virtualization_match_with(&docker, "container"));
+        assert!(!manager.check_virtualization_match_with(&docker, "vm"));
+        assert!(manager.check_virtualization_match_with(&qemu, "vm"));
+        assert!(manager.check_virtualization_match_with(&qemu, "kvm"));
+        assert!(!manager.check_virtualization_match_with(&none, "container"));
+    }
+
+    #[test]
+    fn check_conditions_handles_path_and_directory_conditions() {
+        let manager = Manager::new();
+        let root = temp_dir("manager");
+        let existing_path = root.path().join("exists");
+        let missing_path = root.path().join("missing");
+        let full_dir = root.path().join("full");
+        let empty_dir = root.path().join("empty");
+        std::fs::write(&existing_path, "data").unwrap();
+        std::fs::create_dir(&full_dir).unwrap();
+        std::fs::write(full_dir.join("entry"), "data").unwrap();
+        std::fs::create_dir(&empty_dir).unwrap();
+
+        let passing = service_unit(|service| {
+            service.unit.condition_path_exists =
+                vec![existing_path.to_string_lossy().to_string()];
+            service.unit.condition_directory_not_empty =
+                vec![full_dir.to_string_lossy().to_string()];
+        });
+        assert_eq!(manager.check_conditions(&passing), None);
+
+        let missing = service_unit(|service| {
+            service.unit.condition_path_exists = vec![missing_path.to_string_lossy().to_string()];
+        });
+        let missing_failure = manager.check_conditions(&missing).unwrap();
+        assert!(missing_failure.contains("ConditionPathExists="));
+        assert!(missing_failure.contains("path missing"));
+
+        let empty = service_unit(|service| {
+            service.unit.condition_directory_not_empty =
+                vec![empty_dir.to_string_lossy().to_string()];
+        });
+        let empty_failure = manager.check_conditions(&empty).unwrap();
+        assert!(empty_failure.contains("ConditionDirectoryNotEmpty="));
+        assert!(empty_failure.contains("empty or missing"));
+    }
+
+    #[test]
+    fn check_conditions_respects_negated_path_conditions() {
+        let manager = Manager::new();
+        let root = temp_dir("negated-path");
+        let existing_path = root.path().join("exists");
+        let missing_path = root.path().join("missing");
+        std::fs::write(&existing_path, "data").unwrap();
+
+        let passing = service_unit(|service| {
+            service.unit.condition_path_exists =
+                vec![format!("!{}", missing_path.to_string_lossy())];
+        });
+        assert_eq!(manager.check_conditions(&passing), None);
+
+        let failing = service_unit(|service| {
+            service.unit.condition_path_exists =
+                vec![format!("!{}", existing_path.to_string_lossy())];
+        });
+        let failure = manager.check_conditions(&failing).unwrap();
+        assert!(failure.contains("ConditionPathExists=!"));
+        assert!(failure.contains("path exists"));
+    }
+}
