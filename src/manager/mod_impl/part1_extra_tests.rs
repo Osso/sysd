@@ -67,6 +67,45 @@ DefaultInstance=blue
     assert!(!manager.units.contains_key("worker@.service"));
 }
 
+#[test]
+fn find_unit_falls_back_to_template_for_instanced_names() {
+    let dir = temp_dir("find-template");
+    let template = write_unit(
+        &dir.0,
+        "worker@.service",
+        r#"
+[Service]
+ExecStart=/bin/true
+"#,
+    );
+    let mut manager = Manager::new_user();
+    manager.unit_paths = vec![dir.0.clone()];
+
+    assert_eq!(manager.find_unit("worker@blue.service").unwrap(), template);
+}
+
+#[cfg(unix)]
+#[test]
+fn search_unit_paths_accepts_symlink_with_existing_target() {
+    use std::os::unix::fs::symlink;
+
+    let dir = temp_dir("symlink-unit");
+    let target = write_unit(
+        &dir.0,
+        "target.service",
+        r#"
+[Service]
+ExecStart=/bin/true
+"#,
+    );
+    let link = dir.0.join("linked.service");
+    symlink(&target, &link).unwrap();
+    let mut manager = Manager::new_user();
+    manager.unit_paths = vec![dir.0.clone()];
+
+    assert_eq!(manager.search_unit_paths("linked.service").unwrap(), link);
+}
+
 #[cfg(unix)]
 #[test]
 fn canonical_unit_name_rejects_masked_units() {
@@ -120,6 +159,20 @@ ExecStart=/bin/true
     assert!(
         order.iter().position(|name| name == "db.service").unwrap()
             < order.iter().position(|name| name == "app.service").unwrap()
+    );
+}
+
+#[tokio::test]
+async fn load_dependency_unit_returns_already_loaded_unit_name() {
+    let mut manager = Manager::new_user();
+    manager.units.insert(
+        "loaded.service".to_string(),
+        Unit::Service(Service::new("loaded.service".to_string())),
+    );
+
+    assert_eq!(
+        manager.load_dependency_unit("loaded.service").await.as_deref(),
+        Some("loaded.service")
     );
 }
 

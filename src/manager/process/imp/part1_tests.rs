@@ -75,6 +75,9 @@ fn substitute_specifiers_expands_template_and_literal_percent_values() {
 
     let plain = service("plain.service");
     assert_eq!(substitute_specifiers("%N/%p/%i/%I", &plain), "plain/plain//");
+
+    let bare = service("oneshot");
+    assert_eq!(substitute_specifiers("%N/%p", &bare), "oneshot/oneshot");
 }
 
 #[test]
@@ -143,6 +146,7 @@ fn load_env_file_skips_comments_and_malformed_lines() {
     assert_eq!(env.get("EMPTY").map(String::as_str), Some(""));
     assert_eq!(env.get("SPACED ").map(String::as_str), Some(" spaced value"));
     assert!(!env.contains_key("NO_EQUALS"));
+    assert!(load_env_file(&root.0.join("missing.env")).is_err());
 }
 
 #[test]
@@ -267,6 +271,7 @@ fn socket_fd_helpers_report_invalid_fds_and_clear_cloexec_on_valid_fds() {
 
     let file = std::fs::File::open("/dev/null").unwrap();
     let fd = file.as_raw_fd();
+    validate_socket_fds(&[fd]);
     unsafe {
         libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
     }
@@ -301,12 +306,12 @@ fn systemd_socket_env_records_count_pid_and_names() {
 
     set_systemd_socket_env(3, &["api".to_string(), "stored".to_string()]);
 
-    assert_eq!(std::env::var("LISTEN_FDS").unwrap(), "3");
+    assert_eq!(libc_env_var("LISTEN_FDS").as_deref(), Some("3"));
     assert_eq!(
-        std::env::var("LISTEN_PID").unwrap(),
-        std::process::id().to_string()
+        libc_env_var("LISTEN_PID"),
+        Some(std::process::id().to_string())
     );
-    assert_eq!(std::env::var("LISTEN_FDNAMES").unwrap(), "api:stored");
+    assert_eq!(libc_env_var("LISTEN_FDNAMES").as_deref(), Some("api:stored"));
 
     restore_env_var("LISTEN_FDS", original_fds);
     restore_env_var("LISTEN_PID", original_pid);
@@ -339,6 +344,17 @@ fn directory_helpers_create_default_and_named_paths_with_permissions() {
     assert_eq!(
         std::fs::metadata(explicit).unwrap().permissions().mode() & 0o777,
         0o755
+    );
+
+    let blocking_file = root.0.join("not-a-dir");
+    std::fs::write(&blocking_file, b"blocking").unwrap();
+    ensure_directory_set(
+        blocking_file.to_str().unwrap(),
+        &["child".to_string()],
+        "fallback",
+        None,
+        None,
+        "state",
     );
 }
 

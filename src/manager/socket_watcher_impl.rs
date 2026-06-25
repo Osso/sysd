@@ -74,3 +74,42 @@ async fn send_activation_message(
         log::error!("{}: failed to send activation: {}", socket_name, e);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn watch_socket_returns_when_no_fds_are_available() {
+        let (tx, mut rx) = mpsc::channel(1);
+
+        watch_socket(
+            "empty.socket".to_string(),
+            "empty.service".to_string(),
+            Vec::new(),
+            tx,
+        )
+        .await;
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn activation_messages_include_socket_and_service_names() {
+        let (tx, mut rx) = mpsc::channel(1);
+
+        send_activation_message(&tx, "api.socket", "api.service").await;
+
+        let message = rx.recv().await.unwrap();
+        assert_eq!(message.socket_name, "api.socket");
+        assert_eq!(message.service_name, "api.service");
+    }
+
+    #[tokio::test]
+    async fn activation_message_send_tolerates_closed_receiver() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+
+        send_activation_message(&tx, "closed.socket", "closed.service").await;
+    }
+}

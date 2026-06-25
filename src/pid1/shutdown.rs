@@ -38,6 +38,27 @@ impl ShutdownType {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_type_maps_to_expected_reboot_modes() {
+        assert_eq!(
+            ShutdownType::Poweroff.to_reboot_mode(),
+            RebootMode::RB_POWER_OFF
+        );
+        assert_eq!(
+            ShutdownType::Reboot.to_reboot_mode(),
+            RebootMode::RB_AUTOBOOT
+        );
+        assert_eq!(
+            ShutdownType::Halt.to_reboot_mode(),
+            RebootMode::RB_HALT_SYSTEM
+        );
+    }
+}
+
 /// Execute shutdown sequence
 pub async fn shutdown(shutdown_type: ShutdownType) -> ! {
     log::info!("Initiating {:?} sequence", shutdown_type);

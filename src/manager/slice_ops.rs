@@ -84,3 +84,59 @@ impl Manager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manager::{ActiveState, ServiceState};
+
+    fn manager_with_slice(name: &str) -> (Manager, Slice) {
+        let mut manager = Manager::new_user();
+        manager
+            .states
+            .insert(name.to_string(), ServiceState::new());
+        (manager, Slice::new(name.to_string()))
+    }
+
+    #[tokio::test]
+    async fn start_slice_marks_slice_active_and_rejects_invalid_state() {
+        let (mut manager, slice) = manager_with_slice("demo.slice");
+
+        assert!(matches!(
+            manager.start_slice("missing.slice", &slice).await,
+            Err(ManagerError::NotFound(name)) if name == "missing.slice"
+        ));
+
+        manager.start_slice("demo.slice", &slice).await.unwrap();
+        let state = manager.states.get("demo.slice").unwrap();
+        assert_eq!(state.active, ActiveState::Active);
+
+        assert!(matches!(
+            manager.start_slice("demo.slice", &slice).await,
+            Err(ManagerError::AlreadyActive(name)) if name == "demo.slice"
+        ));
+    }
+
+    #[tokio::test]
+    async fn stop_slice_requires_active_state_and_marks_slice_inactive() {
+        let (mut manager, slice) = manager_with_slice("demo.slice");
+
+        assert!(matches!(
+            manager.stop_slice("missing.slice", &slice).await,
+            Err(ManagerError::NotFound(name)) if name == "missing.slice"
+        ));
+        assert!(matches!(
+            manager.stop_slice("demo.slice", &slice).await,
+            Err(ManagerError::NotActive(name)) if name == "demo.slice"
+        ));
+
+        manager
+            .states
+            .get_mut("demo.slice")
+            .unwrap()
+            .set_running(0);
+        manager.stop_slice("demo.slice", &slice).await.unwrap();
+        let state = manager.states.get("demo.slice").unwrap();
+        assert_eq!(state.active, ActiveState::Inactive);
+    }
+}

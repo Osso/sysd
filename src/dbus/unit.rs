@@ -84,3 +84,35 @@ impl UnitInterface {
         "loaded".to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unit_state_transitions_and_interface_properties_are_reported() {
+        let state = Arc::new(RwLock::new(UnitState::new(
+            "demo.service".to_string(),
+            "Demo Service".to_string(),
+        )));
+        let interface = UnitInterface::new(Arc::clone(&state));
+
+        assert_eq!(interface.id().await, "demo.service");
+        assert_eq!(interface.description().await, "Demo Service");
+        assert_eq!(interface.active_state().await, "inactive");
+        assert_eq!(interface.sub_state().await, "dead");
+        assert_eq!(interface.load_state().await, "loaded");
+
+        state.write().await.set_active();
+        assert_eq!(interface.active_state().await, "active");
+        assert_eq!(interface.sub_state().await, "running");
+
+        state.write().await.set_failed();
+        assert_eq!(interface.active_state().await, "failed");
+        assert_eq!(interface.sub_state().await, "failed");
+
+        state.write().await.set_inactive();
+        assert_eq!(interface.active_state().await, "inactive");
+        assert_eq!(interface.sub_state().await, "dead");
+    }
+}

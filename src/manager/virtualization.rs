@@ -83,3 +83,58 @@ impl VirtualizationType {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn virtualization_type_classifies_containers_and_vms() {
+        for value in [
+            VirtualizationType::Docker,
+            VirtualizationType::Podman,
+            VirtualizationType::Lxc,
+            VirtualizationType::Lxd,
+            VirtualizationType::SystemdNspawn,
+            VirtualizationType::Container,
+        ] {
+            assert!(value.is_container());
+            assert!(!value.is_vm());
+        }
+
+        for value in [
+            VirtualizationType::Qemu,
+            VirtualizationType::VirtualBox,
+            VirtualizationType::VMware,
+            VirtualizationType::Xen,
+            VirtualizationType::HyperV,
+            VirtualizationType::Bochs,
+            VirtualizationType::Vm,
+        ] {
+            assert!(value.is_vm());
+            assert!(!value.is_container());
+        }
+    }
+
+    #[test]
+    fn virtualization_type_matches_aliases_and_container_environment_values() {
+        assert!(VirtualizationType::Lxd.matches("lxc-libvirt"));
+        assert!(VirtualizationType::Qemu.matches("kvm"));
+        assert!(VirtualizationType::VirtualBox.matches("oracle"));
+        assert!(VirtualizationType::HyperV.matches("hyper-v"));
+        assert!(!VirtualizationType::Docker.matches("podman"));
+
+        assert_eq!(VirtualizationType::from_container_env("docker"), VirtualizationType::Docker);
+        assert_eq!(VirtualizationType::from_container_env("podman"), VirtualizationType::Podman);
+        assert_eq!(VirtualizationType::from_container_env("lxc"), VirtualizationType::Lxc);
+        assert_eq!(VirtualizationType::from_container_env("lxd"), VirtualizationType::Lxd);
+        assert_eq!(
+            VirtualizationType::from_container_env("systemd-nspawn"),
+            VirtualizationType::SystemdNspawn
+        );
+        assert_eq!(
+            VirtualizationType::from_container_env("unknown"),
+            VirtualizationType::Container
+        );
+    }
+}

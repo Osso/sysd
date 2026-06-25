@@ -133,3 +133,45 @@ impl Default for ZombieReaper {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix::sys::signal::Signal;
+
+    #[test]
+    fn wait_result_decodes_exit_signal_and_unknown_statuses() {
+        assert!(matches!(
+            WaitResult::from_wait_status(WaitStatus::Exited(Pid::from_raw(42), 7)),
+            WaitResult::Exited(7)
+        ));
+        assert!(matches!(
+            WaitResult::from_wait_status(WaitStatus::Signaled(
+                Pid::from_raw(42),
+                Signal::SIGTERM,
+                false,
+            )),
+            WaitResult::Signaled(signal) if signal == Signal::SIGTERM as i32
+        ));
+        assert!(matches!(
+            WaitResult::from_wait_status(WaitStatus::StillAlive),
+            WaitResult::Unknown
+        ));
+    }
+
+    #[test]
+    fn reaper_tracks_watched_services_and_receiver_ownership() {
+        let mut reaper = ZombieReaper::new();
+
+        assert!(reaper.take_receiver().is_some());
+        assert!(reaper.take_receiver().is_none());
+        reaper.watch(1234, "demo.service".to_string());
+        assert_eq!(
+            reaper.get_service(1234).map(String::as_str),
+            Some("demo.service")
+        );
+        reaper.unwatch(1234);
+        assert!(reaper.get_service(1234).is_none());
+        let _ = ZombieReaper::default();
+    }
+}
