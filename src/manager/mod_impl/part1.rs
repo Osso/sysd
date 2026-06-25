@@ -695,4 +695,5 @@ ExecStart=/bin/true
         assert!(manager.units.contains_key("demo.service"));
         assert!(manager.states.contains_key("demo.service"));
     }
+
 }

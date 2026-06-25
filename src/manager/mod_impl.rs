@@ -137,6 +137,9 @@ enum LoadNameResolution {
 
 
 include!("mod_impl/part1.rs");
+#[cfg(test)]
+#[path = "mod_impl/part1_extra_tests.rs"]
+mod part1_extra_tests;
 include!("mod_impl/part2.rs");
 #[cfg(test)]
 #[path = "mod_impl/part2_tests.rs"]
