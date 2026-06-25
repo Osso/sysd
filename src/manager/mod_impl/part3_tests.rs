@@ -1,5 +1,5 @@
 use super::*;
-use crate::units::{InstallSection, Service, Unit};
+use crate::units::{InstallSection, Service, Socket, Target, Timer, Unit};
 use std::collections::HashSet;
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
@@ -140,6 +140,43 @@ fn cleanup_stopped_service_clears_watchdog_cgroup_and_stored_fds() {
     }
 }
 
+#[tokio::test]
+async fn stop_active_service_without_child_marks_it_stopped() {
+    let mut manager = Manager::new();
+    insert_service(&mut manager, "demo.service", service("demo.service", |_| {}));
+    manager
+        .states
+        .get_mut("demo.service")
+        .unwrap()
+        .set_running(0);
+
+    manager.stop("demo").await.unwrap();
+
+    let state = manager.states.get("demo.service").unwrap();
+    assert_eq!(state.active, ActiveState::Inactive);
+    assert_eq!(state.sub, SubState::Exited);
+}
+
+#[tokio::test]
+async fn scope_accessors_register_and_unregister_scope_state() {
+    let mut manager = Manager::new_user();
+
+    assert!(manager.cgroup_manager().is_none());
+    assert!(!manager.scope_manager().exists("session-88.scope"));
+    assert!(!manager.scope_manager_mut().exists("session-88.scope"));
+
+    manager
+        .register_scope("session-88.scope", None, Some("Session 88"), &[])
+        .await
+        .unwrap();
+    assert!(manager.states.contains_key("session-88.scope"));
+    assert!(manager.scope_manager().exists("session-88.scope"));
+
+    manager.unregister_scope("session-88.scope").await.unwrap();
+    assert!(!manager.states.contains_key("session-88.scope"));
+    assert!(!manager.scope_manager().exists("session-88.scope"));
+}
+
 #[test]
 fn environment_import_unset_and_reset_failed_update_manager_state() {
     let mut manager = Manager::new();
@@ -195,6 +232,37 @@ fn service_helpers_extract_limits_default_instance_and_hash_changes() {
     let before = service_config_hash(&demo);
     demo.service.exec_start = vec!["/bin/false".to_string()];
     assert_ne!(service_config_hash(&demo), before);
+}
+
+#[test]
+fn default_and_error_helpers_cover_remaining_simple_branches() {
+    let manager = Manager::default();
+    assert!(manager.list_units().is_empty());
+
+    let io_error: ManagerError = std::io::Error::new(std::io::ErrorKind::Other, "boom").into();
+    assert!(matches!(io_error, ManagerError::Io(message) if message == "boom"));
+}
+
+#[test]
+fn default_instance_helper_handles_socket_timer_and_non_installable_units() {
+    let mut socket = Socket::new("demo.socket".to_string());
+    socket.install.default_instance = Some("sock".to_string());
+    assert_eq!(
+        default_instance_for_unit(&Unit::Socket(socket)).as_deref(),
+        Some("sock")
+    );
+
+    let mut timer = Timer::new("demo.timer".to_string());
+    timer.install.default_instance = Some("timer".to_string());
+    assert_eq!(
+        default_instance_for_unit(&Unit::Timer(timer)).as_deref(),
+        Some("timer")
+    );
+
+    assert_eq!(
+        default_instance_for_unit(&Unit::Target(Target::new("multi-user.target".to_string()))),
+        None
+    );
 }
 
 #[test]
@@ -328,6 +396,16 @@ async fn sync_units_reports_no_restarts_for_unchanged_or_inactive_services() {
             .as_slice(),
         ["/bin/false".to_string()]
     );
+}
+
+#[tokio::test]
+async fn get_boot_plan_reports_missing_targets() {
+    let mut manager = Manager::new();
+
+    assert!(matches!(
+        manager.get_boot_plan("definitely-missing").await,
+        Err(ManagerError::NotFound(name)) if name == "definitely-missing.service"
+    ));
 }
 
 #[tokio::test]
