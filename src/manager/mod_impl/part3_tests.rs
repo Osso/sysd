@@ -1,6 +1,7 @@
 use super::*;
 use crate::units::{InstallSection, Service, Unit};
 use std::collections::HashSet;
+use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 
 fn service(name: &str, configure: impl FnOnce(&mut Service)) -> Service {
@@ -14,6 +15,37 @@ fn insert_service(manager: &mut Manager, name: &str, service: Service) {
     manager
         .states
         .insert(name.to_string(), ServiceState::new());
+}
+
+struct TempDir(PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn temp_dir(label: &str) -> TempDir {
+    let path = std::env::temp_dir().join(format!(
+        "sysd-manager-part3-{label}-{}-{}",
+        std::process::id(),
+        next_temp_id()
+    ));
+    std::fs::create_dir_all(&path).unwrap();
+    TempDir(path)
+}
+
+fn next_temp_id() -> u32 {
+    static TEMP_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn write_service(path: &std::path::Path, exec_start: &str) {
+    std::fs::write(
+        path,
+        format!("[Unit]\nDescription=Demo\n[Service]\nExecStart={exec_start}\n"),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -197,6 +229,105 @@ fn oneshot_completion_result_reports_success_failure_and_io_error() {
     let (code, error) = oneshot_completion_result(io_error);
     assert_eq!(code, None);
     assert!(error.unwrap().contains("No such file"));
+}
+
+#[test]
+fn default_target_resolves_symlink_file_and_missing_cases() {
+    let root = temp_dir("default-target");
+    let mut manager = Manager::new();
+    manager.unit_paths = vec![root.0.clone()];
+
+    assert!(matches!(
+        manager.get_default_target(),
+        Err(ManagerError::NotFound(name)) if name == "default.target"
+    ));
+
+    let default_path = root.0.join("default.target");
+    std::fs::write(&default_path, "").unwrap();
+    assert_eq!(manager.get_default_target().unwrap(), "default.target");
+    std::fs::remove_file(&default_path).unwrap();
+
+    symlink("multi-user.target", &default_path).unwrap();
+    assert_eq!(manager.get_default_target().unwrap(), "multi-user.target");
+}
+
+#[tokio::test]
+async fn reload_units_skips_scopes_missing_files_and_reload_errors() {
+    let root = temp_dir("reload");
+    let mut manager = Manager::new();
+    manager.unit_paths = vec![root.0.clone()];
+    insert_service(&mut manager, "demo.service", service("demo.service", |_| {}));
+    insert_service(
+        &mut manager,
+        "broken.service",
+        service("broken.service", |_| {}),
+    );
+    insert_service(
+        &mut manager,
+        "session.scope",
+        service("session.scope", |_| {}),
+    );
+    manager
+        .states
+        .insert("session.scope".to_string(), ServiceState::running_scope());
+
+    write_service(&root.0.join("demo.service"), "/bin/true");
+    std::fs::create_dir(root.0.join("broken.service")).unwrap();
+
+    assert_eq!(manager.reload_units().await.unwrap(), 1);
+    assert_eq!(
+        manager
+            .get_service("demo")
+            .unwrap()
+            .service
+            .exec_start
+            .as_slice(),
+        ["/bin/true".to_string()]
+    );
+    assert!(manager.states.contains_key("session.scope"));
+}
+
+#[tokio::test]
+async fn sync_units_reports_no_restarts_for_unchanged_or_inactive_services() {
+    let root = temp_dir("sync");
+    let mut manager = Manager::new();
+    manager.unit_paths = vec![root.0.clone()];
+    insert_service(
+        &mut manager,
+        "unchanged.service",
+        service("unchanged.service", |service| {
+            service.service.exec_start = vec!["/bin/true".to_string()];
+        }),
+    );
+    insert_service(
+        &mut manager,
+        "changed.service",
+        service("changed.service", |service| {
+            service.service.exec_start = vec!["/bin/true".to_string()];
+        }),
+    );
+
+    write_service(&root.0.join("unchanged.service"), "/bin/true");
+    write_service(&root.0.join("changed.service"), "/bin/false");
+
+    assert!(!manager.service_config_changed(
+        "unchanged.service",
+        service_config_hash(manager.get_service("unchanged").unwrap())
+    ));
+    assert!(!manager
+        .restart_changed_running_service("changed.service")
+        .await);
+
+    assert!(manager.sync_units().await.unwrap().is_empty());
+    assert_eq!(
+        manager
+            .get_service("changed")
+            .unwrap()
+            .service
+            .exec_start
+            .as_slice(),
+        ["/bin/false".to_string()]
+    );
 }
 
 #[tokio::test]
