@@ -21,6 +21,24 @@ fn notify(pid: u32, fields: &[(&str, &str)]) -> NotifyMessage {
     }
 }
 
+fn notify_with_fds(pid: u32, fields: &[(&str, &str)], fds: Vec<i32>) -> NotifyMessage {
+    NotifyMessage {
+        pid,
+        fields: fields
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect::<HashMap<_, _>>(),
+        fds,
+    }
+}
+
+fn pipe_fds() -> [libc::c_int; 2] {
+    let mut fds = [0; 2];
+    let result = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    assert_eq!(result, 0);
+    fds
+}
+
 fn manager_with_service(name: &str, configure: impl FnOnce(&mut Service)) -> Manager {
     let mut manager = Manager::new();
     manager
@@ -93,6 +111,108 @@ fn mark_service_ready_sets_running_state_and_arms_watchdog() {
     assert_eq!(state.main_pid, Some(0));
     assert_eq!(manager.active_jobs, 1);
     assert!(manager.watchdog_deadlines.contains_key("notify.service"));
+}
+
+#[test]
+fn dispatch_notify_stores_and_removes_named_file_descriptors() {
+    let mut manager = manager_with_service("store.service", |service| {
+        service.service.file_descriptor_store_max = Some(2);
+    });
+    manager.waiting_ready.insert(77, "store.service".to_string());
+    let fds = pipe_fds();
+
+    manager.dispatch_notify(&notify_with_fds(
+        77,
+        &[("FDSTORE", "1"), ("FDNAME", "cache")],
+        vec![fds[0]],
+    ));
+
+    let stored = manager.fd_store.get("store.service").unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].0, "cache");
+
+    manager.dispatch_notify(&notify(77, &[("FDSTOREREMOVE", "1"), ("FDNAME", "cache")]));
+
+    assert!(manager.fd_store.get("store.service").unwrap().is_empty());
+    unsafe {
+        libc::close(fds[1]);
+    }
+}
+
+#[test]
+fn fdstore_enforces_file_descriptor_store_limit() {
+    let mut manager = manager_with_service("limited.service", |service| {
+        service.service.file_descriptor_store_max = Some(1);
+    });
+    manager.waiting_ready.insert(88, "limited.service".to_string());
+    let first = pipe_fds();
+    let second = pipe_fds();
+
+    manager.handle_fdstore(&notify_with_fds(
+        88,
+        &[("FDSTORE", "1"), ("FDNAME", "first")],
+        vec![first[0]],
+    ));
+    manager.handle_fdstore(&notify_with_fds(
+        88,
+        &[("FDSTORE", "1"), ("FDNAME", "second")],
+        vec![second[0]],
+    ));
+
+    let stored = manager.fd_store.get("limited.service").unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].0, "first");
+    unsafe {
+        libc::close(first[1]);
+        libc::close(second[1]);
+    }
+}
+
+#[test]
+fn forking_pid_file_paths_update_running_state_or_report_errors() {
+    let mut manager = manager_with_service("forking.service", |service| {
+        service.service.watchdog_sec = Some(Duration::from_secs(5));
+    });
+    manager.active_jobs = 1;
+    let dir = std::env::temp_dir().join(format!("sysd-runtime-pid-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let pid_file = dir.join("service.pid");
+
+    assert!(manager.read_forking_pid_file(&pid_file).is_err());
+    std::fs::write(&pid_file, "not-a-pid").unwrap();
+    assert!(manager.read_forking_pid_file(&pid_file).is_err());
+    std::fs::write(&pid_file, "4242\n").unwrap();
+    assert_eq!(manager.read_forking_pid_file(&pid_file), Ok(4242));
+
+    manager
+        .pid_files
+        .insert("forking.service".to_string(), pid_file.clone());
+    assert!(manager.reap_forking_parent("forking.service", 0));
+
+    let state = manager.states.get("forking.service").unwrap();
+    assert_eq!(state.active, ActiveState::Active);
+    assert_eq!(state.sub, SubState::Running);
+    assert_eq!(state.main_pid, Some(4242));
+    assert_eq!(manager.active_jobs, 0);
+    assert!(manager.watchdog_deadlines.contains_key("forking.service"));
+    assert!(!manager.pid_files.contains_key("forking.service"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn forking_parent_exit_without_pid_file_marks_service_running() {
+    let mut manager = manager_with_service("forking.service", |_| {});
+    manager.active_jobs = 1;
+
+    assert!(manager.reap_forking_parent("forking.service", 0));
+
+    let state = manager.states.get("forking.service").unwrap();
+    assert_eq!(state.active, ActiveState::Active);
+    assert_eq!(state.sub, SubState::Running);
+    assert_eq!(state.main_pid, Some(0));
+    assert_eq!(manager.active_jobs, 0);
+    assert!(!manager.reap_forking_parent("forking.service", 1));
 }
 
 #[test]
@@ -188,6 +308,83 @@ fn apply_restart_decision_marks_rate_limited_restart_as_failed() {
     assert_eq!(state.active, ActiveState::Failed);
     assert_eq!(state.sub, SubState::Failed);
     assert!(state.error.as_deref().unwrap().contains("Start limit hit"));
+}
+
+#[tokio::test]
+async fn cleanup_after_exit_removes_runtime_state_when_not_restarting() {
+    let mut manager = manager_with_service("done.service", |_| {});
+    let fds = pipe_fds();
+    manager
+        .watchdog_deadlines
+        .insert("done.service".to_string(), std::time::Instant::now());
+    manager
+        .cgroup_paths
+        .insert("done.service".to_string(), "/sys/fs/cgroup/done".into());
+    manager.dynamic_uids.insert("done.service".to_string(), 61000);
+    manager.fd_store.insert(
+        "done.service".to_string(),
+        vec![("stored".to_string(), fds[0])],
+    );
+
+    manager.cleanup_after_exit("done.service").await;
+
+    assert!(!manager.watchdog_deadlines.contains_key("done.service"));
+    assert!(!manager.cgroup_paths.contains_key("done.service"));
+    assert!(!manager.dynamic_uids.contains_key("done.service"));
+    assert!(!manager.fd_store.contains_key("done.service"));
+    unsafe {
+        libc::close(fds[1]);
+    }
+}
+
+#[tokio::test]
+async fn cleanup_after_exit_keeps_restart_resources_for_auto_restart() {
+    let mut manager = manager_with_service("restart.service", |_| {});
+    let mut state = ServiceState::new();
+    state.set_auto_restart(Duration::from_secs(1));
+    manager.states.insert("restart.service".to_string(), state);
+    let fds = pipe_fds();
+    manager.dynamic_uids.insert("restart.service".to_string(), 61001);
+    manager.fd_store.insert(
+        "restart.service".to_string(),
+        vec![("stored".to_string(), fds[0])],
+    );
+
+    manager.cleanup_after_exit("restart.service").await;
+
+    assert!(manager.dynamic_uids.contains_key("restart.service"));
+    assert!(manager.fd_store.contains_key("restart.service"));
+    let stored = manager.fd_store.remove("restart.service").unwrap();
+    unsafe {
+        libc::close(stored[0].1);
+        libc::close(fds[1]);
+    }
+}
+
+#[test]
+fn read_restart_policy_returns_service_values_or_defaults() {
+    let manager = manager_with_service("custom.service", |service| {
+        service.service.restart = RestartPolicy::Always;
+        service.service.restart_sec = Duration::from_secs(9);
+        service.service.remain_after_exit = true;
+        service.service.service_type = ServiceType::Forking;
+        service.service.start_limit_burst = Some(3);
+        service.service.start_limit_interval_sec = Some(Duration::from_secs(30));
+        service.service.restart_prevent_exit_status = vec![77, 78];
+    });
+
+    let policy = manager.read_restart_policy("custom.service");
+    assert!(matches!(policy.restart_policy, RestartPolicy::Always));
+    assert_eq!(policy.restart_sec, Duration::from_secs(9));
+    assert!(policy.remain_after_exit);
+    assert!(policy.is_forking);
+    assert!(!policy.is_oneshot);
+    assert_eq!(policy.start_limit_burst, Some(3));
+    assert_eq!(policy.start_limit_interval_sec, Some(Duration::from_secs(30)));
+    assert_eq!(policy.restart_prevent_exit_status, [77, 78]);
+
+    let default_policy = manager.read_restart_policy("missing.service");
+    assert!(matches!(default_policy.restart_policy, RestartPolicy::No));
 }
 
 #[test]
