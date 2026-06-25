@@ -259,6 +259,41 @@ fn environment_helpers_apply_valid_names_and_ignore_invalid_cstrings() {
 }
 
 #[test]
+fn socket_fd_helpers_report_invalid_fds_and_clear_cloexec_on_valid_fds() {
+    use std::os::fd::AsRawFd;
+
+    validate_socket_fds(&[-1]);
+    assert!(map_socket_fds(&[-1]).is_err());
+
+    let file = std::fs::File::open("/dev/null").unwrap();
+    let fd = file.as_raw_fd();
+    unsafe {
+        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+
+    clear_cloexec(fd);
+
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert_eq!(flags & libc::FD_CLOEXEC, 0);
+}
+
+#[test]
+fn no_op_process_settings_and_missing_identities_are_safe() {
+    apply_resource_limits(None, None, None);
+    set_single_limit(-1, Some(1), "INVALID_RESOURCE");
+    apply_oom_score_adjust(None);
+    apply_sandbox(&crate::units::ServiceSection::default());
+    assert!(drop_privileges(None, None).is_ok());
+
+    assert_eq!(resolve_user("42"), Some(42));
+    assert_eq!(resolve_group("43"), Some(43));
+    assert_eq!(resolve_user("missing\0user"), None);
+    assert_eq!(resolve_group("missing\0group"), None);
+    assert_eq!(resolve_user("definitely-missing-sysd-user"), None);
+    assert_eq!(resolve_group("definitely-missing-sysd-group"), None);
+}
+
+#[test]
 fn systemd_socket_env_records_count_pid_and_names() {
     let original_fds = std::env::var("LISTEN_FDS").ok();
     let original_pid = std::env::var("LISTEN_PID").ok();
