@@ -298,7 +298,7 @@ impl Manager {
     }
 
     fn has_enable_link(&self, entry: &str, dir: &str) -> bool {
-        let base = PathBuf::from("/etc/systemd/system");
+        let base = self.enable_dir();
         let link_path = if dir.is_empty() {
             base.join(entry)
         } else {
