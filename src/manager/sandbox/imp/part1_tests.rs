@@ -154,6 +154,59 @@ fn path_restrictions_ignore_missing_paths_without_mounting() {
 }
 
 #[test]
+fn home_dir_helper_skips_missing_paths_without_calling_operation() {
+    let missing = [
+        "/tmp/sysd-sandbox-missing-home-a",
+        "/tmp/sysd-sandbox-missing-home-b",
+    ];
+
+    assert_eq!(
+        apply_to_home_dirs(&missing, |_| Err("should not run".to_string())),
+        Ok(())
+    );
+}
+
+#[test]
+fn protect_home_no_is_noop_and_custom_missing_dirs_are_skipped() {
+    assert_eq!(apply_protect_home(&ProtectHome::No), Ok(()));
+    assert_eq!(
+        apply_to_home_dirs(&["/tmp/sysd-sandbox-no-such-home"], bind_mount_ro),
+        Ok(())
+    );
+    assert_eq!(
+        apply_to_home_dirs(&["/tmp/sysd-sandbox-no-such-home"], mount_tmpfs),
+        Ok(())
+    );
+    assert_eq!(
+        apply_to_home_dirs(&["/tmp/sysd-sandbox-no-such-home"], make_inaccessible),
+        Ok(())
+    );
+}
+
+#[test]
+fn device_class_parser_handles_pts_and_unsupported_classes() {
+    assert_eq!(add_device_class("not-supported", false, true), Ok(()));
+    assert_eq!(add_device_allow_entry("char- r"), Ok(()));
+    assert_eq!(add_device_allow_entry("char-pts r"), Ok(()));
+    assert_eq!(add_device_allow_entry("char-pts rw"), Ok(()));
+}
+
+#[test]
+fn device_policy_and_private_devices_report_tmpfs_mount_failure() {
+    assert!(apply_device_policy(&DevicePolicy::Auto, &[])
+        .unwrap_err()
+        .starts_with("Failed to mount tmpfs on /dev"));
+    assert!(apply_private_devices()
+        .unwrap_err()
+        .starts_with("Failed to mount tmpfs on /dev"));
+}
+
+#[test]
+fn device_remount_read_write_is_noop() {
+    remount_device_read_only("/dev/definitely-missing-sysd-test", false);
+}
+
+#[test]
 fn namespace_restriction_defaults_to_all_known_namespaces() {
     let all_flags = [
         ("cgroup", libc::CLONE_NEWCGROUP as u64),
