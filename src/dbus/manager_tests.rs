@@ -1,6 +1,6 @@
 use super::*;
 use crate::manager::{ActiveState, Manager, SubState};
-use std::os::fd::FromRawFd;
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use zbus::zvariant::{Array, Fd, OwnedValue, Str, Type, Value};
@@ -17,13 +17,17 @@ fn u32_array_value(values: &[u32]) -> OwnedValue {
     OwnedValue::try_from(Value::Array(array)).unwrap()
 }
 
-fn pidfd_array_value() -> OwnedValue {
-    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, std::process::id(), 0) };
-    assert_ne!(pidfd, -1, "pidfd_open should succeed for current process");
-    let owned_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd as i32) };
+fn fd_array_value(owned_fd: OwnedFd) -> OwnedValue {
     let mut array = Array::new(<Fd<'_> as Type>::SIGNATURE);
     array.append(Value::Fd(Fd::from(owned_fd))).unwrap();
     OwnedValue::try_from(Value::Array(array)).unwrap()
+}
+
+fn pidfd_array_value() -> OwnedValue {
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, std::process::id(), 0) };
+    assert_ne!(pidfd, -1, "pidfd_open should succeed for current process");
+    let owned_fd = unsafe { OwnedFd::from_raw_fd(pidfd as i32) };
+    fd_array_value(owned_fd)
 }
 
 struct TempDir(std::path::PathBuf);
@@ -150,6 +154,19 @@ fn parse_scope_properties_collects_pidfds() {
 }
 
 #[test]
+fn parse_scope_properties_ignores_fd_values_that_are_not_pidfds() {
+    let root = temp_dir("plain-fd");
+    let file = std::fs::File::create(root.0.join("plain-fd")).unwrap();
+    let properties = vec![("PIDFDs".to_string(), fd_array_value(file.into()))];
+
+    let (slice, description, pids) = parse_scope_properties(&properties);
+
+    assert_eq!(slice, None);
+    assert_eq!(description, None);
+    assert!(pids.is_empty());
+}
+
+#[test]
 fn pidfd_to_pid_reports_missing_fd() {
     let error = pidfd_to_pid(-1).unwrap_err();
 
@@ -178,6 +195,19 @@ fn ensure_user_session_bus_accepts_existing_bus_path() {
         root.0.to_str().unwrap(),
         bus_path.to_str().unwrap()
     ));
+}
+
+#[test]
+fn start_user_sysd_reports_failed_when_runtime_env_is_invalid() {
+    assert_eq!(
+        start_user_sysd(
+            unsafe { libc::geteuid() },
+            "runtime\0dir",
+            "/tmp/sysd-test-sysd.sock",
+            "/tmp/sysd-test-bus",
+        ),
+        "failed"
+    );
 }
 
 #[test]
