@@ -120,6 +120,34 @@ fn dbus_without_bus_name_falls_back_to_running_state() {
 }
 
 #[test]
+fn forking_without_pid_file_waits_without_recording_pid_file() {
+    let mut manager = manager_with_state("forking.service");
+    let forking = service("forking.service", |service| {
+        service.service.service_type = ServiceType::Forking;
+    });
+
+    manager.configure_post_spawn_state("forking.service", 88, &forking);
+
+    assert!(!manager.pid_files.contains_key("forking.service"));
+    let state = manager.states.get("forking.service").unwrap();
+    assert_eq!(state.active, ActiveState::Inactive);
+    assert_eq!(manager.active_jobs, 0);
+}
+
+#[test]
+fn mark_running_start_tolerates_missing_state_and_zero_active_jobs() {
+    let mut manager = Manager::new_user();
+    let svc = service("orphan.service", |service| {
+        service.service.watchdog_sec = Some(Duration::from_secs(1));
+    });
+
+    manager.configure_post_spawn_state("orphan.service", 77, &svc);
+
+    assert_eq!(manager.active_jobs, 0);
+    assert!(manager.watchdog_deadlines.contains_key("orphan.service"));
+}
+
+#[test]
 fn log_oneshot_start_returns_exec_command_count() {
     let manager = Manager::new();
     let oneshot = service("oneshot.service", |service| {
@@ -352,6 +380,63 @@ fn allocate_dynamic_user_records_allocated_uid_and_skips_static_services() {
             .unwrap(),
         (None, None)
     );
+}
+
+#[test]
+fn setup_cgroup_for_service_without_manager_only_logs_limit_modes() {
+    let mut manager = Manager::new_user();
+    let no_limits = CgroupLimits::default();
+    let limits = CgroupLimits {
+        memory_max: Some(1024),
+        cpu_quota: None,
+        tasks_max: None,
+    };
+
+    manager.setup_cgroup_for_service("plain.service", 1234, &no_limits, None, false);
+    manager.setup_cgroup_for_service("limited.service", 1234, &limits, Some("demo.slice"), true);
+
+    assert!(manager.cgroup_paths.is_empty());
+}
+
+#[tokio::test]
+async fn start_single_reports_target_and_service_without_exec_start_errors() {
+    let mut manager = manager_with_state("empty.service");
+    manager.units.insert(
+        "empty.service".to_string(),
+        Unit::Service(service("empty.service", |_| {})),
+    );
+    manager.units.insert(
+        "plain.target".to_string(),
+        Unit::Target(Target::new("plain.target".to_string())),
+    );
+
+    assert!(matches!(
+        manager.start_single("plain.target").await,
+        Err(ManagerError::IsTarget(name)) if name == "plain.target"
+    ));
+    assert!(matches!(
+        manager.start_single("empty.service").await,
+        Err(ManagerError::Spawn(SpawnError::NoExecStart(name))) if name == "empty.service"
+    ));
+}
+
+#[tokio::test]
+async fn start_service_unit_reports_executor_spawn_failure_without_tracking_process() {
+    let mut manager = manager_with_state("broken.service");
+    manager.executor_path = "/definitely/missing/sysd-executor".to_string();
+    let svc = service("broken.service", |service| {
+        service.service.exec_start = vec!["/bin/true".to_string()];
+    });
+
+    let result = manager.start_service_unit("broken.service", svc).await;
+
+    assert!(matches!(
+        result,
+        Err(ManagerError::Spawn(SpawnError::Spawn(message)))
+            if message.contains("Failed to spawn executor")
+    ));
+    assert!(!manager.processes.contains_key("broken.service"));
+    assert!(!manager.pid_to_service.values().any(|name| name == "broken.service"));
 }
 
 #[tokio::test]
