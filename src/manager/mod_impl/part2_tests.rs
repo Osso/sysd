@@ -323,6 +323,20 @@ async fn start_non_service_unit_handles_path_socket_and_mount_branches_safely() 
         Err(ManagerError::NotFound(name)) if name == "missing-state.socket"
     ));
 
+    manager
+        .states
+        .insert("ready.socket".to_string(), ServiceState::new());
+    assert!(matches!(
+        manager
+            .start_non_service_unit(
+                "ready.socket",
+                &Unit::Socket(Socket::new("ready.socket".to_string())),
+            )
+            .await,
+        Ok(true)
+    ));
+    assert!(manager.states.get("ready.socket").unwrap().is_active());
+
     let mut root_mount = Mount::new("-.mount".to_string());
     root_mount.mount.r#where = "/".to_string();
     root_mount.mount.what = "rootfs".to_string();
@@ -507,6 +521,24 @@ fn prepare_socket_fds_logs_missing_socket_fds_and_returns_empty_values() {
 }
 
 #[test]
+fn cgroup_setup_helpers_tolerate_missing_manager_and_log_error_modes() {
+    let mut manager = Manager::new();
+    let limits = service_cgroup_limits(&service("plain.service", |_| {}));
+
+    manager.setup_cgroup_for_service("plain.service", 1234, &limits, None, false);
+    manager.log_cgroup_setup_error(
+        "plain.service",
+        false,
+        std::io::Error::new(std::io::ErrorKind::Other, "no cgroup"),
+    );
+    manager.log_cgroup_setup_error(
+        "limited.service",
+        true,
+        std::io::Error::new(std::io::ErrorKind::Other, "limited cgroup"),
+    );
+}
+
+#[test]
 fn build_spawn_options_omits_notify_socket_for_plain_services_without_watchdog() {
     let manager = Manager::new_user();
     let svc = service("plain.service", |_| {});
@@ -568,6 +600,22 @@ async fn build_spawn_options_includes_notify_watchdog_fds_dynamic_ids_and_enviro
     );
     drop(manager);
     let _ = std::fs::remove_file(notify_path);
+}
+
+#[tokio::test]
+async fn send_signals_to_child_handles_sighup_and_process_kill_mode() {
+    let mut child = tokio::process::Command::new("/bin/sleep")
+        .arg("5")
+        .spawn()
+        .unwrap();
+
+    Manager::send_signals_to_child(&mut child, &KillMode::Process, true, "sleep.service").await;
+    let status = tokio::time::timeout(Duration::from_secs(1), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(!status.success());
 }
 
 #[tokio::test]
