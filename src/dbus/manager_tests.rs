@@ -71,6 +71,23 @@ fn special_user_unit_detection_routes_only_user_units() {
 }
 
 #[test]
+fn user_runtime_dir_unit_accepts_current_user() {
+    let uid = unsafe { libc::geteuid() };
+    let unit = format!("user-runtime-dir@{uid}.service");
+
+    assert_eq!(start_user_runtime_dir(&unit), "done");
+}
+
+#[test]
+fn user_session_bus_reports_spawn_error_for_invalid_paths() {
+    assert!(!ensure_user_session_bus(
+        unsafe { libc::geteuid() },
+        "runtime\0dir",
+        "bus\0path"
+    ));
+}
+
+#[test]
 fn parse_uid_from_unit_accepts_expected_suffix_and_rejects_invalid_values() {
     assert_eq!(
         parse_uid_from_unit("user-runtime-dir@1000.service", USER_RUNTIME_DIR_PREFIX),
