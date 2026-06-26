@@ -326,4 +326,33 @@ mod tests {
         let cgroup_path = PathBuf::from("/sys/fs/cgroup/user.slice/session-44.scope");
         let _scope_iface = build_scope_interface("session-44.scope", &cgroup_path, &None);
     }
+
+    #[tokio::test]
+    async fn register_and_unregister_use_existing_dbus_connection_when_available() {
+        let Ok(connection) = zbus::Connection::session().await else {
+            return;
+        };
+        let mut mgr = ScopeManager::new(None);
+        mgr.set_dbus_connection(connection);
+
+        let path = mgr
+            .register(
+                "session-dbus.scope",
+                None,
+                Some("D-Bus backed scope"),
+                &[std::process::id()],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            path,
+            PathBuf::from("/sys/fs/cgroup/user.slice/session-dbus.scope")
+        );
+        assert!(mgr.exists("session-dbus.scope"));
+
+        mgr.unregister("session-dbus.scope").await.unwrap();
+
+        assert!(!mgr.exists("session-dbus.scope"));
+    }
 }
