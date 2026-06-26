@@ -144,6 +144,9 @@ include!("mod_impl/part2.rs");
 #[cfg(test)]
 #[path = "mod_impl/part2_tests.rs"]
 mod part2_tests;
+#[cfg(test)]
+#[path = "mod_impl/part2_executor_tests.rs"]
+mod part2_executor_tests;
 include!("mod_impl/part3.rs");
 #[cfg(test)]
 #[path = "mod_impl/part3_tests.rs"]
