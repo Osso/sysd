@@ -271,6 +271,7 @@ async fn stop_unit_returns_job_path_even_when_unit_is_missing() {
         .unwrap();
 
     assert!(job.as_str().starts_with("/org/freedesktop/systemd1/job/"));
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 }
 
 #[tokio::test]
@@ -313,6 +314,22 @@ async fn start_unit_and_transient_unit_return_job_paths_with_signal_context() {
         .await
         .scope_manager()
         .exists("session-signal.scope"));
+}
+
+#[tokio::test]
+async fn signal_helpers_emit_job_and_unit_removed_when_session_bus_is_available() {
+    let Ok(conn) = zbus::Connection::session().await else {
+        return;
+    };
+    let ctx = zbus::object_server::SignalEmitter::new(&conn, "/org/freedesktop/systemd1").unwrap();
+
+    ManagerInterface::emit_job_removed(&ctx, 42, "demo.service", "done")
+        .await
+        .unwrap();
+    ManagerInterface::emit_unit_removed(&ctx, "demo.service")
+        .await
+        .unwrap();
+    emit_job_removed_signal(&conn, 43, "demo.service", "failed", "Test").await;
 }
 
 #[tokio::test]
