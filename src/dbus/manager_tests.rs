@@ -274,6 +274,48 @@ async fn stop_unit_returns_job_path_even_when_unit_is_missing() {
 }
 
 #[tokio::test]
+async fn start_unit_and_transient_unit_return_job_paths_with_signal_context() {
+    let Ok(conn) = zbus::Connection::session().await else {
+        return;
+    };
+    let ctx = zbus::object_server::SignalEmitter::new(&conn, "/org/freedesktop/systemd1").unwrap();
+    let manager = Arc::new(RwLock::new(Manager::new_user()));
+    let interface = ManagerInterface::new(Arc::clone(&manager));
+
+    let start_job = interface
+        .start_unit(ctx.clone(), "definitely-missing.service", "replace")
+        .await
+        .unwrap();
+    assert!(start_job
+        .as_str()
+        .starts_with("/org/freedesktop/systemd1/job/"));
+
+    let transient_job = interface
+        .start_transient_unit(
+            ctx,
+            "session-signal.scope",
+            "replace",
+            vec![
+                ("Description".to_string(), string_value("Signal session")),
+                ("PIDs".to_string(), u32_array_value(&[std::process::id()])),
+            ],
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    assert!(transient_job
+        .as_str()
+        .starts_with("/org/freedesktop/systemd1/job/"));
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(manager
+        .read()
+        .await
+        .scope_manager()
+        .exists("session-signal.scope"));
+}
+
+#[tokio::test]
 async fn kill_unit_ignores_missing_units_and_checks_scope_main_pid() {
     let manager = Arc::new(RwLock::new(Manager::new_user()));
     let interface = ManagerInterface::new(Arc::clone(&manager));
