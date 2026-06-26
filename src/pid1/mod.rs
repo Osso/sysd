@@ -54,3 +54,14 @@ pub enum Pid1Error {
     #[error("Signal setup failed: {0}")]
     Signal(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_is_noop_when_not_running_as_pid1() {
+        assert!(!is_pid1());
+        assert!(init().is_ok());
+    }
+}

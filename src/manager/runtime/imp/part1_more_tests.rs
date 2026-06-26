@@ -50,7 +50,7 @@ fn notify_with_fds(pid: u32, fields: &[(&str, &str)], fds: Vec<i32>) -> NotifyMe
     }
 }
 
-fn pipe_fds() -> [libc::c_int; 2] {
+fn runtime_pipe_fds() -> [libc::c_int; 2] {
     let mut fds = [0; 2];
     let result = unsafe { libc::pipe(fds.as_mut_ptr()) };
     assert_eq!(result, 0);
@@ -93,7 +93,7 @@ fn fdstore_closes_unknown_or_disallowed_descriptors_and_ignores_bad_remove() {
     let mut manager = manager_with_service("limited.service", |_| {});
     manager.waiting_ready.insert(44, "limited.service".to_string());
 
-    let unknown = pipe_fds();
+    let unknown = runtime_pipe_fds();
     manager.handle_fdstore(&notify_with_fds(
         999,
         &[("FDSTORE", "1"), ("FDNAME", "unknown")],
@@ -103,7 +103,7 @@ fn fdstore_closes_unknown_or_disallowed_descriptors_and_ignores_bad_remove() {
         libc::close(unknown[1]);
     }
 
-    let disallowed = pipe_fds();
+    let disallowed = runtime_pipe_fds();
     manager.handle_fdstore(&notify_with_fds(
         44,
         &[("FDSTORE", "1"), ("FDNAME", "disallowed")],
@@ -185,6 +185,38 @@ async fn process_restarts_starts_due_service_with_real_executor() {
     assert!(state.restart_at.is_none());
     let mut child = manager.processes.remove("restart.service").unwrap();
     assert!(child.wait().await.unwrap().success());
+}
+
+#[test]
+fn add_oneshot_pid_to_cgroup_returns_without_cgroup_backend() {
+    let mut manager = user_manager_with_service("oneshot.service", |_| {});
+    manager
+        .cgroup_paths
+        .insert("oneshot.service".to_string(), "/sys/fs/cgroup/oneshot".into());
+
+    manager.add_oneshot_pid_to_cgroup("oneshot.service", std::process::id());
+}
+
+#[tokio::test]
+async fn watchdog_timeout_aborts_running_child_and_marks_failure() {
+    let mut manager = user_manager_with_service("watchdog-child.service", |_| {});
+    manager.processes.insert(
+        "watchdog-child.service".to_string(),
+        tokio::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .unwrap(),
+    );
+    manager
+        .watchdog_deadlines
+        .insert("watchdog-child.service".to_string(), std::time::Instant::now());
+
+    manager.process_watchdog().await;
+
+    let state = manager.states.get("watchdog-child.service").unwrap();
+    assert_eq!(state.active, ActiveState::Failed);
+    assert_eq!(state.error.as_deref(), Some("Watchdog timeout"));
+    assert!(!manager.processes.contains_key("watchdog-child.service"));
 }
 
 fn local_executor_path() -> Option<String> {

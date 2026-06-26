@@ -192,4 +192,20 @@ mod tests {
         let _ = object_server.remove::<UnitInterface, _>(path.clone()).await;
         let _ = object_server.remove::<ScopeInterface, _>(path).await;
     }
+
+    #[tokio::test]
+    async fn dbus_server_new_session_registers_manager_interface_when_available() {
+        let manager = Arc::new(RwLock::new(Manager::new_user()));
+        let Ok(server) = DbusServer::new_session(Arc::clone(&manager)).await else {
+            return;
+        };
+
+        assert!(server.connection().unique_name().is_some());
+        assert!(manager
+            .read()
+            .await
+            .scope_manager()
+            .dbus_connection()
+            .is_some());
+    }
 }

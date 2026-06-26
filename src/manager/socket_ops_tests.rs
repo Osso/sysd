@@ -391,6 +391,13 @@ async fn handle_socket_activation_skips_active_services_and_reports_missing_serv
         })
         .await
         .unwrap();
+    manager
+        .handle_socket_activation(socket_watcher::SocketActivation {
+            socket_name: "ready.socket".to_string(),
+            service_name: "ready".to_string(),
+        })
+        .await
+        .unwrap();
 
     let err = manager
         .handle_socket_activation(socket_watcher::SocketActivation {

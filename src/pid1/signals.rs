@@ -72,3 +72,23 @@ impl SignalHandler {
         rx
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn signal_forwarder_delivers_usr1_to_receiver() {
+        let handler = SignalHandler::new().unwrap();
+        let mut rx = handler.spawn_forwarder();
+
+        unsafe {
+            libc::kill(libc::getpid(), libc::SIGUSR1);
+        }
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap();
+        assert_eq!(received, Some(SysdSignal::Usr1));
+    }
+}

@@ -368,6 +368,47 @@ fn tty_setup_ignores_non_tty_and_reports_tty_fail_open_errors() {
     assert!(setup_tty(&StdInput::TtyForce, None, true).is_ok());
 }
 
+#[test]
+fn executor_config_maps_stdio_and_sandbox_enum_variants() {
+    let mut service = service("sandboxed.service");
+    service.service.exec_start = vec!["/bin/true --flag".to_string()];
+    service.service.standard_input = StdInput::TtyFail;
+    service.service.protect_system = crate::units::ProtectSystem::Strict;
+    service.service.protect_home = crate::units::ProtectHome::Tmpfs;
+    service.service.protect_proc = crate::units::ProtectProc::NoAccess;
+    service.service.device_policy = crate::units::DevicePolicy::Strict;
+
+    let config = build_exec_config(&service, &SpawnOptions::default(), 0).unwrap();
+
+    assert_eq!(config.std_input, StdInputConfig::TtyFail);
+    assert_eq!(config.sandbox.protect_system, ProtectSystemConfig::Strict);
+    assert_eq!(config.sandbox.protect_home, ProtectHomeConfig::Tmpfs);
+    assert_eq!(config.sandbox.protect_proc, ProtectProcConfig::NoAccess);
+    assert_eq!(config.sandbox.device_policy, DevicePolicyConfig::Strict);
+
+    service.service.standard_input = StdInput::Tty;
+    service.service.protect_system = crate::units::ProtectSystem::Yes;
+    service.service.protect_home = crate::units::ProtectHome::Yes;
+    service.service.protect_proc = crate::units::ProtectProc::Invisible;
+    service.service.device_policy = crate::units::DevicePolicy::Closed;
+    let config = build_exec_config(&service, &SpawnOptions::default(), 0).unwrap();
+    assert_eq!(config.std_input, StdInputConfig::Tty);
+    assert_eq!(config.sandbox.protect_system, ProtectSystemConfig::Yes);
+    assert_eq!(config.sandbox.protect_home, ProtectHomeConfig::Yes);
+    assert_eq!(config.sandbox.protect_proc, ProtectProcConfig::Invisible);
+    assert_eq!(config.sandbox.device_policy, DevicePolicyConfig::Closed);
+
+    service.service.standard_input = StdInput::TtyForce;
+    service.service.protect_system = crate::units::ProtectSystem::Full;
+    service.service.protect_home = crate::units::ProtectHome::ReadOnly;
+    service.service.protect_proc = crate::units::ProtectProc::Ptraceable;
+    let config = build_exec_config(&service, &SpawnOptions::default(), 0).unwrap();
+    assert_eq!(config.std_input, StdInputConfig::TtyForce);
+    assert_eq!(config.sandbox.protect_system, ProtectSystemConfig::Full);
+    assert_eq!(config.sandbox.protect_home, ProtectHomeConfig::ReadOnly);
+    assert_eq!(config.sandbox.protect_proc, ProtectProcConfig::Ptraceable);
+}
+
 fn restore_env_var(key: &str, value: Option<String>) {
     unsafe {
         match value {

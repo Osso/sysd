@@ -139,4 +139,31 @@ mod tests {
         assert!(DynamicUserManager::is_dynamic_uid(65519));
         assert!(!DynamicUserManager::is_dynamic_uid(65520));
     }
+
+    #[test]
+    fn allocation_wraps_at_range_end_and_reports_pool_exhaustion() {
+        let mgr = DynamicUserManager::new();
+        {
+            let mut inner = mgr.inner.lock().unwrap();
+            inner.next_uid = DYNAMIC_UID_MAX;
+        }
+
+        let (uid, gid) = mgr.allocate("wrap.service").unwrap();
+
+        assert_eq!(uid, DYNAMIC_UID_MAX);
+        assert_eq!(gid, DYNAMIC_UID_MAX);
+        assert_eq!(mgr.inner.lock().unwrap().next_uid, DYNAMIC_UID_MIN);
+
+        let exhausted = DynamicUserManager::new();
+        {
+            let mut inner = exhausted.inner.lock().unwrap();
+            inner.allocated = (DYNAMIC_UID_MIN..=DYNAMIC_UID_MAX).collect();
+            inner.next_uid = DYNAMIC_UID_MIN;
+        }
+
+        assert!(matches!(
+            exhausted.allocate("exhausted.service"),
+            Err(DynamicUserError::PoolExhausted)
+        ));
+    }
 }

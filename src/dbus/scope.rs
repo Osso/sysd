@@ -63,3 +63,24 @@ impl ScopeInterface {
         "scope".to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn scope_interface_abandon_is_idempotent_and_reports_controller() {
+        let state = Arc::new(RwLock::new(ScopeState {
+            name: "session-test.scope".to_string(),
+            cgroup_path: "/sys/fs/cgroup/session-test.scope".to_string(),
+            abandoned: false,
+        }));
+        let scope = ScopeInterface::new(state.clone(), Arc::new(CgroupManager::default()));
+
+        assert_eq!(scope.controller().await, "scope");
+        scope.abandon().await.unwrap();
+        assert!(state.read().await.abandoned);
+        scope.abandon().await.unwrap();
+        assert!(state.read().await.abandoned);
+    }
+}

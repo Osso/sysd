@@ -33,7 +33,7 @@ fn notify_with_fds(pid: u32, fields: &[(&str, &str)], fds: Vec<i32>) -> NotifyMe
     }
 }
 
-fn pipe_fds() -> [libc::c_int; 2] {
+fn runtime_pipe_fds() -> [libc::c_int; 2] {
     let mut fds = [0; 2];
     let result = unsafe { libc::pipe(fds.as_mut_ptr()) };
     assert_eq!(result, 0);
@@ -129,7 +129,7 @@ fn dispatch_notify_stores_and_removes_named_file_descriptors() {
         service.service.file_descriptor_store_max = Some(2);
     });
     manager.waiting_ready.insert(77, "store.service".to_string());
-    let fds = pipe_fds();
+    let fds = runtime_pipe_fds();
 
     manager.dispatch_notify(&notify_with_fds(
         77,
@@ -155,8 +155,8 @@ fn fdstore_enforces_file_descriptor_store_limit() {
         service.service.file_descriptor_store_max = Some(1);
     });
     manager.waiting_ready.insert(88, "limited.service".to_string());
-    let first = pipe_fds();
-    let second = pipe_fds();
+    let first = runtime_pipe_fds();
+    let second = runtime_pipe_fds();
 
     manager.handle_fdstore(&notify_with_fds(
         88,
@@ -323,7 +323,7 @@ fn apply_restart_decision_marks_rate_limited_restart_as_failed() {
 #[tokio::test]
 async fn cleanup_after_exit_removes_runtime_state_when_not_restarting() {
     let mut manager = manager_with_service("done.service", |_| {});
-    let fds = pipe_fds();
+    let fds = runtime_pipe_fds();
     manager
         .watchdog_deadlines
         .insert("done.service".to_string(), std::time::Instant::now());
@@ -353,7 +353,7 @@ async fn cleanup_after_exit_keeps_restart_resources_for_auto_restart() {
     let mut state = ServiceState::new();
     state.set_auto_restart(Duration::from_secs(1));
     manager.states.insert("restart.service".to_string(), state);
-    let fds = pipe_fds();
+    let fds = runtime_pipe_fds();
     manager.dynamic_uids.insert("restart.service".to_string(), 61001);
     manager.fd_store.insert(
         "restart.service".to_string(),

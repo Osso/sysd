@@ -263,3 +263,38 @@ fn dependency_start_errors_fail_required_units_and_ignore_optional_units() {
         )
         .is_ok());
 }
+
+#[test]
+fn user_runtime_and_notify_path_helpers_follow_mode_and_environment() {
+    let root = temp_dir("runtime-env");
+    let original_runtime = std::env::var("XDG_RUNTIME_DIR").ok();
+    unsafe {
+        std::env::set_var("XDG_RUNTIME_DIR", &root.0);
+    }
+
+    assert_eq!(Manager::user_runtime_dir().as_deref(), Some(root.0.as_path()));
+    assert!(!Manager::is_lingering("definitely-missing-sysd-user"));
+
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+    let uid_runtime = PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() }));
+    assert_eq!(
+        Manager::user_runtime_dir(),
+        uid_runtime.exists().then_some(uid_runtime)
+    );
+
+    let system = Manager::new();
+    let user = Manager::new_user();
+    assert_eq!(system.notify_socket_path_for_mode(), NOTIFY_SOCKET_PATH);
+    assert!(user
+        .notify_socket_path_for_mode()
+        .ends_with("/sysd/notify"));
+
+    unsafe {
+        match original_runtime {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
+}
