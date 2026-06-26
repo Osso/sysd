@@ -17,6 +17,15 @@ fn insert_service(manager: &mut Manager, name: &str, service: Service) {
         .insert(name.to_string(), ServiceState::new());
 }
 
+fn insert_target(manager: &mut Manager, name: &str) {
+    manager
+        .units
+        .insert(name.to_string(), Unit::Target(Target::new(name.to_string())));
+    manager
+        .states
+        .insert(name.to_string(), ServiceState::new());
+}
+
 struct TempDir(PathBuf);
 
 impl Drop for TempDir {
@@ -406,6 +415,64 @@ async fn get_boot_plan_reports_missing_targets() {
         manager.get_boot_plan("definitely-missing").await,
         Err(ManagerError::NotFound(name)) if name == "definitely-missing.service"
     ));
+}
+
+#[tokio::test]
+async fn restart_normalizes_names_and_returns_start_error_after_not_active_stop() {
+    let mut manager = Manager::new();
+    insert_service(&mut manager, "empty.service", service("empty.service", |_| {}));
+
+    assert!(matches!(
+        manager.restart("empty").await,
+        Err(ManagerError::Spawn(SpawnError::NoExecStart(name))) if name == "empty.service"
+    ));
+    assert!(manager.status("empty").is_some());
+}
+
+#[tokio::test]
+async fn switch_target_stops_active_units_and_marks_target_reached() {
+    let mut manager = Manager::new();
+    insert_target(&mut manager, "rescue.target");
+    insert_service(&mut manager, "old.service", service("old.service", |_| {}));
+    manager
+        .states
+        .get_mut("old.service")
+        .unwrap()
+        .set_running(0);
+
+    let stopped = manager.switch_target("rescue").await.unwrap();
+
+    assert_eq!(stopped, ["old.service".to_string()]);
+    assert!(!manager.status("old").unwrap().is_active());
+    assert!(manager.status("rescue").unwrap().is_active());
+}
+
+#[test]
+fn cleanup_stopped_service_releases_dynamic_uid_and_stored_fds() {
+    let mut manager = Manager::new();
+    insert_service(
+        &mut manager,
+        "dynamic.service",
+        service("dynamic.service", |_| {}),
+    );
+    let (uid, _) = manager
+        .dynamic_user_manager
+        .allocate("dynamic.service")
+        .unwrap();
+    let mut fds = [0; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+
+    manager.dynamic_uids.insert("dynamic.service".to_string(), uid);
+    manager.fd_store.insert(
+        "dynamic.service".to_string(),
+        vec![("pipe-read".to_string(), fds[0])],
+    );
+
+    manager.cleanup_stopped_service("dynamic.service");
+
+    assert!(!manager.dynamic_uids.contains_key("dynamic.service"));
+    assert!(!manager.fd_store.contains_key("dynamic.service"));
+    assert_eq!(unsafe { libc::close(fds[1]) }, 0);
 }
 
 #[tokio::test]
