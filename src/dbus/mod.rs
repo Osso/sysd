@@ -135,6 +135,9 @@ pub fn unit_object_path(unit_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cgroups::CgroupManager;
+    use crate::dbus::scope::ScopeState;
+    use crate::dbus::unit::UnitState;
 
     #[test]
     fn test_unit_object_path() {
@@ -150,5 +153,43 @@ mod tests {
             unit_object_path("session-1.scope"),
             "/org/freedesktop/systemd1/unit/session_2d1_2escope"
         );
+    }
+
+    #[tokio::test]
+    async fn dbus_server_registers_units_and_scopes_on_existing_connection() {
+        let Ok(connection) = Connection::session().await else {
+            return;
+        };
+        let server = DbusServer { connection };
+        let unit_id = format!("sysd-test-{}.service", std::process::id());
+        let scope_id = format!("sysd-test-{}.scope", std::process::id());
+        let unit_state = Arc::new(RwLock::new(UnitState::new(
+            unit_id.clone(),
+            "Test Unit".to_string(),
+        )));
+
+        server
+            .register_unit(&unit_id, UnitInterface::new(Arc::clone(&unit_state)))
+            .await
+            .unwrap();
+        assert!(server.connection().unique_name().is_some());
+        assert!(server.unregister_unit(&unit_id).await.unwrap());
+
+        let scope_unit = UnitInterface::new(unit_state);
+        let scope_state = Arc::new(RwLock::new(ScopeState {
+            name: scope_id.clone(),
+            cgroup_path: "/sys/fs/cgroup/user.slice/sysd-test.scope".to_string(),
+            abandoned: false,
+        }));
+        let scope = ScopeInterface::new(scope_state, Arc::new(CgroupManager::default()));
+
+        server
+            .register_scope(&scope_id, scope_unit, scope)
+            .await
+            .unwrap();
+        let path = make_object_path(&scope_id);
+        let object_server = server.connection().object_server();
+        let _ = object_server.remove::<UnitInterface, _>(path.clone()).await;
+        let _ = object_server.remove::<ScopeInterface, _>(path).await;
     }
 }
