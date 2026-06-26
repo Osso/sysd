@@ -745,5 +745,5 @@ pub async fn load_unit(path: &Path) -> Result<Unit, ParseError> {
 }
 
 #[cfg(test)]
-#[path = "parse_units_tests.rs"]
+#[path = "parse_units_all_tests.rs"]
 mod tests;

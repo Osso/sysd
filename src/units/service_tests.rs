@@ -60,6 +60,40 @@ fn test_std_output_parse() {
 }
 
 #[test]
+fn kill_input_device_and_proc_modes_parse_all_values() {
+    assert_eq!(
+        KillMode::parse("control-group"),
+        Some(KillMode::ControlGroup)
+    );
+    assert_eq!(KillMode::parse("process"), Some(KillMode::Process));
+    assert_eq!(KillMode::parse("mixed"), Some(KillMode::Mixed));
+    assert_eq!(KillMode::parse("none"), Some(KillMode::None));
+    assert_eq!(KillMode::parse("bad"), None);
+
+    assert_eq!(StdInput::parse("null"), Some(StdInput::Null));
+    assert_eq!(StdInput::parse("/dev/null"), Some(StdInput::Null));
+    assert_eq!(StdInput::parse("tty"), Some(StdInput::Tty));
+    assert_eq!(StdInput::parse("tty-force"), Some(StdInput::TtyForce));
+    assert_eq!(StdInput::parse("tty-fail"), Some(StdInput::TtyFail));
+    assert_eq!(StdInput::parse("pipe"), None);
+
+    assert_eq!(DevicePolicy::parse("auto"), Some(DevicePolicy::Auto));
+    assert_eq!(DevicePolicy::parse("closed"), Some(DevicePolicy::Closed));
+    assert_eq!(DevicePolicy::parse("strict"), Some(DevicePolicy::Strict));
+    assert_eq!(DevicePolicy::parse("unknown"), None);
+
+    assert_eq!(ProtectHome::parse("tmpfs"), Some(ProtectHome::Tmpfs));
+    assert_eq!(ProtectHome::parse("unknown"), None);
+
+    assert_eq!(
+        ProtectProc::parse("ptraceable"),
+        Some(ProtectProc::Ptraceable)
+    );
+    assert_eq!(ProtectProc::parse("noaccess"), Some(ProtectProc::NoAccess));
+    assert_eq!(ProtectProc::parse("unknown"), None);
+}
+
+#[test]
 fn test_std_output_default() {
     assert_eq!(StdOutput::default(), StdOutput::Journal);
 }
@@ -70,7 +104,17 @@ fn test_parse_duration() {
     assert_eq!(parse_duration("5s"), Some(Duration::from_secs(5)));
     assert_eq!(parse_duration("100ms"), Some(Duration::from_millis(100)));
     assert_eq!(parse_duration("2min"), Some(Duration::from_secs(120)));
+    assert_eq!(parse_duration("3sec"), Some(Duration::from_secs(3)));
     assert_eq!(parse_duration("1h"), Some(Duration::from_secs(3600)));
+    assert_eq!(parse_duration("2d"), Some(Duration::from_secs(2 * 86400)));
+    assert_eq!(
+        parse_duration("2w"),
+        Some(Duration::from_secs(2 * 7 * 86400))
+    );
+    assert_eq!(
+        parse_duration("2week"),
+        Some(Duration::from_secs(2 * 7 * 86400))
+    );
     assert_eq!(parse_duration("30"), Some(Duration::from_secs(30)));
 }
 
