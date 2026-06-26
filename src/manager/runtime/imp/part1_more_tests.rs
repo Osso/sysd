@@ -135,3 +135,61 @@ async fn propagate_binds_to_stop_stops_active_bound_services() {
     assert_eq!(state.active, ActiveState::Inactive);
     assert_eq!(state.sub, SubState::Exited);
 }
+
+#[tokio::test]
+async fn handle_reaped_service_applies_policy_and_cleans_runtime_state() {
+    let mut manager = user_manager_with_service("reaped.service", |service| {
+        service.service.restart = RestartPolicy::No;
+    });
+    manager.processes.clear();
+    manager.watchdog_deadlines.insert(
+        "reaped.service".to_string(),
+        std::time::Instant::now() + Duration::from_secs(30),
+    );
+    manager
+        .fd_store
+        .insert("reaped.service".to_string(), Vec::new());
+
+    manager
+        .handle_reaped_service("reaped.service".to_string(), 0)
+        .await;
+
+    let state = manager.states.get("reaped.service").unwrap();
+    assert_eq!(state.active, ActiveState::Inactive);
+    assert_eq!(state.sub, SubState::Exited);
+    assert_eq!(state.exit_code, Some(0));
+    assert!(!manager.watchdog_deadlines.contains_key("reaped.service"));
+    assert!(!manager.fd_store.contains_key("reaped.service"));
+}
+
+#[tokio::test]
+async fn process_restarts_starts_due_service_with_real_executor() {
+    let Some(executor) = local_executor_path() else {
+        return;
+    };
+    let mut manager = user_manager_with_service("restart.service", |service| {
+        service.service.exec_start = vec!["/bin/true".to_string()];
+    });
+    manager.executor_path = executor;
+    manager
+        .states
+        .get_mut("restart.service")
+        .unwrap()
+        .set_auto_restart(Duration::ZERO);
+
+    manager.process_restarts().await;
+
+    let state = manager.states.get("restart.service").unwrap();
+    assert_eq!(state.active, ActiveState::Active);
+    assert_eq!(state.sub, SubState::Running);
+    assert!(state.restart_at.is_none());
+    let mut child = manager.processes.remove("restart.service").unwrap();
+    assert!(child.wait().await.unwrap().success());
+}
+
+fn local_executor_path() -> Option<String> {
+    let path = std::env::current_dir()
+        .ok()?
+        .join("target/x86_64-unknown-linux-musl/debug/sysd-executor");
+    path.exists().then(|| path.to_string_lossy().to_string())
+}
